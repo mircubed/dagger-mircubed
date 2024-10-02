@@ -74,7 +74,7 @@ This will generate a `dagger.json` module metadata file, an initial `dagger/main
 dagger init --sdk=python --source=./dagger
 ```
 
-This will generate a `dagger.json` module metadata file, initial `dagger/src/main/__init__.py` source code template, `dagger/pyproject.toml` and `dagger/requirements.lock` files, as well as a generated `dagger/sdk` folder for local development.
+This will generate a `dagger.json` module metadata file, initial `dagger/src/main/__init__.py` source code template, `dagger/pyproject.toml` and `dagger/uv.lock` files, as well as a generated `dagger/sdk` folder for local development.
 </TabItem>
 <TabItem value="TypeScript">
 
@@ -142,6 +142,14 @@ In this Dagger module, each Dagger Function performs a different operation:
 </TabItem>
 </Tabs>
 
+:::tip IDE SUPPORT
+If you're writing the code above in an IDE, you can easily [configure your IDE to recognize your Dagger module](../manuals/developer/ide-integration.mdx). This can significantly speed things up, by giving you automatic type-checking, intelligent code completion, and other IDE features when writing Dagger module code.
+:::
+
+:::warning
+The Dagger module's class name is automatically generated based on the name of the directory where `dagger init` was executed. If you cloned the example application into a directory other than the default (`hello-dagger`), or if you used a different TypeScript application altogether, the auto-generated class name will be different and the code samples above will not work until you update them to use the correct name. Alternatively, you can override Dagger's default class name by specifying a name via the `--name` argument to `dagger init`.
+:::
+
 ### Run the pipeline
 
 Call a Dagger Function to run the pipeline:
@@ -156,7 +164,7 @@ This single command runs the application's tests, then builds and publishes it a
 
 If you signed up for Dagger Cloud, the output of the previous command would have also included a link to visualize the pipeline run on Dagger Cloud. Click the link in your browser to see a complete breakdown  of the steps performed by the pipeline. Here's what you should see:
 
-![login](/img/cloud/hello-dagger.gif)
+![login](/img/current_docs/quickstart/trace.gif)
 
 This is called a "Trace". It represents a single run of a Daggerized pipeline, and shows a detailed log and output of each step in the pipeline. If there are any errors in the run, Dagger Cloud automatically brings you to the first error in the list.
 

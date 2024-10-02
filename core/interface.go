@@ -11,6 +11,7 @@ import (
 
 	"github.com/dagger/dagger/dagql"
 	"github.com/dagger/dagger/dagql/call"
+	"github.com/dagger/dagger/engine/server/resource"
 	"github.com/dagger/dagger/engine/slog"
 )
 
@@ -115,7 +116,7 @@ func (iface *InterfaceType) loadImpl(ctx context.Context, id *call.ID) (*loadedI
 	return loadedImpl, nil
 }
 
-func (iface *InterfaceType) CollectCoreIDs(ctx context.Context, value dagql.Typed, ids map[digest.Digest]*call.ID) error {
+func (iface *InterfaceType) CollectCoreIDs(ctx context.Context, value dagql.Typed, ids map[digest.Digest]*resource.ID) error {
 	switch value := value.(type) {
 	case dagql.Instance[*InterfaceAnnotatedValue]:
 		mod, ok := value.Self.UnderlyingType.SourceMod().(*Module)
@@ -217,10 +218,7 @@ func (iface *InterfaceType) Install(ctx context.Context, dag *dagql.Server) erro
 			Module:      iface.mod.IDModule(),
 		}
 
-		argTypeDefsByName := map[string]*TypeDef{}
 		for _, argMetadata := range fnTypeDef.Args {
-			argTypeDefsByName[argMetadata.Name] = argMetadata.TypeDef
-
 			// check whether this is a pre-existing object from a dependency module
 			argModType, ok, err := iface.mod.Deps.ModTypeFor(ctx, argMetadata.TypeDef)
 			if err != nil {
@@ -278,6 +276,7 @@ func (iface *InterfaceType) Install(ctx context.Context, dag *dagql.Server) erro
 					Inputs:       callInputs,
 					ParentTyped:  runtimeVal,
 					ParentFields: runtimeVal.Fields,
+					Server:       dag,
 				})
 				if err != nil {
 					return nil, fmt.Errorf("failed to call interface function %s.%s: %w", ifaceName, fieldDef.Name, err)

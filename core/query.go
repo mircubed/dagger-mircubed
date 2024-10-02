@@ -15,6 +15,7 @@ import (
 	"github.com/dagger/dagger/dagql/call"
 	"github.com/dagger/dagger/engine"
 	"github.com/dagger/dagger/engine/buildkit"
+	"github.com/dagger/dagger/engine/server/resource"
 )
 
 // Query forms the root of the DAG and houses all necessary state and
@@ -61,7 +62,7 @@ type Server interface {
 	// Add client-isolated resources like secrets, sockets, etc. to the current client's session based
 	// on anything embedded in the given ID. skipTopLevel, if true, will result in the leaf selection
 	// of the ID to be skipped when walking the ID to find these resources.
-	AddClientResourcesFromID(ctx context.Context, id *call.ID, sourceClientID string, skipTopLevel bool) error
+	AddClientResourcesFromID(ctx context.Context, id *resource.ID, sourceClientID string, skipTopLevel bool) error
 
 	// The auth provider for the current client
 	Auth(context.Context) (*auth.RegistryAuthProvider, error)
@@ -93,6 +94,11 @@ type Server interface {
 	// A map of unique IDs for the result of a given cache entry set query, allowing further queries on the result
 	// to operate on a stable result rather than the live state.
 	EngineCacheEntrySetMap(context.Context) (*sync.Map, error)
+
+	// The nearest ancestor client that is not a module (either a caller from the host like the CLI
+	// or a nested exec). Useful for figuring out where local sources should be resolved from through
+	// chains of dependency modules.
+	NonModuleParentClientMetadata(context.Context) (*engine.ClientMetadata, error)
 }
 
 func NewRoot(srv Server) *Query {

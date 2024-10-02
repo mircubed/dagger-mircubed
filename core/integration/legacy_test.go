@@ -12,6 +12,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dagger/dagger/internal/testutil"
 	"github.com/dagger/dagger/testctx"
 )
 
@@ -297,6 +298,45 @@ func (m *Test) Skip() *dagger.Container {
 	require.Equal(t, "hello\n", out)
 }
 
+func (LegacySuite) TestExecWithSkipEntrypointCompat(ctx context.Context, t *testctx.T) {
+	// Changed in dagger/dagger#8281
+	//
+	// Ensure that old schemas still have skipEntrypoint API
+	//
+	// Tests backwards compatibility with `skipEntrypoint: false` option.
+	// Doesn't work on Go because it can't distinguish between unset and
+	// empty value.
+
+	res := struct {
+		Container struct {
+			From struct {
+				WithEntrypoint struct {
+					WithExec struct {
+						Stdout string
+					}
+				}
+			}
+		}
+	}{}
+	err := testutil.Query(t,
+		`{
+            container {
+                from(address: "`+alpineImage+`") {
+                    withEntrypoint(args: ["sh", "-c"]) {
+                        withExec(args: ["echo $HOME"], skipEntrypoint: false) {
+                            stdout
+                        }
+                    }
+                }
+			}
+		}`, &res, &testutil.QueryOptions{
+			Version: "v0.12.6",
+		})
+
+	require.NoError(t, err)
+	require.Equal(t, "/root\n", res.Container.From.WithEntrypoint.WithExec.Stdout)
+}
+
 func (LegacySuite) TestLegacyNoExec(ctx context.Context, t *testctx.T) {
 	// Changed in dagger/dagger#7857
 	//
@@ -398,4 +438,203 @@ func (m *Dep) Dummy() error {
 
 	require.NoError(t, err)
 	require.JSONEq(t, `{"test": {"test": ""}}`, out)
+}
+
+func (LegacySuite) TestGoAlias(ctx context.Context, t *testctx.T) {
+	// Changed in dagger/dagger#7831
+	//
+	// Ensure that old dagger aliases are preserved.
+
+	c := connect(ctx, t)
+
+	mod := daggerCliBase(t, c).
+		With(daggerExec("init", "--name=test", "--sdk=go", "--source=.")).
+		WithNewFile("dagger.json", `{"name": "test", "sdk": "go", "source": ".", "engineVersion": "v0.11.9"}`).
+		WithNewFile("main.go", `package main
+
+type Test struct {}
+
+func (m *Test) Container(ctr *Container, msg string) *Container {
+	return ctr.WithExec([]string{"echo", "hello " + msg})
+}
+
+func (m *Test) Proto(proto NetworkProtocol) NetworkProtocol {
+	switch proto {
+	case Tcp:
+		return Udp
+	case Udp:
+		return Tcp
+	default:
+		panic("nope")
+	}
+}
+`,
+		)
+	out, err := mod.
+		With(daggerCall("container", "--ctr=alpine", "--msg=world", "stdout")).
+		Stdout(ctx)
+	require.NoError(t, err)
+	require.Contains(t, out, "hello world")
+
+	out, err = mod.
+		With(daggerCall("proto", "--proto=TCP")).
+		Stdout(ctx)
+	require.NoError(t, err)
+	require.Contains(t, out, "UDP")
+}
+
+func (LegacySuite) TestPipeline(ctx context.Context, t *testctx.T) {
+	// Changed in dagger/dagger#8281
+	//
+	// Ensure that pipeline still exists in old schemas.
+
+	res := struct {
+		Pipeline struct {
+			Version string
+		}
+	}{}
+	err := testutil.Query(t,
+		`{
+			pipeline(name: "foo") {
+				version
+			}
+		}`, &res, &testutil.QueryOptions{
+			Version: "v0.12.6",
+		})
+
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Pipeline.Version)
+}
+
+func (LegacySuite) TestModuleSourceCloneURL(ctx context.Context, t *testctx.T) {
+	// Changed in dagger/dagger#8281
+	//
+	// Ensure that cloneURL still exists in old schemas.
+
+	res := struct {
+		ModuleSource struct {
+			AsGitSource struct {
+				CloneRef string
+				CloneURL string
+			}
+		}
+	}{}
+	err := testutil.Query(t,
+		`{
+			moduleSource(refString: "https://github.com/dagger/dagger.git@v0.12.6") {
+				asGitSource {
+					cloneRef
+					cloneURL
+				}
+			}
+		}`, &res, &testutil.QueryOptions{
+			Version: "v0.12.6",
+		})
+
+	require.NoError(t, err)
+	require.Equal(t, "https://github.com/dagger/dagger.git", res.ModuleSource.AsGitSource.CloneRef)
+	require.Equal(t, res.ModuleSource.AsGitSource.CloneRef, res.ModuleSource.AsGitSource.CloneURL)
+}
+
+func (LegacySuite) TestGoCodegenOptionals(ctx context.Context, t *testctx.T) {
+	// Changed in dagger/dagger#8106
+	//
+	// Ensure that Go's codegen produces a required argument in old schemas
+	// when there's a non-null with a default.
+
+	c := connect(ctx, t)
+
+	out, err := daggerCliBase(t, c).
+		With(daggerExec("init", "--name=test", "--sdk=go", "--source=.")).
+		WithWorkdir("/work").
+		WithNewFile("dagger.json", `{"name": "test", "sdk": "go", "source": ".", "engineVersion": "v0.12.7"}`).
+		WithNewFile("main.go", `package main
+
+import "context"
+
+type Test struct {}
+
+func (m *Test) Greet(ctx context.Context) (string, error) {
+    // In v0.13 *name* is an optional argument
+    return dag.Dep("Dagger").Greeting(ctx)
+}
+`,
+		).
+		WithWorkdir("/work/dep").
+		With(daggerExec("init", "--name=dep", "--sdk=python")).
+		With(sdkSource("python", `import dagger
+
+@dagger.object_type
+class Dep:
+    name: str = "World"
+
+    @dagger.function
+    def greeting(self) -> str:
+        return f"Hello, {self.name}!"
+`,
+		)).
+		WithWorkdir("/work").
+		With(daggerExec("install", "./dep")).
+		With(daggerCall("greet")).
+		Stdout(ctx)
+
+	require.NoError(t, err)
+	require.Equal(t, "Hello, Dagger!", out)
+}
+
+func (LegacySuite) TestGitWithKeepDir(ctx context.Context, t *testctx.T) {
+	// Changed in dagger/dagger#8318
+	//
+	// Ensure that the old schemas default to keeping KeepGitDir.
+
+	type result struct {
+		Commit string
+		Tree   struct {
+			File struct {
+				Contents string
+			}
+		}
+	}
+
+	res := struct {
+		Git struct {
+			Commit result
+		}
+	}{}
+
+	err := testutil.Query(t,
+		`{
+			git(url: "github.com/dagger/dagger", keepGitDir: true) {
+				commit(id: "c80ac2c13df7d573a069938e01ca13f7a81f0345") {
+					commit
+					tree {
+						file(path: ".git/HEAD") {
+							contents
+						}
+					}
+				}
+			}
+		}`, &res, &testutil.QueryOptions{
+			Version: "v0.12.6",
+		})
+	require.NoError(t, err)
+	require.Equal(t, "c80ac2c13df7d573a069938e01ca13f7a81f0345", res.Git.Commit.Commit)
+	require.Equal(t, "c80ac2c13df7d573a069938e01ca13f7a81f0345\n", res.Git.Commit.Tree.File.Contents)
+
+	err = testutil.Query(t,
+		`{
+			git(url: "github.com/dagger/dagger") {
+				commit(id: "c80ac2c13df7d573a069938e01ca13f7a81f0345") {
+					commit
+					tree {
+						file(path: ".git/HEAD") {
+							contents
+						}
+					}
+				}
+			}
+		}`, &res, &testutil.QueryOptions{
+			Version: "v0.12.6",
+		})
+	require.ErrorContains(t, err, ".git/HEAD: no such file or directory")
 }

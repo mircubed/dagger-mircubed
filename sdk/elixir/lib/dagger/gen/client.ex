@@ -740,35 +740,19 @@ defmodule Dagger.Client do
   end
 
   @doc "Create a new module source instance from a source ref string."
-  @spec module_source(t(), String.t(), [{:stable, boolean() | nil}]) :: Dagger.ModuleSource.t()
+  @spec module_source(t(), String.t(), [
+          {:stable, boolean() | nil},
+          {:rel_host_path, String.t() | nil}
+        ]) :: Dagger.ModuleSource.t()
   def module_source(%__MODULE__{} = client, ref_string, optional_args \\ []) do
     query_builder =
       client.query_builder
       |> QB.select("moduleSource")
       |> QB.put_arg("refString", ref_string)
       |> QB.maybe_put_arg("stable", optional_args[:stable])
+      |> QB.maybe_put_arg("relHostPath", optional_args[:rel_host_path])
 
     %Dagger.ModuleSource{
-      query_builder: query_builder,
-      client: client.client
-    }
-  end
-
-  @deprecated "Explicit pipeline creation is now a no-op"
-  @doc "Creates a named sub-pipeline."
-  @spec pipeline(t(), String.t(), [
-          {:description, String.t() | nil},
-          {:labels, [Dagger.PipelineLabel.t()]}
-        ]) :: Dagger.Client.t()
-  def pipeline(%__MODULE__{} = client, name, optional_args \\ []) do
-    query_builder =
-      client.query_builder
-      |> QB.select("pipeline")
-      |> QB.put_arg("name", name)
-      |> QB.maybe_put_arg("description", optional_args[:description])
-      |> QB.maybe_put_arg("labels", optional_args[:labels])
-
-    %Dagger.Client{
       query_builder: query_builder,
       client: client.client
     }

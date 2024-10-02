@@ -35,6 +35,7 @@ func (s *moduleSchema) Install() {
 		dagql.Func("moduleSource", s.moduleSource).
 			Doc(`Create a new module source instance from a source ref string.`).
 			ArgDoc("refString", `The string ref representation of the module source`).
+			ArgDoc("relHostPath", `The relative path to the module root from the host directory`).
 			ArgDoc("stable", `If true, enforce that the source is a stable version for source kinds that support versioning.`),
 
 		dagql.Func("moduleDependency", s.moduleDependency).
@@ -155,6 +156,7 @@ func (s *moduleSchema) Install() {
 			Impure(`Queries live caller-specific data from their filesystem.`).
 			ArgDoc("path", `The path on the caller's filesystem to load.`).
 			ArgDoc("viewName", `If set, the name of the view to apply to the path.`).
+			ArgDoc("ignore", `Patterns to ignore when loading the directory.`).
 			Doc(`Load a directory from the caller optionally with a given view applied.`),
 
 		dagql.Func("views", s.moduleSourceViews).
@@ -168,6 +170,13 @@ func (s *moduleSchema) Install() {
 			ArgDoc("name", `The name of the view to set.`).
 			ArgDoc("patterns", `The patterns to set as the view filters.`).
 			Doc(`Update the module source with a new named view.`),
+
+		dagql.Func("digest", s.moduleSourceDigest).
+			Doc(
+				`Return the module source's content digest.
+				The format of the digest is not guaranteed to be stable between releases of Dagger.
+				It is guaranteed to be stable between invocations of the same Dagger engine.`,
+			),
 	}.Install(s.dag)
 
 	dagql.Fields[*core.ModuleSourceView]{
@@ -182,6 +191,10 @@ func (s *moduleSchema) Install() {
 	dagql.Fields[*core.GitModuleSource]{
 		dagql.Func("htmlURL", s.gitModuleSourceHTMLURL).
 			Doc(`The URL to the source's git repo in a web browser`),
+		dagql.Func("cloneURL", s.gitModuleSourceCloneURL).
+			View(BeforeVersion("v0.13.0")).
+			Doc(`The URL to clone the root of the git repo from`).
+			Deprecated("Use `cloneRef` instead. `cloneRef` supports both URL-style and SCP-like SSH references"),
 	}.Install(s.dag)
 
 	dagql.Fields[*core.ModuleDependency]{}.Install(s.dag)
@@ -247,7 +260,9 @@ func (s *moduleSchema) Install() {
 			ArgDoc("name", `The name of the argument`).
 			ArgDoc("typeDef", `The type of the argument`).
 			ArgDoc("description", `A doc string for the argument, if any`).
-			ArgDoc("defaultValue", `A default value to use for this argument if not explicitly set by the caller, if any`),
+			ArgDoc("defaultValue", `A default value to use for this argument if not explicitly set by the caller, if any`).
+			ArgDoc("defaultPath", `If the argument is a Directory or File type, default to load path from context directory, relative to root directory.`).
+			ArgDoc("ignore", `Patterns to ignore when loading the contextual argument value.`),
 	}.Install(s.dag)
 
 	dagql.Fields[*core.FunctionArg]{}.Install(s.dag)
@@ -478,12 +493,39 @@ func (s *moduleSchema) functionWithArg(ctx context.Context, fn *core.Function, a
 	TypeDef      core.TypeDefID
 	Description  string    `default:""`
 	DefaultValue core.JSON `default:""`
+	DefaultPath  string    `default:""`
+	Ignore       []string  `default:"[]"`
 }) (*core.Function, error) {
 	argType, err := args.TypeDef.Load(ctx, s.dag)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode arg type: %w", err)
 	}
-	return fn.WithArg(args.Name, argType.Self, args.Description, args.DefaultValue), nil
+
+	// Check if both values are used, return an error if so.
+	if args.DefaultValue != nil && args.DefaultPath != "" {
+		return nil, fmt.Errorf("cannot set both default value and default path from context")
+	}
+
+	// Check if default path from context is set for non-directory or non-file type
+	if argType.Self.Kind == core.TypeDefKindObject && args.DefaultPath != "" &&
+		(argType.Self.AsObject.Value.Name != "Directory" && argType.Self.AsObject.Value.Name != "File") {
+		return nil, fmt.Errorf("can only set default path for Directory or File type, not %s", argType.Self.AsObject.Value.Name)
+	}
+
+	// Check if ignore is set for non-directory type
+	if argType.Self.Kind == core.TypeDefKindObject &&
+		len(args.Ignore) > 0 && argType.Self.AsObject.Value.Name != "Directory" {
+		return nil, fmt.Errorf("can only set ignore for Directory type, not %s", argType.Self.AsObject.Value.Name)
+	}
+
+	// When using a default path SDKs can't set a default value and the argument
+	// may be non-nullable, so we need to enforce it as optional.
+	td := argType.Self
+	if args.DefaultPath != "" {
+		td = td.WithOptional(true)
+	}
+
+	return fn.WithArg(args.Name, td, args.Description, args.DefaultValue, args.DefaultPath, args.Ignore), nil
 }
 
 func (s *moduleSchema) moduleDependency(
@@ -708,7 +750,7 @@ func (s *moduleSchema) moduleInitialize(
 	if inst.Self.NameField == "" || inst.Self.SDKConfig == "" {
 		return nil, fmt.Errorf("module name and SDK must be set")
 	}
-	mod, err := inst.Self.Initialize(ctx, inst.ID(), dagql.CurrentID(ctx))
+	mod, err := inst.Self.Initialize(ctx, inst.ID(), dagql.CurrentID(ctx), s.dag)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize module: %w", err)
 	}
@@ -921,7 +963,7 @@ func (s *moduleSchema) updateCodegenAndRuntime(
 
 	if src.Self.WithInitConfig != nil &&
 		src.Self.WithInitConfig.Merge &&
-		mod.SDKConfig != SDKGo {
+		mod.SDKConfig != string(SDKGo) {
 		return fmt.Errorf("merge is only supported for Go SDKs")
 	}
 

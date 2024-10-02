@@ -34,11 +34,10 @@ func (build *Builder) pythonSDKContent(ctx context.Context) (*sdkContent, error)
 	rootfs := dag.Directory().WithDirectory("/", build.source.Directory("sdk/python"), dagger.DirectoryWithDirectoryOpts{
 		Include: []string{
 			"pyproject.toml",
+			"uv.lock",
 			"src/**/*.py",
 			"src/**/*.typed",
-			"codegen/src/**/*.py",
-			"codegen/pyproject.toml",
-			"codegen/uv.lock",
+			"codegen/",
 			"runtime/",
 			"LICENSE",
 			"README.md",
@@ -51,8 +50,11 @@ func (build *Builder) pythonSDKContent(ctx context.Context) (*sdkContent, error)
 			ForcedCompression: dagger.Uncompressed,
 		})
 
-	sdkDir := dag.Container().
-		From(consts.AlpineImage).
+	sdkDir := dag.
+		Alpine(dagger.AlpineOpts{
+			Branch: consts.AlpineVersion,
+		}).
+		Container().
 		WithMountedDirectory("/out", dag.Directory()).
 		WithMountedFile("/sdk.tar", sdkCtrTarball).
 		WithExec([]string{"tar", "xf", "/sdk.tar", "-C", "/out"}).
@@ -99,7 +101,11 @@ func (build *Builder) typescriptSDKContent(ctx context.Context) (*sdkContent, er
 			ForcedCompression: dagger.Uncompressed,
 		})
 
-	sdkDir := dag.Container().From("alpine:"+consts.AlpineVersion).
+	sdkDir := dag.
+		Alpine(dagger.AlpineOpts{
+			Branch: consts.AlpineVersion,
+		}).
+		Container().
 		WithMountedDirectory("/out", dag.Directory()).
 		WithMountedFile("/sdk.tar", sdkCtrTarball).
 		WithExec([]string{"tar", "xf", "/sdk.tar", "-C", "/out"}).

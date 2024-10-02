@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/dagger/dagger/.dagger/build"
@@ -40,6 +41,7 @@ func (sdk *SDK) All() *AllSDK {
 type sdkBase interface {
 	Lint(ctx context.Context) error
 	Test(ctx context.Context) error
+	TestPublish(ctx context.Context, tag string) error
 	Generate(ctx context.Context) (*dagger.Directory, error)
 	Bump(ctx context.Context, version string) (*dagger.Directory, error)
 }
@@ -58,7 +60,7 @@ func (sdk *SDK) allSDKs() []sdkBase {
 }
 
 func (dev *DaggerDev) installer(ctx context.Context, name string) (func(*dagger.Container) *dagger.Container, error) {
-	engineSvc, err := dev.Engine().Service(ctx, name, dev.Version)
+	engineSvc, err := dev.Engine().Service(ctx, name, nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -89,8 +91,11 @@ func (dev *DaggerDev) introspection(ctx context.Context, installer func(*dagger.
 	if err != nil {
 		return nil, err
 	}
-	return dag.Container().
-		From(consts.AlpineImage).
+	return dag.
+		Alpine(dagger.AlpineOpts{
+			Branch: consts.AlpineVersion,
+		}).
+		Container().
 		With(installer).
 		WithFile("/usr/local/bin/codegen", builder.CodegenBinary()).
 		WithExec([]string{"codegen", "introspect", "-o", "/schema.json"}).
@@ -116,9 +121,12 @@ type gitPublishOpts struct {
 func gitPublish(ctx context.Context, opts gitPublishOpts) error {
 	base := opts.sourceEnv
 	if base == nil {
-		base = dag.Container().
-			From(consts.AlpineImage).
-			WithExec([]string{"apk", "add", "-U", "--no-cache", "git", "go", "python3"})
+		base = dag.
+			Alpine(dagger.AlpineOpts{
+				Branch:   consts.AlpineVersion,
+				Packages: []string{"git", "go", "python3"},
+			}).
+			Container()
 	}
 
 	// FIXME: move this into std modules
@@ -160,7 +168,7 @@ func gitPublish(ctx context.Context, opts gitPublishOpts) error {
 	} else {
 		// on a dry run, just test that the last state of dest is in the current branch (and is a fast-forward)
 		history, err := result.
-			WithExec([]string{"git", "log", "--oneline", "--no-abbrev-commit"}).
+			WithExec([]string{"git", "log", "--oneline", "--no-abbrev-commit", opts.sourceTag}).
 			Stdout(ctx)
 		if err != nil {
 			return err
@@ -192,4 +200,66 @@ func gitPublish(ctx context.Context, opts gitPublishOpts) error {
 
 	_, err := result.Sync(ctx)
 	return err
+}
+
+type githubReleaseOpts struct {
+	tag   string
+	notes *dagger.File
+
+	gitRepo     string
+	githubToken *dagger.Secret
+
+	dryRun bool
+}
+
+func githubRelease(ctx context.Context, opts githubReleaseOpts) error {
+	u, err := url.Parse(opts.gitRepo)
+	if err != nil {
+		return err
+	}
+	if u.Host != "github.com" {
+		return fmt.Errorf("git repo must be on github.com")
+	}
+	githubRepo := strings.TrimPrefix(strings.TrimSuffix(u.Path, ".git"), "/")
+
+	if opts.dryRun {
+		// sanity check tag is in target repo
+		_, err = dag.
+			Git(fmt.Sprintf("https://github.com/%s", githubRepo)).
+			Ref(opts.tag).
+			Tree().
+			Sync(ctx)
+		if err != nil {
+			return err
+		}
+
+		// sanity check notes file exists
+		notes, err := opts.notes.Contents(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Println(notes)
+
+		return nil
+	}
+
+	gh := dag.Gh(dagger.GhOpts{
+		Repo:  githubRepo,
+		Token: opts.githubToken,
+	})
+	return gh.Release().Create(
+		ctx,
+		opts.tag,
+		opts.tag,
+		dagger.GhReleaseCreateOpts{
+			VerifyTag: true,
+			Draft:     true,
+			NotesFile: opts.notes,
+			// Latest:    false,  // can't do this yet
+		},
+	)
+}
+
+func sdkChangeNotes(src *dagger.Directory, sdk string, version string) *dagger.File {
+	return src.File(fmt.Sprintf("sdk/%s/.changes/%s.md", sdk, version))
 }

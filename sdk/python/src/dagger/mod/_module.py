@@ -20,7 +20,7 @@ from rich.console import Console
 from typing_extensions import Self, dataclass_transform, overload
 
 import dagger
-from dagger import dag
+from dagger import dag, telemetry
 from dagger.log import configure_logging
 from dagger.mod._converter import make_converter
 from dagger.mod._exceptions import (
@@ -43,6 +43,7 @@ from dagger.mod._types import APIName, FieldDefinition, ObjectDefinition
 from dagger.mod._utils import (
     asyncify,
     get_doc,
+    is_annotated,
     normalize_name,
     to_pascal_case,
     transform_error,
@@ -196,6 +197,7 @@ class Module:
     def __call__(self) -> None:
         if self._log_level is not None:
             configure_logging(self._log_level)
+        telemetry.initialize()
         anyio.run(self._run)
 
     async def _run(self):
@@ -493,6 +495,21 @@ class Module:
             if not inspect.isclass(cls):
                 msg = f"Expected a class, got {type(cls)}"
                 raise UserError(msg)
+
+            # Check for InitVar inside Annotated
+            # TODO: Maybe try to transform field automatically, but check
+            # with community first on how this is usually handled.
+            fields = inspect.get_annotations(cls)
+            for name, t in fields.items():
+                if is_annotated(t) and isinstance(t.__origin__, dataclasses.InitVar):
+                    # Pytohn 3.10 doesn't support `*meta*  syntax
+                    # in Annotated[init_t.type, *meta]
+                    t.__origin__ = t.__origin__.type
+                    msg = (
+                        f"Field `{name}` is an InitVar wrapped in Annotated. "
+                        f"The correct syntax is: InitVar[{t}]"
+                    )
+                    raise UserError(msg)
 
             wrapped = dataclasses.dataclass(kw_only=True)(cls)
             return self._process_type(wrapped)

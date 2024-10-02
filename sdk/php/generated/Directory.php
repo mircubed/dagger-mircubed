@@ -39,6 +39,15 @@ class Directory extends Client\AbstractObject implements Client\IdAble
     }
 
     /**
+     * Return the directory's digest. The format of the digest is not guaranteed to be stable between releases of Dagger. It is guaranteed to be stable between invocations of the same Dagger engine.
+     */
+    public function digest(): string
+    {
+        $leafQueryBuilder = new \Dagger\Client\QueryBuilder('digest');
+        return (string)$this->queryLeaf($leafQueryBuilder, 'digest');
+    }
+
+    /**
      * Retrieves a directory at the given path.
      */
     public function directory(string $path): Directory
@@ -129,22 +138,6 @@ class Directory extends Client\AbstractObject implements Client\IdAble
     {
         $leafQueryBuilder = new \Dagger\Client\QueryBuilder('id');
         return new \Dagger\DirectoryId((string)$this->queryLeaf($leafQueryBuilder, 'id'));
-    }
-
-    /**
-     * Creates a named sub-pipeline.
-     */
-    public function pipeline(string $name, ?string $description = '', ?array $labels = null): Directory
-    {
-        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('pipeline');
-        $innerQueryBuilder->setArgument('name', $name);
-        if (null !== $description) {
-        $innerQueryBuilder->setArgument('description', $description);
-        }
-        if (null !== $labels) {
-        $innerQueryBuilder->setArgument('labels', $labels);
-        }
-        return new \Dagger\Directory($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
     }
 
     /**
@@ -284,6 +277,16 @@ class Directory extends Client\AbstractObject implements Client\IdAble
     {
         $innerQueryBuilder = new \Dagger\Client\QueryBuilder('withoutFile');
         $innerQueryBuilder->setArgument('path', $path);
+        return new \Dagger\Directory($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
+    }
+
+    /**
+     * Retrieves this directory with the files at the given paths removed.
+     */
+    public function withoutFiles(array $paths): Directory
+    {
+        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('withoutFiles');
+        $innerQueryBuilder->setArgument('paths', $paths);
         return new \Dagger\Directory($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
     }
 }

@@ -8,6 +8,10 @@ Once you have [completed the quickstart](quickstart), and learned the basic conc
 
 Every project is different, and every pipeline is a unique snowflake (usually that's not a good thing). So we can't give you an exact step-by-step guide of how to daggerize your project. But we can share the collective experience of the Dagger community, distilled into a simple framework.
 
+:::important
+Daggerizing your pipeline may take some time, but it's a worthwhile investment. Start small, and you'll see the benefits as you progress. Check out these [livestreams](https://www.youtube.com/playlist?list=PLyHqb4A5ee1sOx00YIQzOEYEe747tMO_b) where others have taken the time to do it right, and see how they approached the process.
+:::
+
 ## Phase 1: research
 
 ### Join our Discord!
@@ -97,7 +101,7 @@ Since your daggerized pipelines are packaged as Dagger Modules, and modules only
 1. Decide which CI event should trigger which Dagger pipeline
 2. For each pipeline to trigger, determine how to map inputs from the CI environment into arguments to the Dagger functions composing the pipeline
 3. Write the resulting `dagger call` command for each pipeline.
-4. Find the [integration page](integrations) for your CI platform, and follow the instructions. For example: [GitHub Actions](integrations/github-actions.mdx), [GitLab CI](integrations/gitlab.mdx), [CircleCI](integrations/circleci.mdx), [Jenkins](integrations/jenkins.mdx), [Azure Pipelines](integrations/azure-pipelines.mdx), [AWS CodeBuild](integrations/aws-codebuild.mdx), [Argo Workflows](integrations/argo-workflows.mdx) and [Tekton](integrations/tekton.mdx).
+4. Find the [integration page](integrations) for your CI platform, and follow the instructions. For example: [GitHub](integrations/github.mdx), [GitLab CI](integrations/gitlab.mdx), [CircleCI](integrations/circleci.mdx), [Jenkins](integrations/jenkins.mdx), [Azure Pipelines](integrations/azure-pipelines.mdx), [AWS CodeBuild](integrations/aws-codebuild.mdx), [Argo Workflows](integrations/argo-workflows.mdx) and [Tekton](integrations/tekton.mdx).
 
 A few important notes on CI integration:
 

@@ -3,12 +3,20 @@
   "sdk": "go",
   "dependencies": [
     {
+      "name": "alpine",
+      "source": "modules/alpine"
+    },
+    {
       "name": "dirdiff",
       "source": "modules/dirdiff"
     },
     {
       "name": "docusaurus",
       "source": "github.com/levlaz/daggerverse/docusaurus@e494cec1aa8f9faab1e0f12b2e5eea4a2321f2de"
+    },
+    {
+      "name": "gh",
+      "source": "github.com/sagikazarmark/daggerverse/gh@5b826062b6bc1bfbd619aa5d0fba117190c85aba"
     },
     {
       "name": "go",
@@ -39,22 +47,14 @@
       "source": "modules/shellcheck"
     },
     {
+      "name": "version",
+      "source": "version"
+    },
+    {
       "name": "wolfi",
       "source": "modules/wolfi"
     }
   ],
   "source": ".dagger",
-  "engineVersion": "v0.12.5",
-  "views": [
-    {
-      "name": "default",
-      "patterns": [
-        "!bin",
-        "!.git",
-        "!**/node_modules",
-        "!**/.venv",
-        "!**/__pycache__"
-      ]
-    }
-  ]
+  "engineVersion": "v0.13.3"
 }

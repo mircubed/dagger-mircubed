@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -19,10 +20,27 @@ import (
 
 const (
 	runtimeWorkdirPath = "/scratch"
-	SDKGo              = "go"
-	SDKPython          = "python"
-	SDKTypescript      = "typescript"
 )
+
+type SDK string
+
+const (
+	SDKGo         SDK = "go"
+	SDKPython     SDK = "python"
+	SDKTypescript SDK = "typescript"
+	SDKPHP        SDK = "php"
+	SDKElixir     SDK = "elixir"
+)
+
+// this list is to format the invalid sdk msg
+// and keeping that in sync with builtinSDK func
+var validInbuiltSDKs = []SDK{
+	SDKGo,
+	SDKPython,
+	SDKTypescript,
+	SDKPHP,
+	SDKElixir,
+}
 
 // load the SDK implementation with the given name for the module at the given source dir + subpath.
 func (s *moduleSchema) sdkForModule(
@@ -86,36 +104,81 @@ func (s *moduleSchema) sdkForModule(
 	return s.newModuleSDK(ctx, query, sdkMod, dagql.Instance[*core.Directory]{})
 }
 
+// parse and validate the name and version from sdkName
+//
+// for sdkName with format <sdk-name>@<version>, it returns
+// '<sdk-name>' as name and '@<version>' as suffix.
+//
+// If sdk is one of go/python/typescript and <version>
+// is specified, we return an error as those sdk don't support
+// specific version
+//
+// if sdk is one of php/elixir and version is not specified,
+// we defaults the version to [engine.Tag]
+func parseSDKName(sdkName string) (SDK, string, error) {
+	sdkNameParsed, sdkVersion, hasVersion := strings.Cut(sdkName, "@")
+
+	// this validation may seem redundant, but it helps keep the list of
+	// builtin sdk between invalidSDKError message and builtinSDK function in sync.
+	if !slices.Contains(validInbuiltSDKs, SDK(sdkNameParsed)) {
+		return "", "", getInvalidBuiltinSDKError(sdkName)
+	}
+
+	// inbuilt sdk go/python/typescript currently does not support selecting a specific version
+	if slices.Contains([]SDK{SDKGo, SDKPython, SDKTypescript}, SDK(sdkNameParsed)) && hasVersion {
+		return "", "", fmt.Errorf("the %s sdk does not currently support selecting a specific version", sdkNameParsed)
+	}
+
+	// for php, elixir we point them to github ref, so default the version to engine's tag
+	if slices.Contains([]SDK{SDKPHP, SDKElixir}, SDK(sdkNameParsed)) && sdkVersion == "" {
+		sdkVersion = engine.Tag
+	}
+
+	sdkSuffix := ""
+	if sdkVersion != "" {
+		sdkSuffix = "@" + sdkVersion
+	}
+
+	return SDK(sdkNameParsed), sdkSuffix, nil
+}
+
 var errUnknownBuiltinSDK = fmt.Errorf("unknown builtin sdk")
+
+func getInvalidBuiltinSDKError(inputSDKName string) error {
+	inbuiltSDKs := []string{}
+
+	for _, sdk := range validInbuiltSDKs {
+		inbuiltSDKs = append(inbuiltSDKs, fmt.Sprintf("- %s", sdk))
+	}
+
+	return fmt.Errorf(`%w
+The %q SDK does not exist. The available SDKs are:
+%s
+- any non-bundled SDK from its git ref (e.g. github.com/dagger/dagger/sdk/elixir@main)`,
+		errUnknownBuiltinSDK, inputSDKName, strings.Join(inbuiltSDKs, "\n"))
+}
 
 // return a builtin SDK implementation with the given name
 func (s *moduleSchema) builtinSDK(ctx context.Context, root *core.Query, sdkName string) (core.SDK, error) {
-	switch sdkName {
+	sdkNameParsed, sdkSuffix, err := parseSDKName(sdkName)
+	if err != nil {
+		return nil, err
+	}
+
+	switch sdkNameParsed {
 	case SDKGo:
 		return &goSDK{root: root, dag: s.dag}, nil
 	case SDKPython:
 		return s.loadBuiltinSDK(ctx, root, sdkName, digest.Digest(os.Getenv(distconsts.PythonSDKManifestDigestEnvName)))
 	case SDKTypescript:
 		return s.loadBuiltinSDK(ctx, root, sdkName, digest.Digest(os.Getenv(distconsts.TypescriptSDKManifestDigestEnvName)))
-	default:
-		sdkName, sdkVersion, hasVersion := strings.Cut(sdkName, "@")
-		if !hasVersion {
-			sdkVersion = engine.Tag
-		}
-		sdkSuffix := ""
-		if sdkVersion != "" {
-			sdkSuffix = "@" + sdkSuffix
-		}
-
-		switch sdkName {
-		case "elixir":
-			return s.sdkForModule(ctx, root, "github.com/dagger/dagger/sdk/elixir"+sdkSuffix, dagql.Instance[*core.ModuleSource]{})
-		case "php":
-			return s.sdkForModule(ctx, root, "github.com/dagger/dagger/sdk/php"+sdkSuffix, dagql.Instance[*core.ModuleSource]{})
-		}
+	case SDKPHP:
+		return s.sdkForModule(ctx, root, "github.com/dagger/dagger/sdk/php"+sdkSuffix, dagql.Instance[*core.ModuleSource]{})
+	case SDKElixir:
+		return s.sdkForModule(ctx, root, "github.com/dagger/dagger/sdk/elixir"+sdkSuffix, dagql.Instance[*core.ModuleSource]{})
 	}
 
-	return nil, fmt.Errorf("%s: %w", sdkName, errUnknownBuiltinSDK)
+	return nil, getInvalidBuiltinSDKError(sdkName)
 }
 
 // moduleSDK is an SDK implemented as module; i.e. every module besides the special case go sdk.
@@ -642,6 +705,15 @@ func (sdk *goSDK) base(ctx context.Context) (dagql.Instance[*core.Container], er
 				{
 					Name:  "name",
 					Value: dagql.String("GOPROXY"),
+				},
+			},
+		},
+		dagql.Selector{
+			Field: "__withSystemEnvVariable",
+			Args: []dagql.NamedInput{
+				{
+					Name:  "name",
+					Value: dagql.String("GODEBUG"),
 				},
 			},
 		},

@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/csv"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -20,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/containerd/platforms"
+	"github.com/dagger/dagger/engine/client"
 	"github.com/moby/buildkit/util/gitutil"
 	"github.com/spf13/pflag"
 
@@ -69,32 +69,43 @@ func GetCustomFlagValue(name string) DaggerValue {
 }
 
 // GetCustomFlagValueSlice returns a pflag.Value instance for a dagger.ObjectTypeDef name.
-func GetCustomFlagValueSlice(name string) DaggerValue {
+func GetCustomFlagValueSlice(name string, defVal []string) (DaggerValue, error) {
 	switch name {
 	case Container:
-		return &sliceValue[*containerValue]{}
+		v := &sliceValue[*containerValue]{}
+		return v.SetDefault(defVal)
 	case Directory:
-		return &sliceValue[*directoryValue]{}
+		v := &sliceValue[*directoryValue]{}
+		return v.SetDefault(defVal)
 	case File:
-		return &sliceValue[*fileValue]{}
+		v := &sliceValue[*fileValue]{}
+		return v.SetDefault(defVal)
 	case Secret:
-		return &sliceValue[*secretValue]{}
+		v := &sliceValue[*secretValue]{}
+		return v.SetDefault(defVal)
 	case Service:
-		return &sliceValue[*serviceValue]{}
+		v := &sliceValue[*serviceValue]{}
+		return v.SetDefault(defVal)
 	case PortForward:
-		return &sliceValue[*portForwardValue]{}
+		v := &sliceValue[*portForwardValue]{}
+		return v.SetDefault(defVal)
 	case CacheVolume:
-		return &sliceValue[*cacheVolumeValue]{}
+		v := &sliceValue[*cacheVolumeValue]{}
+		return v.SetDefault(defVal)
 	case ModuleSource:
-		return &sliceValue[*moduleSourceValue]{}
+		v := &sliceValue[*moduleSourceValue]{}
+		return v.SetDefault(defVal)
 	case Module:
-		return &sliceValue[*moduleValue]{}
+		v := &sliceValue[*moduleValue]{}
+		return v.SetDefault(defVal)
 	case Platform:
-		return &sliceValue[*platformValue]{}
+		v := &sliceValue[*platformValue]{}
+		return v.SetDefault(defVal)
 	case Socket:
-		return &sliceValue[*socketValue]{}
+		v := &sliceValue[*socketValue]{}
+		return v.SetDefault(defVal)
 	}
-	return nil
+	return nil, nil
 }
 
 // DaggerValue is a pflag.Value that requires a dagger.Client for producing the
@@ -103,7 +114,7 @@ type DaggerValue interface {
 	pflag.Value
 
 	// Get returns the final value for the query builder.
-	Get(context.Context, *dagger.Client, *dagger.ModuleSource) (any, error)
+	Get(context.Context, *dagger.Client, *dagger.ModuleSource, *modFunctionArg) (any, error)
 }
 
 // sliceValue is a pflag.Value that builds a slice of DaggerValue instances.
@@ -133,16 +144,27 @@ func (v *sliceValue[T]) String() string {
 	return "[" + out + "]"
 }
 
-func (v *sliceValue[T]) Get(ctx context.Context, c *dagger.Client, modSrc *dagger.ModuleSource) (any, error) {
+func (v *sliceValue[T]) Get(ctx context.Context, c *dagger.Client, modSrc *dagger.ModuleSource, modArg *modFunctionArg) (any, error) {
 	out := make([]any, len(v.value))
 	for i, v := range v.value {
-		outV, err := v.Get(ctx, c, modSrc)
+		outV, err := v.Get(ctx, c, modSrc, modArg)
 		if err != nil {
 			return nil, err
 		}
 		out[i] = outV
 	}
 	return out, nil
+}
+
+func (v *sliceValue[T]) SetDefault(s []string) (*sliceValue[T], error) {
+	if s == nil {
+		return v, nil
+	}
+	if err := v.Set(strings.Join(s, ",")); err != nil {
+		return v, err
+	}
+	v.changed = false
+	return v, nil
 }
 
 func (v *sliceValue[T]) Set(s string) error {
@@ -222,7 +244,7 @@ func (v *enumValue) String() string {
 	return v.value
 }
 
-func (v *enumValue) Get(ctx context.Context, dag *dagger.Client, modSrc *dagger.ModuleSource) (any, error) {
+func (v *enumValue) Get(ctx context.Context, dag *dagger.Client, modSrc *dagger.ModuleSource, _ *modFunctionArg) (any, error) {
 	return v.value, nil
 }
 
@@ -259,7 +281,7 @@ func (v *containerValue) String() string {
 	return v.address
 }
 
-func (v *containerValue) Get(_ context.Context, c *dagger.Client, _ *dagger.ModuleSource) (any, error) {
+func (v *containerValue) Get(_ context.Context, c *dagger.Client, _ *dagger.ModuleSource, _ *modFunctionArg) (any, error) {
 	if v.address == "" {
 		return nil, fmt.Errorf("container address cannot be empty")
 	}
@@ -287,7 +309,7 @@ func (v *directoryValue) String() string {
 	return v.address
 }
 
-func (v *directoryValue) Get(ctx context.Context, dag *dagger.Client, modSrc *dagger.ModuleSource) (any, error) {
+func (v *directoryValue) Get(ctx context.Context, dag *dagger.Client, modSrc *dagger.ModuleSource, modArg *modFunctionArg) (any, error) {
 	if v.String() == "" {
 		return nil, fmt.Errorf("directory address cannot be empty")
 	}
@@ -330,7 +352,11 @@ func (v *directoryValue) Get(ctx context.Context, dag *dagger.Client, modSrc *da
 	// POSIX "portable filename character set":
 	// https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap03.html#tag_03_282
 	path, viewName, _ := strings.Cut(path, ":")
-	path, err = expandHomeDir(path)
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	path, err = client.ExpandHomeDir(homeDir, path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to expand home directory: %w", err)
 	}
@@ -338,6 +364,7 @@ func (v *directoryValue) Get(ctx context.Context, dag *dagger.Client, modSrc *da
 
 	return modSrc.ResolveDirectoryFromCaller(path, dagger.ModuleSourceResolveDirectoryFromCallerOpts{
 		ViewName: viewName,
+		Ignore:   modArg.Ignore,
 	}).Sync(ctx)
 }
 
@@ -374,7 +401,7 @@ func (v *fileValue) String() string {
 	return v.path
 }
 
-func (v *fileValue) Get(_ context.Context, dag *dagger.Client, _ *dagger.ModuleSource) (any, error) {
+func (v *fileValue) Get(_ context.Context, dag *dagger.Client, _ *dagger.ModuleSource, _ *modFunctionArg) (any, error) {
 	vStr := v.String()
 	if vStr == "" {
 		return nil, fmt.Errorf("file path cannot be empty")
@@ -408,7 +435,11 @@ func (v *fileValue) Get(_ context.Context, dag *dagger.Client, _ *dagger.ModuleS
 	vStr = strings.TrimPrefix(vStr, "file://")
 	if !filepath.IsAbs(vStr) {
 		var err error
-		vStr, err = expandHomeDir(vStr)
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return nil, err
+		}
+		vStr, err = client.ExpandHomeDir(homeDir, vStr)
 		if err != nil {
 			return nil, fmt.Errorf("failed to expand home directory: %w", err)
 		}
@@ -459,7 +490,7 @@ func (v *secretValue) String() string {
 	return fmt.Sprintf("%s:%s", v.secretSource, v.sourceVal)
 }
 
-func (v *secretValue) Get(ctx context.Context, c *dagger.Client, _ *dagger.ModuleSource) (any, error) {
+func (v *secretValue) Get(ctx context.Context, c *dagger.Client, _ *dagger.ModuleSource, _ *modFunctionArg) (any, error) {
 	var plaintext string
 
 	switch v.secretSource {
@@ -478,7 +509,11 @@ func (v *secretValue) Get(ctx context.Context, c *dagger.Client, _ *dagger.Modul
 		plaintext = envPlaintext
 
 	case fileSecretSource:
-		sourceVal, err := expandHomeDir(v.sourceVal)
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return nil, err
+		}
+		sourceVal, err := client.ExpandHomeDir(homeDir, v.sourceVal)
 		if err != nil {
 			return nil, err
 		}
@@ -575,7 +610,7 @@ func (v *serviceValue) Set(s string) error {
 	return nil
 }
 
-func (v *serviceValue) Get(ctx context.Context, c *dagger.Client, _ *dagger.ModuleSource) (any, error) {
+func (v *serviceValue) Get(ctx context.Context, c *dagger.Client, _ *dagger.ModuleSource, _ *modFunctionArg) (any, error) {
 	svc, err := c.Host().Service(v.ports, dagger.HostServiceOpts{Host: v.host}).Start(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start service: %w", err)
@@ -622,7 +657,7 @@ func (v *portForwardValue) String() string {
 	return fmt.Sprintf("%d:%d", v.frontend, v.backend)
 }
 
-func (v *portForwardValue) Get(_ context.Context, c *dagger.Client, _ *dagger.ModuleSource) (any, error) {
+func (v *portForwardValue) Get(_ context.Context, c *dagger.Client, _ *dagger.ModuleSource, _ *modFunctionArg) (any, error) {
 	return &dagger.PortForward{
 		Frontend: v.frontend,
 		Backend:  v.backend,
@@ -650,7 +685,7 @@ func (v *socketValue) Set(s string) error {
 	return nil
 }
 
-func (v *socketValue) Get(ctx context.Context, c *dagger.Client, _ *dagger.ModuleSource) (any, error) {
+func (v *socketValue) Get(ctx context.Context, c *dagger.Client, _ *dagger.ModuleSource, _ *modFunctionArg) (any, error) {
 	return c.Host().UnixSocket(v.path), nil
 }
 
@@ -676,7 +711,7 @@ func (v *cacheVolumeValue) String() string {
 	return v.name
 }
 
-func (v *cacheVolumeValue) Get(_ context.Context, dag *dagger.Client, _ *dagger.ModuleSource) (any, error) {
+func (v *cacheVolumeValue) Get(_ context.Context, dag *dagger.Client, _ *dagger.ModuleSource, _ *modFunctionArg) (any, error) {
 	if v.String() == "" {
 		return nil, fmt.Errorf("cacheVolume name cannot be empty")
 	}
@@ -703,7 +738,7 @@ func (v *moduleValue) String() string {
 	return v.ref
 }
 
-func (v *moduleValue) Get(ctx context.Context, dag *dagger.Client, _ *dagger.ModuleSource) (any, error) {
+func (v *moduleValue) Get(ctx context.Context, dag *dagger.Client, _ *dagger.ModuleSource, _ *modFunctionArg) (any, error) {
 	if v.ref == "" {
 		return nil, fmt.Errorf("module ref cannot be empty")
 	}
@@ -734,7 +769,7 @@ func (v *moduleSourceValue) String() string {
 	return v.ref
 }
 
-func (v *moduleSourceValue) Get(ctx context.Context, dag *dagger.Client, _ *dagger.ModuleSource) (any, error) {
+func (v *moduleSourceValue) Get(ctx context.Context, dag *dagger.Client, _ *dagger.ModuleSource, _ *modFunctionArg) (any, error) {
 	if v.ref == "" {
 		return nil, fmt.Errorf("module source ref cannot be empty")
 	}
@@ -768,7 +803,7 @@ func (v *platformValue) String() string {
 	return v.platform
 }
 
-func (v *platformValue) Get(ctx context.Context, dag *dagger.Client, _ *dagger.ModuleSource) (any, error) {
+func (v *platformValue) Get(ctx context.Context, dag *dagger.Client, _ *dagger.ModuleSource, _ *modFunctionArg) (any, error) {
 	if v.platform == "" {
 		return nil, fmt.Errorf("platform cannot be empty")
 	}
@@ -777,6 +812,8 @@ func (v *platformValue) Get(ctx context.Context, dag *dagger.Client, _ *dagger.M
 
 // AddFlag adds a flag appropriate for the argument type. Should return a
 // pointer to the value.
+//
+//nolint:gocyclo
 func (r *modFunctionArg) AddFlag(flags *pflag.FlagSet) error {
 	name := r.FlagName()
 	usage := r.Description
@@ -803,25 +840,31 @@ func (r *modFunctionArg) AddFlag(flags *pflag.FlagSet) error {
 
 	case dagger.ScalarKind:
 		scalarName := r.TypeDef.AsScalar.Name
+		defVal, _ := getDefaultValue[string](r)
 
 		if val := GetCustomFlagValue(scalarName); val != nil {
+			if defVal != "" {
+				val.Set(defVal)
+			}
 			flags.Var(val, name, usage)
 			return nil
 		}
 
-		val, _ := getDefaultValue[string](r)
-		flags.String(name, val, usage)
+		flags.String(name, defVal, usage)
 		return nil
 
 	case dagger.EnumKind:
 		enumName := r.TypeDef.AsEnum.Name
+		defVal, _ := getDefaultValue[string](r)
 
 		if val := GetCustomFlagValue(enumName); val != nil {
+			if defVal != "" {
+				val.Set(defVal)
+			}
 			flags.Var(val, name, usage)
 			return nil
 		}
 
-		defVal, _ := getDefaultValue[string](r)
 		val := newEnumValue(r.TypeDef.AsEnum, defVal)
 		flags.Var(val, name, usage)
 
@@ -886,26 +929,34 @@ func (r *modFunctionArg) AddFlag(flags *pflag.FlagSet) error {
 
 		case dagger.ScalarKind:
 			scalarName := elementType.AsScalar.Name
+			defVal, _ := getDefaultValue[[]string](r)
 
-			if val := GetCustomFlagValueSlice(scalarName); val != nil {
+			val, err := GetCustomFlagValueSlice(scalarName, defVal)
+			if err != nil {
+				return err
+			}
+			if val != nil {
 				flags.Var(val, name, usage)
 				return nil
 			}
 
-			val, _ := getDefaultValue[[]string](r)
-			flags.StringSlice(name, val, usage)
+			flags.StringSlice(name, defVal, usage)
 			return nil
 
 		case dagger.EnumKind:
 			enumName := elementType.AsEnum.Name
+			defVal, _ := getDefaultValue[[]string](r)
 
-			if val := GetCustomFlagValueSlice(enumName); val != nil {
+			val, err := GetCustomFlagValueSlice(enumName, defVal)
+			if err != nil {
+				return err
+			}
+			if val != nil {
 				flags.Var(val, name, usage)
 				return nil
 			}
 
-			defVals, _ := getDefaultValue[[]string](r)
-			val := newEnumSliceValue(elementType.AsEnum, defVals)
+			val = newEnumSliceValue(elementType.AsEnum, defVal)
 			flags.Var(val, name, usage)
 
 			return nil
@@ -913,7 +964,11 @@ func (r *modFunctionArg) AddFlag(flags *pflag.FlagSet) error {
 		case dagger.ObjectKind:
 			objName := elementType.AsObject.Name
 
-			if val := GetCustomFlagValueSlice(objName); val != nil {
+			val, err := GetCustomFlagValueSlice(objName, nil)
+			if err != nil {
+				return err
+			}
+			if val != nil {
 				flags.Var(val, name, usage)
 				return nil
 			}
@@ -927,7 +982,11 @@ func (r *modFunctionArg) AddFlag(flags *pflag.FlagSet) error {
 		case dagger.InputKind:
 			inputName := elementType.AsInput.Name
 
-			if val := GetCustomFlagValueSlice(inputName); val != nil {
+			val, err := GetCustomFlagValueSlice(inputName, nil)
+			if err != nil {
+				return err
+			}
+			if val != nil {
 				flags.Var(val, name, usage)
 				return nil
 			}
@@ -967,19 +1026,4 @@ func writeAsCSV(vals []string) (string, error) {
 	}
 	w.Flush()
 	return strings.TrimSuffix(b.String(), "\n"), nil
-}
-
-func expandHomeDir(path string) (string, error) {
-	if path[0] != '~' {
-		return path, nil
-	}
-	if len(path) > 1 && path[1] != '/' && path[1] != '\\' {
-		return "", errors.New("cannot expand home directory")
-	}
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return strings.Replace(path, "~", homeDir, 1), nil
 }

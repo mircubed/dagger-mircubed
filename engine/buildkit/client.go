@@ -76,14 +76,14 @@ type Client struct {
 	*Opts
 
 	closeCtx context.Context
-	cancel   context.CancelFunc
+	cancel   context.CancelCauseFunc
 	closeMu  sync.RWMutex
 	execMap  sync.Map
 }
 
 func NewClient(ctx context.Context, opts *Opts) (*Client, error) {
 	// override the outer cancel, we will manage cancellation ourselves here
-	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	ctx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
 	client := &Client{
 		Opts:     opts,
 		closeCtx: ctx,
@@ -98,7 +98,7 @@ func (c *Client) ID() string {
 	return c.BkSession.ID()
 }
 
-func (c *Client) withClientCloseCancel(ctx context.Context) (context.Context, context.CancelFunc, error) {
+func (c *Client) withClientCloseCancel(ctx context.Context) (context.Context, context.CancelCauseFunc, error) {
 	c.closeMu.RLock()
 	defer c.closeMu.RUnlock()
 	select {
@@ -106,11 +106,11 @@ func (c *Client) withClientCloseCancel(ctx context.Context) (context.Context, co
 		return nil, nil, errors.New("client closed")
 	default:
 	}
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancelCause(ctx)
 	go func() {
 		select {
 		case <-c.closeCtx.Done():
-			cancel()
+			cancel(context.Cause(c.closeCtx))
 		case <-ctx.Done():
 		}
 	}()
@@ -122,7 +122,7 @@ func (c *Client) Solve(ctx context.Context, req bkgw.SolveRequest) (_ *Result, r
 	if err != nil {
 		return nil, err
 	}
-	defer cancel()
+	defer cancel(errors.New("solve done"))
 	ctx = withOutgoingContext(ctx)
 
 	// include upstream cache imports, if any
@@ -135,8 +135,6 @@ func (c *Client) Solve(ctx context.Context, req bkgw.SolveRequest) (_ *Result, r
 	}
 	llbRes, err := gw.Solve(ctx, req, c.ID())
 	if err != nil {
-		// writing log w/ %+v so that we can see stack traces embedded in err by buildkit's usage of pkg/errors
-		bklog.G(ctx).Errorf("solve error: %+v", err)
 		return nil, wrapError(ctx, err, c)
 	}
 
@@ -166,7 +164,7 @@ func (c *Client) ResolveImageConfig(ctx context.Context, ref string, opt sourcer
 	if err != nil {
 		return "", "", nil, err
 	}
-	defer cancel()
+	defer cancel(errors.New("resolve image config done"))
 	ctx = withOutgoingContext(ctx)
 
 	imr := sourceresolver.NewImageMetaResolver(c.LLBBridge)
@@ -178,7 +176,7 @@ func (c *Client) ResolveSourceMetadata(ctx context.Context, op *bksolverpb.Sourc
 	if err != nil {
 		return nil, err
 	}
-	defer cancel()
+	defer cancel(errors.New("resolve source metadata done"))
 	ctx = withOutgoingContext(ctx)
 
 	return c.LLBBridge.ResolveSourceMetadata(ctx, op, opt)
@@ -213,7 +211,7 @@ func (c *Client) NewContainer(ctx context.Context, req NewContainerRequest) (*Co
 	if err != nil {
 		return nil, err
 	}
-	defer cancel()
+	defer cancel(errors.New("new container done"))
 	ctx = withOutgoingContext(ctx)
 	ctrReq := bkcontainer.NewContainerRequest{
 		ContainerID: containerID,
@@ -348,7 +346,7 @@ func (c *Client) UpstreamCacheExport(ctx context.Context, cacheExportFuncs []Res
 	if err != nil {
 		return err
 	}
-	defer cancel()
+	defer cancel(errors.New("upstream cache export done"))
 
 	if len(cacheExportFuncs) == 0 {
 		return nil
@@ -463,8 +461,9 @@ func (c *Client) ListenHostToContainer(
 
 	clientCaller, err := c.GetSessionCaller(ctx, false)
 	if err != nil {
-		cancel()
-		return nil, nil, fmt.Errorf("failed to get requester session: %w", err)
+		err = fmt.Errorf("failed to get requester session: %w", err)
+		cancel(fmt.Errorf("listen host to container error: %w", err))
+		return nil, nil, err
 	}
 
 	conn := clientCaller.Conn()
@@ -473,8 +472,9 @@ func (c *Client) ListenHostToContainer(
 
 	listener, err := tunnelClient.Listen(ctx)
 	if err != nil {
-		cancel()
-		return nil, nil, fmt.Errorf("failed to listen: %w", err)
+		err = fmt.Errorf("failed to listen: %w", err)
+		cancel(fmt.Errorf("listen host to container error: %w", err))
+		return nil, nil, err
 	}
 
 	err = listener.Send(&session.ListenRequest{
@@ -482,14 +482,16 @@ func (c *Client) ListenHostToContainer(
 		Protocol: proto,
 	})
 	if err != nil {
-		cancel()
-		return nil, nil, fmt.Errorf("failed to send listen request: %w", err)
+		err = fmt.Errorf("failed to send listen request: %w", err)
+		cancel(fmt.Errorf("listen host to container error: %w", err))
+		return nil, nil, err
 	}
 
 	listenRes, err := listener.Recv()
 	if err != nil {
-		cancel()
-		return nil, nil, fmt.Errorf("failed to receive listen response: %w", err)
+		err = fmt.Errorf("failed to receive listen response: %w", err)
+		cancel(fmt.Errorf("listen host to container error: %w", err))
+		return nil, nil, err
 	}
 
 	conns := map[string]net.Conn{}
@@ -561,7 +563,7 @@ func (c *Client) ListenHostToContainer(
 	}()
 
 	return listenRes, func() error {
-		defer cancel()
+		defer cancel(errors.New("listen host to container done"))
 		sendL.Lock()
 		err := listener.CloseSend()
 		sendL.Unlock()
@@ -778,7 +780,14 @@ func (gw *filteringGateway) Solve(ctx context.Context, req bkfrontend.SolveReque
 			req.Definition = newDef
 		}
 
-		return gw.FrontendLLBBridge.Solve(ctx, req, sid)
+		res, err := gw.FrontendLLBBridge.Solve(ctx, req, sid)
+		if err != nil {
+			// writing log w/ %+v so that we can see stack traces embedded in err by buildkit's usage of pkg/errors
+			bklog.G(ctx).Errorf("solve error: %+v", err)
+			err = includeBuildkitContextCancelledLine(err)
+			return nil, err
+		}
+		return res, nil
 
 	case req.Frontend != "":
 		// HACK: don't force evaluation like this, we can write custom frontend

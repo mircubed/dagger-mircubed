@@ -3,6 +3,7 @@ package idtui
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -20,23 +21,25 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/term"
 
+	"github.com/dagger/dagger/dagql/dagui"
 	"github.com/dagger/dagger/engine/slog"
 )
 
 type frontendPretty struct {
-	FrontendOpts
+	dagui.FrontendOpts
 
 	// updated by Run
 	program     *tea.Program
 	run         func(context.Context) error
 	runCtx      context.Context
-	interrupt   func()
+	interrupt   context.CancelCauseFunc
 	interrupted bool
+	quitting    bool
 	done        bool
 	err         error
 
 	// updated as events are written
-	db           *DB
+	db           *dagui.DB
 	logs         *prettyLogs
 	eof          bool
 	backgrounded bool
@@ -44,8 +47,8 @@ type frontendPretty struct {
 	focused      trace.SpanID
 	zoomed       trace.SpanID
 	focusedIdx   int
-	rowsView     *RowsView
-	rows         *Rows
+	rowsView     *dagui.RowsView
+	rows         *dagui.Rows
 	pressedKey   string
 	pressedKeyAt time.Time
 
@@ -69,7 +72,7 @@ type frontendPretty struct {
 }
 
 func New() Frontend {
-	db := NewDB()
+	db := dagui.NewDB()
 	profile := ColorProfile()
 	view := new(strings.Builder)
 	return &frontendPretty{
@@ -78,8 +81,8 @@ func New() Frontend {
 		autoFocus: true,
 
 		// set empty initial row state to avoid nil checks
-		rowsView: &RowsView{},
-		rows:     &Rows{BySpan: map[trace.SpanID]*TraceRow{}},
+		rowsView: &dagui.RowsView{},
+		rows:     &dagui.Rows{BySpan: map[trace.SpanID]*dagui.TraceRow{}},
 
 		// initial TUI state
 		window:     tea.WindowSizeMsg{Width: -1, Height: -1}, // be clear that it's not set
@@ -107,11 +110,14 @@ func (fe *frontendPretty) SetCloudURL(ctx context.Context, url string, msg strin
 		slog.Warn(msg)
 	}
 
-	if logged {
-		fe.msgPreFinalRender.WriteString(traceMessage(fe.profile, url, msg))
-	} else if !skipLoggedOutTraceMsg() {
-		fe.msgPreFinalRender.WriteString(fmt.Sprintf(loggedOutTraceMsg, url))
+	if cmdContext, ok := FromCmdContext(ctx); ok && cmdContext.printTraceLink {
+		if logged {
+			fe.msgPreFinalRender.WriteString(traceMessage(fe.profile, url, msg))
+		} else if !skipLoggedOutTraceMsg() {
+			fe.msgPreFinalRender.WriteString(fmt.Sprintf(loggedOutTraceMsg, url))
+		}
 	}
+
 	fe.mu.Unlock()
 }
 
@@ -130,7 +136,7 @@ func traceMessage(profile termenv.Profile, url string, msg string) string {
 
 // Run starts the TUI, calls the run function, stops the TUI, and finally
 // prints the primary output to the appropriate stdout/stderr streams.
-func (fe *frontendPretty) Run(ctx context.Context, opts FrontendOpts, run func(context.Context) error) error {
+func (fe *frontendPretty) Run(ctx context.Context, opts dagui.FrontendOpts, run func(context.Context) error) error {
 	if opts.TooFastThreshold == 0 {
 		opts.TooFastThreshold = 100 * time.Millisecond
 	}
@@ -187,7 +193,7 @@ func (fe *frontendPretty) runWithTUI(ctx context.Context, ttyIn *os.File, ttyOut
 	// wire up the run so we can call it asynchronously with the TUI running
 	fe.run = run
 	// set up ctx cancellation so the TUI can interrupt via keypresses
-	fe.runCtx, fe.interrupt = context.WithCancel(ctx)
+	fe.runCtx, fe.interrupt = context.WithCancelCause(ctx)
 
 	// keep program state so we can send messages to it
 	fe.program = tea.NewProgram(fe,
@@ -230,23 +236,16 @@ func (fe *frontendPretty) finalRender() error {
 	fe.focusedIdx = -1
 	fe.recalculateViewLocked()
 
-	var renderedProgress bool
-	if fe.Debug || fe.Verbosity >= ShowCompletedVerbosity || fe.err != nil {
-		if fe.msgPreFinalRender.Len() > 0 {
-			fmt.Fprintf(os.Stderr, fe.msgPreFinalRender.String()+"\n\n")
-		}
+	if fe.Debug || fe.Verbosity >= dagui.ShowCompletedVerbosity || fe.err != nil {
 		// Render progress to stderr so stdout stays clean.
 		out := NewOutput(os.Stderr, termenv.WithProfile(fe.profile))
-		renderedProgress = fe.renderProgress(out, true, fe.window.Height, "")
-	}
+		fe.renderProgress(out, true, fe.window.Height, "")
 
-	if renderedProgress {
-		// Print a blank line after progress if there is any primary output to
-		// show.
-		logs := fe.logs.Logs[fe.db.PrimarySpan]
-		if logs != nil && logs.UsedHeight() > 0 {
-			fmt.Fprintln(os.Stderr)
+		if fe.msgPreFinalRender.Len() > 0 {
+			fmt.Fprint(os.Stderr, "\n"+fe.msgPreFinalRender.String()+"\n")
 		}
+
+		fmt.Fprintln(os.Stderr)
 	}
 
 	// Replay the primary output log to stdout/stderr.
@@ -416,17 +415,16 @@ func (fe *frontendPretty) recalculateViewLocked() {
 	fe.focus(fe.rows.BySpan[fe.focused])
 }
 
-func (fe *frontendPretty) renderedRowLines(row *TraceRow, prefix string) []string {
+func (fe *frontendPretty) renderedRowLines(row *dagui.TraceRow, prefix string) []string {
 	buf := new(strings.Builder)
 	out := NewOutput(buf, termenv.WithProfile(fe.profile))
 	fe.renderRow(out, row, false, prefix)
 	return strings.Split(strings.TrimSuffix(buf.String(), "\n"), "\n")
 }
 
-func (fe *frontendPretty) renderProgress(out *termenv.Output, full bool, height int, prefix string) bool {
-	var renderedAny bool
+func (fe *frontendPretty) renderProgress(out *termenv.Output, full bool, height int, prefix string) {
 	if fe.rowsView == nil {
-		return false
+		return
 	}
 
 	rows := fe.rows
@@ -434,9 +432,8 @@ func (fe *frontendPretty) renderProgress(out *termenv.Output, full bool, height 
 	if full {
 		for _, row := range rows.Order {
 			fe.renderRow(out, row, full, "")
-			renderedAny = true
 		}
-		return renderedAny
+		return
 	}
 
 	if !fe.autoFocus {
@@ -459,7 +456,7 @@ func (fe *frontendPretty) renderProgress(out *termenv.Output, full bool, height 
 
 	if len(rows.Order) == 0 {
 		// NB: this is a bit redundant with above, but feels better to decouple
-		return renderedAny
+		return
 	}
 
 	if fe.autoFocus && len(rows.Order) > 0 {
@@ -470,9 +467,6 @@ func (fe *frontendPretty) renderProgress(out *termenv.Output, full bool, height 
 	lines := fe.renderLines(height, prefix)
 
 	fmt.Fprint(out, strings.Join(lines, "\n"))
-	renderedAny = true
-
-	return renderedAny
 }
 
 func (fe *frontendPretty) renderLines(height int, prefix string) []string {
@@ -558,7 +552,7 @@ func (fe *frontendPretty) renderLines(height int, prefix string) []string {
 	return focusedLines
 }
 
-func (fe *frontendPretty) focus(row *TraceRow) {
+func (fe *frontendPretty) focus(row *dagui.TraceRow) {
 	if row == nil {
 		return
 	}
@@ -595,7 +589,7 @@ func (fe *frontendPretty) View() string {
 		// doesn't have any garbage before/after
 		return ""
 	}
-	if fe.done && fe.eof {
+	if fe.quitting {
 		// print nothing; make way for the pristine output in the final render
 		return ""
 	}
@@ -624,7 +618,8 @@ func (fe *frontendPretty) update(msg tea.Msg) (*frontendPretty, tea.Cmd) { //nol
 		slog.Debug("run finished", "err", msg.err)
 		fe.done = true
 		fe.err = msg.err
-		if fe.eof {
+		if fe.eof && !fe.NoExit {
+			fe.quitting = true
 			return fe, tea.Quit
 		}
 		return fe, nil
@@ -632,7 +627,8 @@ func (fe *frontendPretty) update(msg tea.Msg) (*frontendPretty, tea.Cmd) { //nol
 	case eofMsg: // received end of updates
 		slog.Debug("got EOF")
 		fe.eof = true
-		if fe.done {
+		if fe.done && !fe.NoExit {
+			fe.quitting = true
 			return fe, tea.Quit
 		}
 		return fe, nil
@@ -666,14 +662,21 @@ func (fe *frontendPretty) update(msg tea.Msg) (*frontendPretty, tea.Cmd) { //nol
 		fe.pressedKeyAt = time.Now()
 		switch msg.String() {
 		case "q", "ctrl+c":
+			if fe.done && fe.eof {
+				fe.quitting = true
+				// must have configured NoExit, and now they want
+				// to exit manually
+				return fe, tea.Quit
+			}
 			if fe.interrupted {
 				slog.Warn("exiting immediately")
+				fe.quitting = true
 				return fe, tea.Quit
 			} else {
 				slog.Warn("canceling... (press again to exit immediately)")
 			}
-			fe.interrupt()
 			fe.interrupted = true
+			fe.interrupt(errors.New("interrupted"))
 			return fe, nil // tea.Quit is deferred until we receive doneMsg
 		case "ctrl+\\": // SIGQUIT
 			fe.restore()
@@ -703,7 +706,7 @@ func (fe *frontendPretty) update(msg tea.Msg) (*frontendPretty, tea.Cmd) { //nol
 			fe.zoomed = fe.db.PrimarySpan
 			fe.recalculateViewLocked()
 			return fe, nil
-		case "+":
+		case "+", "=":
 			fe.FrontendOpts.Verbosity++
 			fe.recalculateViewLocked()
 			return fe, nil
@@ -846,9 +849,9 @@ func (fe *frontendPretty) renderLocked() {
 	fe.Render(fe.viewOut)
 }
 
-func (fe *frontendPretty) renderRow(out *termenv.Output, row *TraceRow, full bool, prefix string) {
+func (fe *frontendPretty) renderRow(out *termenv.Output, row *dagui.TraceRow, full bool, prefix string) {
 	fe.renderStep(out, row.Span, row.Depth, prefix)
-	if row.IsRunningOrChildRunning || row.Span.Failed() || fe.Verbosity >= ShowSpammyVerbosity {
+	if row.IsRunningOrChildRunning || row.Span.Failed() || fe.Verbosity >= dagui.ShowSpammyVerbosity {
 		if logs := fe.logs.Logs[row.Span.ID]; logs != nil {
 			logLimit := fe.window.Height / 3
 			if full {
@@ -864,7 +867,7 @@ func (fe *frontendPretty) renderRow(out *termenv.Output, row *TraceRow, full boo
 	}
 }
 
-func (fe *frontendPretty) renderStep(out *termenv.Output, span *Span, depth int, prefix string) error {
+func (fe *frontendPretty) renderStep(out *termenv.Output, span *dagui.Span, depth int, prefix string) error {
 	r := newRenderer(fe.db, fe.window.Width, fe.FrontendOpts)
 
 	isFocused := span.ID == fe.focused

@@ -188,9 +188,9 @@ func ConfiguredLogExporter(ctx context.Context) (sdklog.Exporter, bool) {
 	return configuredLogExporter, configuredLogExporter != nil
 }
 
-// FallbackResource is the fallback resource definition. A more specific
+// fallbackResource is the fallback resource definition. A more specific
 // resource should be set in Init.
-func FallbackResource() *resource.Resource {
+func fallbackResource() *resource.Resource {
 	return resource.NewWithAttributes(
 		semconv.SchemaURL,
 		semconv.ServiceNameKey.String("dagger"),
@@ -237,6 +237,7 @@ const NearlyImmediate = 100 * time.Millisecond
 // sent live span telemetry.
 var LiveTracesEnabled = os.Getenv("OTEL_EXPORTER_OTLP_TRACES_LIVE") != ""
 
+var Resource *resource.Resource
 var SpanProcessors = []sdktrace.SpanProcessor{}
 var LogProcessors = []sdklog.Processor{}
 
@@ -263,6 +264,10 @@ var Propagator = propagation.NewCompositeTextMapPropagator(
 	propagation.TraceContext{},
 )
 
+// closeCtx holds on to the initial context returned by Init. Close will
+// extract its providers and close them.
+var closeCtx context.Context
+
 // Init sets up the global OpenTelemetry providers tracing, logging, and
 // someday metrics providers. It is called by the CLI, the engine, and the
 // container shim, so it needs to be versatile.
@@ -280,8 +285,12 @@ func Init(ctx context.Context, cfg Config) context.Context {
 	}))
 
 	if cfg.Resource == nil {
-		cfg.Resource = FallbackResource()
+		cfg.Resource = fallbackResource()
 	}
+
+	// Set up the global resource so we can pass it into dynamically allocated
+	// log/trace providers at runtime.
+	Resource = cfg.Resource
 
 	if cfg.Detect {
 		if exp, ok := ConfiguredSpanExporter(ctx); ok {
@@ -332,7 +341,9 @@ func Init(ctx context.Context, cfg Config) context.Context {
 
 	// Set up a log provider if configured.
 	if len(cfg.LiveLogExporters) > 0 {
-		logOpts := []sdklog.LoggerProviderOption{}
+		logOpts := []sdklog.LoggerProviderOption{
+			sdklog.WithResource(cfg.Resource),
+		}
 		for _, exp := range cfg.LiveLogExporters {
 			processor := sdklog.NewBatchProcessor(exp,
 				sdklog.WithExportInterval(NearlyImmediate))
@@ -342,12 +353,15 @@ func Init(ctx context.Context, cfg Config) context.Context {
 		ctx = WithLoggerProvider(ctx, sdklog.NewLoggerProvider(logOpts...))
 	}
 
+	closeCtx = ctx
+
 	return ctx
 }
 
 // Close shuts down the global OpenTelemetry providers, flushing any remaining
 // data to the configured exporters.
-func Close(ctx context.Context) {
+func Close() {
+	ctx := closeCtx
 	flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	if tracerProvider != nil {

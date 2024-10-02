@@ -4,10 +4,13 @@ declare(strict_types=1);
 
 namespace Dagger\Tests\Unit\Fixture;
 
-use Dagger\Attribute\Argument;
 use Dagger\Attribute\DaggerFunction;
 use Dagger\Attribute\DaggerObject;
+use Dagger\Attribute\DefaultPath;
+use Dagger\Attribute\Doc;
+use Dagger\Attribute\Ignore;
 use Dagger\Container;
+use Dagger\Directory;
 use Dagger\File;
 use Dagger\Json;
 use Dagger\ValueObject;
@@ -15,6 +18,10 @@ use Dagger\ValueObject;
 #[DaggerObject]
 final class DaggerObjectWithDaggerFunctions
 {
+    #[DaggerFunction]
+    public function __construct() {
+    }
+
     #[DaggerFunction]
     public function returnBool(): bool
     {
@@ -63,7 +70,7 @@ final class DaggerObjectWithDaggerFunctions
 
     #[DaggerFunction]
     public function annotatedString(
-        #[Argument('this value should have a description')]
+        #[Doc('this value should have a description')]
         string $value
     ): void {
     }
@@ -90,6 +97,22 @@ final class DaggerObjectWithDaggerFunctions
     {
     }
 
+    #[DaggerFunction]
+    public function fileWithDefaultPath(
+        #[DefaultPath('./test')]
+        File $value
+    ): void {
+    }
+
+
+    #[DaggerFunction]
+    public function directoryWithIgnore(
+        #[DefaultPath('.')]
+            #[Ignore('vendor/', 'generated/', 'env')]
+        Directory $value
+    ): void {
+    }
+
     public function notADaggerFunction(): string {
         return 'DaggerFunctions MUST have the DaggerFunction Attribute';
     }
@@ -101,7 +124,16 @@ final class DaggerObjectWithDaggerFunctions
 
     public static function getValueObjectEquivalent(): ValueObject\DaggerObject
     {
-        return new ValueObject\DaggerObject(DaggerObjectWithDaggerFunctions::class, [
+        return new ValueObject\DaggerObject(
+            DaggerObjectWithDaggerFunctions::class,
+            '',
+            [
+                new ValueObject\DaggerFunction(
+                    '',
+                    null,
+                    [],
+                    new ValueObject\Type(self::class)
+                ),
                 new ValueObject\DaggerFunction(
                     'returnBool',
                     null,
@@ -126,7 +158,7 @@ final class DaggerObjectWithDaggerFunctions
                     [
                         new ValueObject\Argument(
                             'value',
-                            null,
+                            '',
                             new ValueObject\Type('bool'),
                             null,
                         )
@@ -139,7 +171,7 @@ final class DaggerObjectWithDaggerFunctions
                     [
                         new ValueObject\Argument(
                             'value',
-                            null,
+                            '',
                             new ValueObject\Type('int'),
                             null,
                         )
@@ -152,7 +184,7 @@ final class DaggerObjectWithDaggerFunctions
                     [
                         new ValueObject\Argument(
                             'value',
-                            null,
+                            '',
                             new ValueObject\Type('string'),
                             null,
                         )
@@ -165,7 +197,7 @@ final class DaggerObjectWithDaggerFunctions
                     [
                         new ValueObject\Argument(
                             'value',
-                            null,
+                            '',
                             new ValueObject\Type('string', true),
                             new Json('null'),
                         )
@@ -178,7 +210,7 @@ final class DaggerObjectWithDaggerFunctions
                     [
                         new ValueObject\Argument(
                             'value',
-                            null,
+                            '',
                             new ValueObject\Type('string', true),
                             new Json('null'),
                         )
@@ -191,7 +223,7 @@ final class DaggerObjectWithDaggerFunctions
                     [
                         new ValueObject\Argument(
                             'value',
-                            null,
+                            '',
                             new ValueObject\Type('string', true),
                             new Json('"test"'),
                         )
@@ -217,13 +249,13 @@ final class DaggerObjectWithDaggerFunctions
                     [
                         new ValueObject\Argument(
                             'first',
-                            null,
+                            '',
                             new ValueObject\Type('string'),
                             null,
                         ),
                         new ValueObject\Argument(
                             'second',
-                            null,
+                            '',
                             new ValueObject\Type('string'),
                             null,
                         ),
@@ -236,13 +268,13 @@ final class DaggerObjectWithDaggerFunctions
                     [
                         new ValueObject\Argument(
                             'first',
-                            null,
+                            '',
                             new ValueObject\Type('string'),
                             new Json('"first"'),
                         ),
                         new ValueObject\Argument(
                             'second',
-                            null,
+                            '',
                             new ValueObject\Type('string'),
                             new Json('"second"'),
                         )
@@ -255,7 +287,7 @@ final class DaggerObjectWithDaggerFunctions
                     [
                         new ValueObject\Argument(
                             'value',
-                            null,
+                            '',
                             new ValueObject\Type(Container::class, true),
                             new Json('null'),
                         ),
@@ -268,13 +300,43 @@ final class DaggerObjectWithDaggerFunctions
                     [
                         new ValueObject\Argument(
                             'value',
-                            null,
+                            '',
                             new ValueObject\Type(File::class, true),
                             new Json('null'),
                         ),
                     ],
                     new ValueObject\Type('void'),
                 ),
-        ]);
+                new ValueObject\DaggerFunction(
+                    'fileWithDefaultPath',
+                    null,
+                    [
+                        new ValueObject\Argument(
+                            'value',
+                            '',
+                            new ValueObject\Type(File::class, false),
+                            null,
+                            './test',
+                        ),
+                    ],
+                    new ValueObject\Type('void'),
+                ),
+                new ValueObject\DaggerFunction(
+                    'directoryWithIgnore',
+                    null,
+                    [
+                        new ValueObject\Argument(
+                            'value',
+                            '',
+                            new ValueObject\Type(Directory::class, false),
+                            null,
+                            '.',
+                            ['vendor/', 'generated/', 'env'],
+                        ),
+                    ],
+                    new ValueObject\Type('void'),
+                ),
+            ]
+        );
     }
 }

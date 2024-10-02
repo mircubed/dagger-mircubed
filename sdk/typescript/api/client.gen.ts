@@ -162,18 +162,6 @@ export type ContainerImportOpts = {
   tag?: string
 }
 
-export type ContainerPipelineOpts = {
-  /**
-   * Description of the sub-pipeline.
-   */
-  description?: string
-
-  /**
-   * Labels to apply to the sub-pipeline.
-   */
-  labels?: PipelineLabel[]
-}
-
 export type ContainerPublishOpts = {
   /**
    * Identifiers for other platform specific containers.
@@ -214,6 +202,20 @@ export type ContainerTerminalOpts = {
    * Execute the command with all root capabilities. This is similar to running a command with "sudo" or executing "docker run" with the "--privileged" flag. Containerization does not provide any security guarantees when using this option. It should only be used when absolutely necessary and only with trusted commands.
    */
   insecureRootCapabilities?: boolean
+}
+
+export type ContainerUpOpts = {
+  /**
+   * List of frontend/backend port mappings to forward.
+   *
+   * Frontend is the port accepting traffic on the host, backend is the service port.
+   */
+  ports?: PortForward[]
+
+  /**
+   * Bind each tunnel port to a random port on the host.
+   */
+  random?: boolean
 }
 
 export type ContainerWithDefaultTerminalCmdOpts = {
@@ -266,11 +268,6 @@ export type ContainerWithEnvVariableOpts = {
 }
 
 export type ContainerWithExecOpts = {
-  /**
-   * DEPRECATED: For true this can be removed. For false, use `useEntrypoint` instead.
-   */
-  skipEntrypoint?: boolean
-
   /**
    * If the container has an entrypoint, prepend it to the args.
    */
@@ -562,18 +559,6 @@ export type DirectoryExportOpts = {
   wipe?: boolean
 }
 
-export type DirectoryPipelineOpts = {
-  /**
-   * Description of the sub-pipeline.
-   */
-  description?: string
-
-  /**
-   * Labels to apply to the sub-pipeline.
-   */
-  labels?: PipelineLabel[]
-}
-
 export type DirectoryTerminalOpts = {
   /**
    * If set, override the container's default terminal command and invoke these command arguments instead.
@@ -692,6 +677,16 @@ export type FunctionWithArgOpts = {
    * A default value to use for this argument if not explicitly set by the caller, if any
    */
   defaultValue?: JSON
+
+  /**
+   * If the argument is a Directory or File type, default to load path from context directory, relative to root directory.
+   */
+  defaultPath?: string
+
+  /**
+   * Patterns to ignore when loading the contextual argument value.
+   */
+  ignore?: string[]
 }
 
 /**
@@ -725,6 +720,13 @@ export type GeneratedCodeID = string & { __GeneratedCodeID: never }
  * The `GitModuleSourceID` scalar type represents an identifier for an object of type GitModuleSource.
  */
 export type GitModuleSourceID = string & { __GitModuleSourceID: never }
+
+export type GitRefTreeOpts = {
+  /**
+   * Set to true to discard .git directory.
+   */
+  discardGitDir?: boolean
+}
 
 /**
  * The `GitRefID` scalar type represents an identifier for an object of type GitRef.
@@ -871,6 +873,11 @@ export type ModuleSourceResolveDirectoryFromCallerOpts = {
    * If set, the name of the view to apply to the path.
    */
   viewName?: string
+
+  /**
+   * Patterns to ignore when loading the directory.
+   */
+  ignore?: string[]
 }
 
 export type ModuleSourceWithInitOpts = {
@@ -959,7 +966,7 @@ export type ClientContainerOpts = {
 
 export type ClientGitOpts = {
   /**
-   * Set to true to keep .git directory.
+   * DEPRECATED: Set to true to keep .git directory.
    */
   keepGitDir?: boolean
 
@@ -998,18 +1005,11 @@ export type ClientModuleSourceOpts = {
    * If true, enforce that the source is a stable version for source kinds that support versioning.
    */
   stable?: boolean
-}
-
-export type ClientPipelineOpts = {
-  /**
-   * Description of the sub-pipeline.
-   */
-  description?: string
 
   /**
-   * Labels to apply to the sub-pipeline.
+   * The relative path to the module root from the host directory
    */
-  labels?: PipelineLabel[]
+  relHostPath?: string
 }
 
 export type ClientSecretOpts = {
@@ -1245,6 +1245,7 @@ export class Container extends BaseClient {
   private readonly _stderr?: string = undefined
   private readonly _stdout?: string = undefined
   private readonly _sync?: ContainerID = undefined
+  private readonly _up?: Void = undefined
   private readonly _user?: string = undefined
   private readonly _workdir?: string = undefined
 
@@ -1263,6 +1264,7 @@ export class Container extends BaseClient {
     _stderr?: string,
     _stdout?: string,
     _sync?: ContainerID,
+    _up?: Void,
     _user?: string,
     _workdir?: string,
   ) {
@@ -1278,6 +1280,7 @@ export class Container extends BaseClient {
     this._stderr = _stderr
     this._stdout = _stdout
     this._sync = _sync
+    this._up = _up
     this._user = _user
     this._workdir = _workdir
   }
@@ -1769,26 +1772,6 @@ export class Container extends BaseClient {
   }
 
   /**
-   * Creates a named sub-pipeline.
-   * @param name Name of the sub-pipeline.
-   * @param opts.description Description of the sub-pipeline.
-   * @param opts.labels Labels to apply to the sub-pipeline.
-   * @deprecated Explicit pipeline creation is now a no-op
-   */
-  pipeline = (name: string, opts?: ContainerPipelineOpts): Container => {
-    return new Container({
-      queryTree: [
-        ...this._queryTree,
-        {
-          operation: "pipeline",
-          args: { name, ...opts },
-        },
-      ],
-      ctx: this._ctx,
-    })
-  }
-
-  /**
    * The platform this container executes and publishes as.
    */
   platform = async (): Promise<Platform> => {
@@ -1965,6 +1948,32 @@ export class Container extends BaseClient {
   }
 
   /**
+   * Starts a Service and creates a tunnel that forwards traffic from the caller's network to that service.
+   *
+   * Be sure to set any exposed ports before calling this api.
+   * @param opts.ports List of frontend/backend port mappings to forward.
+   *
+   * Frontend is the port accepting traffic on the host, backend is the service port.
+   * @param opts.random Bind each tunnel port to a random port on the host.
+   */
+  up = async (opts?: ContainerUpOpts): Promise<void> => {
+    if (this._up) {
+      return
+    }
+
+    await computeQuery(
+      [
+        ...this._queryTree,
+        {
+          operation: "up",
+          args: { ...opts },
+        },
+      ],
+      await this._ctx.connection(),
+    )
+  }
+
+  /**
    * Retrieves the user to be set for all commands.
    */
   user = async (): Promise<string> => {
@@ -1983,6 +1992,24 @@ export class Container extends BaseClient {
     )
 
     return response
+  }
+
+  /**
+   * Retrieves this container plus the given OCI anotation.
+   * @param name The name of the annotation.
+   * @param value The value of the annotation.
+   */
+  withAnnotation = (name: string, value: string): Container => {
+    return new Container({
+      queryTree: [
+        ...this._queryTree,
+        {
+          operation: "withAnnotation",
+          args: { name, value },
+        },
+      ],
+      ctx: this._ctx,
+    })
   }
 
   /**
@@ -2104,7 +2131,6 @@ export class Container extends BaseClient {
    * @param args Command to run instead of the container's default command (e.g., ["run", "main.go"]).
    *
    * If empty, the container's default command is used.
-   * @param opts.skipEntrypoint DEPRECATED: For true this can be removed. For false, use `useEntrypoint` instead.
    * @param opts.useEntrypoint If the container has an entrypoint, prepend it to the args.
    * @param opts.stdin Content to write to the command's standard input before closing (e.g., "Hello world").
    * @param opts.redirectStdout Redirect the command's standard output to a file in the container (e.g., "/tmp/stdout").
@@ -2559,6 +2585,23 @@ export class Container extends BaseClient {
   }
 
   /**
+   * Retrieves this container minus the given OCI annotation.
+   * @param name The name of the annotation.
+   */
+  withoutAnnotation = (name: string): Container => {
+    return new Container({
+      queryTree: [
+        ...this._queryTree,
+        {
+          operation: "withoutAnnotation",
+          args: { name },
+        },
+      ],
+      ctx: this._ctx,
+    })
+  }
+
+  /**
    * Retrieves this container with unset default arguments for future commands.
    */
   withoutDefaultArgs = (): Container => {
@@ -2660,6 +2703,23 @@ export class Container extends BaseClient {
         {
           operation: "withoutFile",
           args: { path },
+        },
+      ],
+      ctx: this._ctx,
+    })
+  }
+
+  /**
+   * Retrieves this container with the files at the given paths removed.
+   * @param paths Location of the files to remove (e.g., ["/file.txt"]).
+   */
+  withoutFiles = (paths: string[]): Container => {
+    return new Container({
+      queryTree: [
+        ...this._queryTree,
+        {
+          operation: "withoutFiles",
+          args: { paths },
         },
       ],
       ctx: this._ctx,
@@ -3397,6 +3457,7 @@ export class DaggerEngineCacheEntrySet extends BaseClient {
  */
 export class Directory extends BaseClient {
   private readonly _id?: DirectoryID = undefined
+  private readonly _digest?: string = undefined
   private readonly _export?: string = undefined
   private readonly _sync?: DirectoryID = undefined
 
@@ -3406,12 +3467,14 @@ export class Directory extends BaseClient {
   constructor(
     parent?: { queryTree?: QueryTree[]; ctx: Context },
     _id?: DirectoryID,
+    _digest?: string,
     _export?: string,
     _sync?: DirectoryID,
   ) {
     super(parent)
 
     this._id = _id
+    this._digest = _digest
     this._export = _export
     this._sync = _sync
   }
@@ -3474,6 +3537,27 @@ export class Directory extends BaseClient {
       ],
       ctx: this._ctx,
     })
+  }
+
+  /**
+   * Return the directory's digest. The format of the digest is not guaranteed to be stable between releases of Dagger. It is guaranteed to be stable between invocations of the same Dagger engine.
+   */
+  digest = async (): Promise<string> => {
+    if (this._digest) {
+      return this._digest
+    }
+
+    const response: Awaited<string> = await computeQuery(
+      [
+        ...this._queryTree,
+        {
+          operation: "digest",
+        },
+      ],
+      await this._ctx.connection(),
+    )
+
+    return response
   }
 
   /**
@@ -3596,26 +3680,6 @@ export class Directory extends BaseClient {
     )
 
     return response
-  }
-
-  /**
-   * Creates a named sub-pipeline.
-   * @param name Name of the sub-pipeline.
-   * @param opts.description Description of the sub-pipeline.
-   * @param opts.labels Labels to apply to the sub-pipeline.
-   * @deprecated Explicit pipeline creation is now a no-op
-   */
-  pipeline = (name: string, opts?: DirectoryPipelineOpts): Directory => {
-    return new Directory({
-      queryTree: [
-        ...this._queryTree,
-        {
-          operation: "pipeline",
-          args: { name, ...opts },
-        },
-      ],
-      ctx: this._ctx,
-    })
   }
 
   /**
@@ -3826,6 +3890,23 @@ export class Directory extends BaseClient {
         {
           operation: "withoutFile",
           args: { path },
+        },
+      ],
+      ctx: this._ctx,
+    })
+  }
+
+  /**
+   * Retrieves this directory with the files at the given paths removed.
+   * @param paths Location of the file to remove (e.g., ["/file.txt"]).
+   */
+  withoutFiles = (paths: string[]): Directory => {
+    return new Directory({
+      queryTree: [
+        ...this._queryTree,
+        {
+          operation: "withoutFiles",
+          args: { paths },
         },
       ],
       ctx: this._ctx,
@@ -4659,6 +4740,8 @@ export class Function_ extends BaseClient {
    * @param typeDef The type of the argument
    * @param opts.description A doc string for the argument, if any
    * @param opts.defaultValue A default value to use for this argument if not explicitly set by the caller, if any
+   * @param opts.defaultPath If the argument is a Directory or File type, default to load path from context directory, relative to root directory.
+   * @param opts.ignore Patterns to ignore when loading the contextual argument value.
    */
   withArg = (
     name: string,
@@ -4711,6 +4794,7 @@ export class Function_ extends BaseClient {
  */
 export class FunctionArg extends BaseClient {
   private readonly _id?: FunctionArgID = undefined
+  private readonly _defaultPath?: string = undefined
   private readonly _defaultValue?: JSON = undefined
   private readonly _description?: string = undefined
   private readonly _name?: string = undefined
@@ -4721,6 +4805,7 @@ export class FunctionArg extends BaseClient {
   constructor(
     parent?: { queryTree?: QueryTree[]; ctx: Context },
     _id?: FunctionArgID,
+    _defaultPath?: string,
     _defaultValue?: JSON,
     _description?: string,
     _name?: string,
@@ -4728,6 +4813,7 @@ export class FunctionArg extends BaseClient {
     super(parent)
 
     this._id = _id
+    this._defaultPath = _defaultPath
     this._defaultValue = _defaultValue
     this._description = _description
     this._name = _name
@@ -4746,6 +4832,27 @@ export class FunctionArg extends BaseClient {
         ...this._queryTree,
         {
           operation: "id",
+        },
+      ],
+      await this._ctx.connection(),
+    )
+
+    return response
+  }
+
+  /**
+   * Only applies to arguments of type File or Directory. If the argument is not set, load it from the given path in the context directory
+   */
+  defaultPath = async (): Promise<string> => {
+    if (this._defaultPath) {
+      return this._defaultPath
+    }
+
+    const response: Awaited<string> = await computeQuery(
+      [
+        ...this._queryTree,
+        {
+          operation: "defaultPath",
         },
       ],
       await this._ctx.connection(),
@@ -4788,6 +4895,23 @@ export class FunctionArg extends BaseClient {
         ...this._queryTree,
         {
           operation: "description",
+        },
+      ],
+      await this._ctx.connection(),
+    )
+
+    return response
+  }
+
+  /**
+   * Only applies to arguments of type Directory. The ignore patterns are applied to the input directory, and matching entries are filtered out, in a cache-efficient manner.
+   */
+  ignore = async (): Promise<string[]> => {
+    const response: Awaited<string[]> = await computeQuery(
+      [
+        ...this._queryTree,
+        {
+          operation: "ignore",
         },
       ],
       await this._ctx.connection(),
@@ -5231,7 +5355,6 @@ export class GeneratedCode extends BaseClient {
 export class GitModuleSource extends BaseClient {
   private readonly _id?: GitModuleSourceID = undefined
   private readonly _cloneRef?: string = undefined
-  private readonly _cloneURL?: string = undefined
   private readonly _commit?: string = undefined
   private readonly _htmlRepoURL?: string = undefined
   private readonly _htmlURL?: string = undefined
@@ -5246,7 +5369,6 @@ export class GitModuleSource extends BaseClient {
     parent?: { queryTree?: QueryTree[]; ctx: Context },
     _id?: GitModuleSourceID,
     _cloneRef?: string,
-    _cloneURL?: string,
     _commit?: string,
     _htmlRepoURL?: string,
     _htmlURL?: string,
@@ -5258,7 +5380,6 @@ export class GitModuleSource extends BaseClient {
 
     this._id = _id
     this._cloneRef = _cloneRef
-    this._cloneURL = _cloneURL
     this._commit = _commit
     this._htmlRepoURL = _htmlRepoURL
     this._htmlURL = _htmlURL
@@ -5301,28 +5422,6 @@ export class GitModuleSource extends BaseClient {
         ...this._queryTree,
         {
           operation: "cloneRef",
-        },
-      ],
-      await this._ctx.connection(),
-    )
-
-    return response
-  }
-
-  /**
-   * The URL to clone the root of the git repo from
-   * @deprecated Use CloneRef instead. CloneRef supports both URL-style and SCP-like SSH references
-   */
-  cloneURL = async (): Promise<string> => {
-    if (this._cloneURL) {
-      return this._cloneURL
-    }
-
-    const response: Awaited<string> = await computeQuery(
-      [
-        ...this._queryTree,
-        {
-          operation: "cloneURL",
         },
       ],
       await this._ctx.connection(),
@@ -5538,13 +5637,15 @@ export class GitRef extends BaseClient {
 
   /**
    * The filesystem tree at this ref.
+   * @param opts.discardGitDir Set to true to discard .git directory.
    */
-  tree = (): Directory => {
+  tree = (opts?: GitRefTreeOpts): Directory => {
     return new Directory({
       queryTree: [
         ...this._queryTree,
         {
           operation: "tree",
+          args: { ...opts },
         },
       ],
       ctx: this._ctx,
@@ -6302,6 +6403,7 @@ export class ListTypeDef extends BaseClient {
  */
 export class LocalModuleSource extends BaseClient {
   private readonly _id?: LocalModuleSourceID = undefined
+  private readonly _relHostPath?: string = undefined
   private readonly _rootSubpath?: string = undefined
 
   /**
@@ -6310,11 +6412,13 @@ export class LocalModuleSource extends BaseClient {
   constructor(
     parent?: { queryTree?: QueryTree[]; ctx: Context },
     _id?: LocalModuleSourceID,
+    _relHostPath?: string,
     _rootSubpath?: string,
   ) {
     super(parent)
 
     this._id = _id
+    this._relHostPath = _relHostPath
     this._rootSubpath = _rootSubpath
   }
 
@@ -6352,6 +6456,27 @@ export class LocalModuleSource extends BaseClient {
       ],
       ctx: this._ctx,
     })
+  }
+
+  /**
+   * The relative path to the module root from the host directory
+   */
+  relHostPath = async (): Promise<string> => {
+    if (this._relHostPath) {
+      return this._relHostPath
+    }
+
+    const response: Awaited<string> = await computeQuery(
+      [
+        ...this._queryTree,
+        {
+          operation: "relHostPath",
+        },
+      ],
+      await this._ctx.connection(),
+    )
+
+    return response
   }
 
   /**
@@ -6957,6 +7082,7 @@ export class ModuleSource extends BaseClient {
   private readonly _id?: ModuleSourceID = undefined
   private readonly _asString?: string = undefined
   private readonly _configExists?: boolean = undefined
+  private readonly _digest?: string = undefined
   private readonly _kind?: ModuleSourceKind = undefined
   private readonly _moduleName?: string = undefined
   private readonly _moduleOriginalName?: string = undefined
@@ -6972,6 +7098,7 @@ export class ModuleSource extends BaseClient {
     _id?: ModuleSourceID,
     _asString?: string,
     _configExists?: boolean,
+    _digest?: string,
     _kind?: ModuleSourceKind,
     _moduleName?: string,
     _moduleOriginalName?: string,
@@ -6984,6 +7111,7 @@ export class ModuleSource extends BaseClient {
     this._id = _id
     this._asString = _asString
     this._configExists = _configExists
+    this._digest = _digest
     this._kind = _kind
     this._moduleName = _moduleName
     this._moduleOriginalName = _moduleOriginalName
@@ -7156,6 +7284,27 @@ export class ModuleSource extends BaseClient {
   }
 
   /**
+   * Return the module source's content digest. The format of the digest is not guaranteed to be stable between releases of Dagger. It is guaranteed to be stable between invocations of the same Dagger engine.
+   */
+  digest = async (): Promise<string> => {
+    if (this._digest) {
+      return this._digest
+    }
+
+    const response: Awaited<string> = await computeQuery(
+      [
+        ...this._queryTree,
+        {
+          operation: "digest",
+        },
+      ],
+      await this._ctx.connection(),
+    )
+
+    return response
+  }
+
+  /**
    * The directory containing the module configuration and source code (source code may be in a subdir).
    * @param path The path from the source directory to select.
    */
@@ -7277,6 +7426,7 @@ export class ModuleSource extends BaseClient {
    * Load a directory from the caller optionally with a given view applied.
    * @param path The path on the caller's filesystem to load.
    * @param opts.viewName If set, the name of the view to apply to the path.
+   * @param opts.ignore Patterns to ignore when loading the directory.
    */
   resolveDirectoryFromCaller = (
     path: string,
@@ -8220,7 +8370,7 @@ export class Client extends BaseClient {
    * Can be formatted as `https://{host}/{owner}/{repo}`, `git@{host}:{owner}/{repo}`.
    *
    * Suffix ".git" is optional.
-   * @param opts.keepGitDir Set to true to keep .git directory.
+   * @param opts.keepGitDir DEPRECATED: Set to true to keep .git directory.
    * @param opts.experimentalServiceHost A service which must be started before the repo is fetched.
    * @param opts.sshKnownHosts Set SSH known hosts
    * @param opts.sshAuthSocket Set SSH auth socket
@@ -8945,6 +9095,7 @@ export class Client extends BaseClient {
    * Create a new module source instance from a source ref string.
    * @param refString The string ref representation of the module source
    * @param opts.stable If true, enforce that the source is a stable version for source kinds that support versioning.
+   * @param opts.relHostPath The relative path to the module root from the host directory
    */
   moduleSource = (
     refString: string,
@@ -8956,26 +9107,6 @@ export class Client extends BaseClient {
         {
           operation: "moduleSource",
           args: { refString, ...opts },
-        },
-      ],
-      ctx: this._ctx,
-    })
-  }
-
-  /**
-   * Creates a named sub-pipeline.
-   * @param name Name of the sub-pipeline.
-   * @param opts.description Description of the sub-pipeline.
-   * @param opts.labels Labels to apply to the sub-pipeline.
-   * @deprecated Explicit pipeline creation is now a no-op
-   */
-  pipeline = (name: string, opts?: ClientPipelineOpts): Client => {
-    return new Client({
-      queryTree: [
-        ...this._queryTree,
-        {
-          operation: "pipeline",
-          args: { name, ...opts },
         },
       ],
       ctx: this._ctx,
@@ -9048,15 +9179,6 @@ export class Client extends BaseClient {
     )
 
     return response
-  }
-
-  /**
-   * Call the provided function with current Client.
-   *
-   * This is useful for reusability and readability by not breaking the calling chain.
-   */
-  with = (arg: (param: Client) => Client) => {
-    return arg(this)
   }
 }
 

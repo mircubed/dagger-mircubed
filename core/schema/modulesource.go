@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -16,8 +17,8 @@ import (
 	"github.com/dagger/dagger/core"
 	"github.com/dagger/dagger/core/modules"
 	"github.com/dagger/dagger/dagql"
-	"github.com/dagger/dagger/engine/buildkit"
 	"github.com/dagger/dagger/engine/client"
+	"github.com/dagger/dagger/engine/slog"
 	"github.com/dagger/dagger/engine/vcs"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/tonistiigi/fsutil/types"
@@ -28,6 +29,10 @@ type moduleSourceArgs struct {
 	RefString string
 
 	Stable bool `default:"false"`
+
+	// relHostPath is the relative path to the module root from the host directory.
+	// This should only be used internally.
+	RelHostPath string `default:""`
 }
 
 func (s *moduleSchema) moduleSource(ctx context.Context, query *core.Query, args moduleSourceArgs) (*core.ModuleSource, error) {
@@ -63,13 +68,14 @@ func (s *moduleSchema) moduleSource(ctx context.Context, query *core.Query, args
 
 		src.AsLocalSource = dagql.NonNull(&core.LocalModuleSource{
 			RootSubpath: parsed.modPath,
+			RelHostPath: args.RelHostPath,
 		})
 
 	case core.ModuleSourceKindGit:
 		src.AsGitSource = dagql.NonNull(&core.GitModuleSource{})
 
 		src.AsGitSource.Value.Root = parsed.repoRoot.Root
-		src.AsGitSource.Value.HtmlRepoURL = parsed.repoRoot.Repo
+		src.AsGitSource.Value.HTMLRepoURL = parsed.repoRoot.Repo
 
 		// Determine usernames for source reference and actual cloning
 		sourceUser, cloneUser := parsed.sshusername, parsed.sshusername
@@ -87,8 +93,6 @@ func (s *moduleSchema) moduleSource(ctx context.Context, query *core.Query, args
 
 		// Construct the source reference (preserves original input)
 		src.AsGitSource.Value.CloneRef = parsed.scheme.Prefix() + sourceUser + parsed.repoRoot.Root
-		// DEPRECATED: point CloneURL to new CloneRef implementation
-		src.AsGitSource.Value.CloneURL = src.AsGitSource.Value.CloneRef
 
 		// Construct the reference for actual cloning (ensures username for SSH)
 		cloneRef := parsed.scheme.Prefix() + cloneUser + parsed.repoRoot.Root
@@ -211,16 +215,27 @@ type buildkitClient interface {
 // - if not, try to isolate root of git repo from the ref
 // - if nothing worked, fallback as local ref, as before
 func parseRefString(ctx context.Context, bk buildkitClient, refString string) parsedRefString {
+	ctx, span := core.Tracer(ctx).Start(ctx, fmt.Sprintf("parseRefString: %s", refString), trace.WithSpanKind(trace.SpanKindInternal))
+	defer span.End()
 	localParsed := parsedRefString{
 		modPath: refString,
 		kind:    core.ModuleSourceKindLocal,
 		scheme:  core.NoScheme,
 	}
 
+	// if the refString is a relative path, we can short-circuit here as we
+	// don't really about the `stat` return as the refString will always
+	// be local in this case.
+	if strings.HasPrefix(refString, ".") {
+		return localParsed
+	}
+
 	// First, we stat ref in case the mod path github.com/username is a local directory
 	stat, err := bk.StatCallerHostPath(ctx, refString, false)
 	if err == nil && stat.IsDir() {
 		return localParsed
+	} else if err != nil {
+		slog.Debug("parseRefString stat error", "error", err)
 	}
 
 	// Parse scheme and attempt to parse as git endpoint
@@ -345,6 +360,14 @@ func (s *moduleSchema) gitModuleSourceHTMLURL(
 	args struct{},
 ) (string, error) {
 	return ref.HTMLURL(), nil
+}
+
+func (s *moduleSchema) gitModuleSourceCloneURL(
+	ctx context.Context,
+	ref *core.GitModuleSource,
+	args struct{},
+) (string, error) {
+	return ref.CloneRef, nil
 }
 
 func (s *moduleSchema) moduleSourceConfigExists(
@@ -743,44 +766,8 @@ func (s *moduleSchema) moduleSourceResolveContextPathFromCaller(
 	src *core.ModuleSource,
 	args struct{},
 ) (string, error) {
-	contextAbsPath, _, err := s.resolveContextPathFromCaller(ctx, src)
+	contextAbsPath, _, err := src.ResolveContextPathFromCaller(ctx)
 	return contextAbsPath, err
-}
-
-func (s *moduleSchema) resolveContextPathFromCaller(
-	ctx context.Context,
-	src *core.ModuleSource,
-) (contextRootAbsPath, sourceRootAbsPath string, _ error) {
-	if src.Kind != core.ModuleSourceKindLocal {
-		return "", "", fmt.Errorf("cannot resolve non-local module source from caller")
-	}
-
-	rootSubpath, err := src.SourceRootSubpath()
-	if err != nil {
-		return "", "", fmt.Errorf("failed to get source root subpath: %w", err)
-	}
-
-	bk, err := src.Query.Buildkit(ctx)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to get buildkit client: %w", err)
-	}
-	sourceRootStat, err := bk.StatCallerHostPath(ctx, rootSubpath, true)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to stat source root: %w", err)
-	}
-	sourceRootAbsPath = sourceRootStat.Path
-
-	contextAbsPath, contextFound, err := callerHostFindUpContext(ctx, bk, sourceRootAbsPath)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to find up root: %w", err)
-	}
-
-	if !contextFound {
-		// default to restricting to the source root dir, make it abs though for consistency
-		contextAbsPath = sourceRootAbsPath
-	}
-
-	return contextAbsPath, sourceRootAbsPath, nil
 }
 
 //nolint:gocyclo // it's already been split up where it makes sense, more would just create indirection in reading it
@@ -789,7 +776,7 @@ func (s *moduleSchema) moduleSourceResolveFromCaller(
 	src *core.ModuleSource,
 	args struct{},
 ) (inst dagql.Instance[*core.ModuleSource], err error) {
-	contextAbsPath, sourceRootAbsPath, err := s.resolveContextPathFromCaller(ctx, src)
+	contextAbsPath, sourceRootAbsPath, err := src.ResolveContextPathFromCaller(ctx)
 	if err != nil {
 		return inst, err
 	}
@@ -808,11 +795,10 @@ func (s *moduleSchema) moduleSourceResolveFromCaller(
 		return inst, fmt.Errorf("failed to collect local module source deps: %w", err)
 	}
 
-	includeSet := map[string]struct{}{}
-	excludeSet := map[string]struct{}{
-		// always exclude .git dirs, we don't need them and they tend to invalidate cache a lot
-		"**/.git": {},
-	}
+	var includeSet core.SliceSet[string] = []string{}
+	// always exclude .git dirs, we don't need them and they tend to invalidate cache a lot
+	var excludeSet core.SliceSet[string] = []string{"**/.git"}
+
 	sdkSet := map[string]core.SDK{}
 	sourceRootPaths := collectedDeps.Keys()
 	for _, rootPath := range sourceRootPaths {
@@ -837,7 +823,7 @@ func (s *moduleSchema) moduleSourceResolveFromCaller(
 			if localDep.modCfg == nil {
 				// uninitialized top-level module source, include it's source root dir (otherwise
 				// we could load everything if no other includes end up being specified)
-				includeSet[sourceRootRelPath] = struct{}{}
+				includeSet.Append(sourceRootAbsPath)
 				continue
 			}
 		} else {
@@ -851,7 +837,7 @@ func (s *moduleSchema) moduleSourceResolveFromCaller(
 		}
 
 		// rebase user defined include/exclude relative to context
-		rebaseIncludeExclude := func(path string, set map[string]struct{}) error {
+		rebaseIncludeExclude := func(path string, set *core.SliceSet[string]) error {
 			isNegation := strings.HasPrefix(path, "!")
 			path = strings.TrimPrefix(path, "!")
 			absPath := filepath.Join(sourceRootAbsPath, path)
@@ -865,16 +851,16 @@ func (s *moduleSchema) moduleSourceResolveFromCaller(
 			if isNegation {
 				relPath = "!" + relPath
 			}
-			set[relPath] = struct{}{}
+			set.Append(relPath)
 			return nil
 		}
 		for _, path := range localDep.modCfg.Include {
-			if err := rebaseIncludeExclude(path, includeSet); err != nil {
+			if err := rebaseIncludeExclude(path, &includeSet); err != nil {
 				return inst, err
 			}
 		}
 		for _, path := range localDep.modCfg.Exclude {
-			if err := rebaseIncludeExclude(path, excludeSet); err != nil {
+			if err := rebaseIncludeExclude(path, &excludeSet); err != nil {
 				return inst, err
 			}
 		}
@@ -884,7 +870,7 @@ func (s *moduleSchema) moduleSourceResolveFromCaller(
 		if err != nil {
 			return inst, fmt.Errorf("failed to get relative path: %w", err)
 		}
-		includeSet[configRelPath] = struct{}{}
+		includeSet.Append(configRelPath)
 
 		// always include the source dir
 		source := localDep.modCfg.Source
@@ -899,7 +885,7 @@ func (s *moduleSchema) moduleSourceResolveFromCaller(
 		if !filepath.IsLocal(sourceRelSubpath) {
 			return inst, fmt.Errorf("local module source path %q escapes context %q", sourceRelSubpath, contextAbsPath)
 		}
-		includeSet[sourceRelSubpath+"/**/*"] = struct{}{}
+		includeSet.Append(sourceRelSubpath + "/**/*")
 	}
 
 	for _, sdk := range sdkSet {
@@ -911,16 +897,16 @@ func (s *moduleSchema) moduleSourceResolveFromCaller(
 			return inst, fmt.Errorf("failed to get sdk required paths: %w", err)
 		}
 		for _, path := range requiredPaths {
-			includeSet[path] = struct{}{}
+			includeSet.Append(path)
 		}
 	}
 
 	includes := make([]string, 0, len(includeSet))
-	for include := range includeSet {
+	for _, include := range includeSet {
 		includes = append(includes, include)
 	}
 	excludes := make([]string, 0, len(excludeSet))
-	for exclude := range excludeSet {
+	for _, exclude := range excludeSet {
 		excludes = append(excludes, exclude)
 	}
 
@@ -943,7 +929,12 @@ func (s *moduleSchema) moduleSourceResolveFromCaller(
 		return inst, fmt.Errorf("failed to load local module source: %w", err)
 	}
 
-	return s.normalizeCallerLoadedSource(ctx, src, sourceRootRelPath, loadedDir)
+	rootSubPath, err := src.SourceRootSubpath()
+	if err != nil {
+		return inst, fmt.Errorf("failed to get source root subpath: %w", err)
+	}
+
+	return s.normalizeCallerLoadedSource(ctx, src, sourceRootRelPath, rootSubPath, loadedDir)
 }
 
 // get an instance of ModuleSource with the context resolved from the caller that doesn't
@@ -953,6 +944,7 @@ func (s *moduleSchema) normalizeCallerLoadedSource(
 	ctx context.Context,
 	src *core.ModuleSource,
 	sourceRootRelPath string,
+	relHostPath string,
 	loadedDir dagql.Instance[*core.Directory],
 ) (inst dagql.Instance[*core.ModuleSource], err error) {
 	err = s.dag.Select(ctx, s.dag.Root(), &inst,
@@ -960,6 +952,7 @@ func (s *moduleSchema) normalizeCallerLoadedSource(
 			Field: "moduleSource",
 			Args: []dagql.NamedInput{
 				{Name: "refString", Value: dagql.String(sourceRootRelPath)},
+				{Name: "relHostPath", Value: dagql.String(relHostPath)},
 			},
 		},
 		dagql.Selector{
@@ -1180,6 +1173,14 @@ func (s *moduleSchema) collectCallerLocalDeps(
 				// SDK is a local custom one, it needs to be included
 				sdkPath := filepath.Join(sourceRootAbsPath, parsed.modPath)
 
+				// this check here enable us to send more specific error
+				// if the sdk provided by user is neither an inbuiltsdk,
+				// nor a valid sdk available on local path.
+				_, err = bk.StatCallerHostPath(ctx, sdkPath, true)
+				if err != nil {
+					return nil, getInvalidBuiltinSDKError(modCfg.SDK)
+				}
+
 				err = s.collectCallerLocalDeps(ctx, query, contextAbsPath, sdkPath, false, src, collectedDeps)
 				if err != nil {
 					return nil, fmt.Errorf("failed to collect local sdk: %w", err)
@@ -1241,35 +1242,13 @@ func (s *moduleSchema) collectCallerLocalDeps(
 	return err
 }
 
-// context path is the parent dir containing .git
-func callerHostFindUpContext(
-	ctx context.Context,
-	bk *buildkit.Client,
-	curDirPath string,
-) (string, bool, error) {
-	_, err := bk.StatCallerHostPath(ctx, filepath.Join(curDirPath, ".git"), false)
-	if err == nil {
-		return curDirPath, true, nil
-	}
-	// TODO: remove the strings.Contains check here (which aren't cross-platform),
-	// since we now set NotFound (since v0.11.2)
-	if status.Code(err) != codes.NotFound && !strings.Contains(err.Error(), "no such file or directory") {
-		return "", false, fmt.Errorf("failed to lstat .git: %w", err)
-	}
-
-	nextDirPath := filepath.Dir(curDirPath)
-	if curDirPath == nextDirPath {
-		return "", false, nil
-	}
-	return callerHostFindUpContext(ctx, bk, nextDirPath)
-}
-
 func (s *moduleSchema) moduleSourceResolveDirectoryFromCaller(
 	ctx context.Context,
 	src *core.ModuleSource,
 	args struct {
 		Path     string
 		ViewName *string
+		Ignore   []string `default:"[]"`
 	},
 ) (inst dagql.Instance[*core.Directory], err error) {
 	path := args.Path
@@ -1298,6 +1277,11 @@ func (s *moduleSchema) moduleSourceResolveDirectoryFromCaller(
 				includes = append(includes, p)
 			}
 		}
+	}
+
+	// If there's no view configured, we can apply ignore patterns.
+	if args.ViewName == nil && len(args.Ignore) > 0 {
+		excludes = append(excludes, args.Ignore...)
 	}
 
 	_, desc, err := bk.LocalImport(
@@ -1352,6 +1336,14 @@ func (s *moduleSchema) moduleSourceWithView(
 	}
 	src.WithViews = append(src.WithViews, view)
 	return src, nil
+}
+
+func (s *moduleSchema) moduleSourceDigest(
+	ctx context.Context,
+	src *core.ModuleSource,
+	args struct{},
+) (string, error) {
+	return src.Digest(ctx)
 }
 
 func (s *moduleSchema) moduleSourceViewName(

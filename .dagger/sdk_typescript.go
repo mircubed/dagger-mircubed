@@ -22,7 +22,7 @@ const (
 	nodeVersionMaintenance = "18"
 	nodeVersionLTS         = "20"
 
-	bunVersion = "1.1.12"
+	bunVersion = "1.1.26"
 )
 
 type TypescriptSDK struct {
@@ -162,6 +162,11 @@ func (t TypescriptSDK) Generate(ctx context.Context) (*dagger.Directory, error) 
 	return dag.Directory().WithFile(typescriptGeneratedAPIPath, generated), nil
 }
 
+// Test the publishing process
+func (t TypescriptSDK) TestPublish(ctx context.Context, tag string) error {
+	return t.Publish(ctx, tag, true, nil, "https://github.com/dagger/dagger.git", nil)
+}
+
 // Publish the Typescript SDK
 func (t TypescriptSDK) Publish(
 	ctx context.Context,
@@ -171,15 +176,22 @@ func (t TypescriptSDK) Publish(
 	dryRun bool,
 	// +optional
 	npmToken *dagger.Secret,
+
+	// +optional
+	// +default="https://github.com/dagger/dagger.git"
+	gitRepoSource string,
+	// +optional
+	githubToken *dagger.Secret,
 ) error {
-	version := strings.TrimPrefix(tag, "sdk/typescript/v")
+	version, isVersioned := strings.CutPrefix(tag, "sdk/typescript/")
+	versionFlag := strings.TrimPrefix(version, "v")
 	if dryRun {
-		version = "prepatch"
+		versionFlag = "prepatch"
 	}
 
 	build := t.nodeJsBase().
 		WithExec([]string{"npm", "run", "build"}).
-		WithExec([]string{"npm", "version", version})
+		WithExec([]string{"npm", "version", versionFlag})
 	if !dryRun {
 		plaintext, err := npmToken.Plaintext(ctx)
 		if err != nil {
@@ -195,9 +207,24 @@ always-auth=true`, plaintext)
 	if dryRun {
 		publish = build.WithExec([]string{"npm", "publish", "--access", "public", "--dry-run"})
 	}
-
 	_, err := publish.Sync(ctx)
-	return err
+	if err != nil {
+		return err
+	}
+
+	if isVersioned {
+		if err := githubRelease(ctx, githubReleaseOpts{
+			tag:         tag,
+			notes:       sdkChangeNotes(t.Dagger.Src, "typescript", version),
+			gitRepo:     gitRepoSource,
+			githubToken: githubToken,
+			dryRun:      dryRun,
+		}); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // Bump the Typescript SDK's Engine dependency

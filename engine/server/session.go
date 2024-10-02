@@ -47,6 +47,7 @@ import (
 	"github.com/dagger/dagger/engine"
 	"github.com/dagger/dagger/engine/buildkit"
 	"github.com/dagger/dagger/engine/cache"
+	"github.com/dagger/dagger/engine/server/resource"
 	"github.com/dagger/dagger/engine/slog"
 	enginetel "github.com/dagger/dagger/engine/telemetry"
 )
@@ -103,10 +104,11 @@ const (
 )
 
 type daggerClient struct {
-	daggerSession *daggerSession
-	clientID      string
-	clientVersion string
-	secretToken   string
+	daggerSession  *daggerSession
+	clientID       string
+	clientVersion  string
+	secretToken    string
+	clientMetadata *engine.ClientMetadata
 
 	// closed after the shutdown endpoint is called
 	shutdownCh        chan struct{}
@@ -269,10 +271,10 @@ func (srv *Server) initializeDaggerSession(
 }
 
 func (sess *daggerSession) withShutdownCancel(ctx context.Context) context.Context {
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancelCause(ctx)
 	go func() {
 		<-sess.shutdownCh
-		cancel()
+		cancel(errors.New("session shutdown called"))
 	}()
 	return ctx
 }
@@ -394,7 +396,7 @@ type ClientInitOpts struct {
 	// Needed to handle finding any secrets, sockets or other client resources
 	// that this client should have access to due to being set in the parent
 	// object.
-	ParentIDs map[digest.Digest]*call.ID
+	ParentIDs map[digest.Digest]*resource.ID
 }
 
 // requires that client.stateMu is held
@@ -411,7 +413,7 @@ func (srv *Server) initializeDaggerClient(
 		if opts.CallerClientID == "" {
 			return fmt.Errorf("caller client ID is not set")
 		}
-		if err := srv.addClientResourcesFromID(ctx, client, opts.CallID, opts.CallerClientID, true); err != nil {
+		if err := srv.addClientResourcesFromID(ctx, client, &resource.ID{ID: *opts.CallID}, opts.CallerClientID, true); err != nil {
 			return fmt.Errorf("failed to add client resources from ID: %w", err)
 		}
 	}
@@ -605,6 +607,7 @@ func (srv *Server) initializeDaggerClient(
 		)),
 	}
 	loggerOpts := []sdklog.LoggerProviderOption{
+		sdklog.WithResource(telemetry.Resource),
 		sdklog.WithProcessor(
 			sdklog.NewBatchProcessor(
 				srv.telemetryPubSub.Logs(client),
@@ -729,12 +732,13 @@ func (srv *Server) getOrInitClient(
 	client, clientExists := sess.clients[clientID]
 	if !clientExists {
 		client = &daggerClient{
-			state:         clientStateUninitialized,
-			daggerSession: sess,
-			clientID:      clientID,
-			clientVersion: opts.ClientVersion,
-			secretToken:   token,
-			shutdownCh:    make(chan struct{}),
+			state:          clientStateUninitialized,
+			daggerSession:  sess,
+			clientID:       clientID,
+			clientVersion:  opts.ClientVersion,
+			secretToken:    token,
+			shutdownCh:     make(chan struct{}),
+			clientMetadata: opts.ClientMetadata,
 		}
 		sess.clients[clientID] = client
 
@@ -880,8 +884,8 @@ const InstrumentationLibrary = "dagger.io/engine.server"
 
 func (srv *Server) serveHTTPToClient(w http.ResponseWriter, r *http.Request, opts *ClientInitOpts) (rerr error) {
 	ctx := r.Context()
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(fmt.Errorf("http request done for client %q", opts.ClientID))
 
 	clientMetadata := opts.ClientMetadata
 	ctx = engine.ContextWithClientMetadata(ctx, clientMetadata)
@@ -918,7 +922,14 @@ func (srv *Server) serveHTTPToClient(w http.ResponseWriter, r *http.Request, opt
 	default:
 		client, cleanup, err := srv.getOrInitClient(ctx, opts)
 		if err != nil {
-			return fmt.Errorf("get or init client: %w", err)
+			err = fmt.Errorf("get or init client: %w", err)
+			switch r.URL.Path {
+			case engine.QueryEndpoint:
+				err = gqlErr(err, http.StatusInternalServerError)
+			default:
+				err = httpErr(err, http.StatusInternalServerError)
+			}
+			return err
 		}
 		defer func() {
 			err := cleanup()
@@ -1293,6 +1304,30 @@ func (srv *Server) OCIStore() content.Store {
 // The lease manager for the engine as a whole
 func (srv *Server) LeaseManager() *leaseutil.Manager {
 	return srv.leaseManager
+}
+
+// The nearest ancestor client that is not a module (either a caller from the host like the CLI
+// or a nested exec). Useful for figuring out where local sources should be resolved from through
+// chains of dependency modules.
+func (srv *Server) NonModuleParentClientMetadata(ctx context.Context) (*engine.ClientMetadata, error) {
+	client, err := srv.clientFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if client.mod == nil {
+		// not a module client, return the metadata
+		return client.clientMetadata, nil
+	}
+	for i := len(client.parents) - 1; i >= 0; i-- {
+		parent := client.parents[i]
+		if parent.mod == nil {
+			// not a module client, return the metadata
+			return parent.clientMetadata, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no non-module parent found")
 }
 
 type httpError struct {

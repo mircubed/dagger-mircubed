@@ -25,6 +25,7 @@ func (s *directorySchema) Install() {
 		Syncer[*core.Directory]().
 			Doc(`Force evaluation in the engine.`),
 		dagql.Func("pipeline", s.pipeline).
+			View(BeforeVersion("v0.13.0")).
 			Deprecated("Explicit pipeline creation is now a no-op").
 			Doc(`Creates a named sub-pipeline.`).
 			ArgDoc("name", "Name of the sub-pipeline.").
@@ -36,6 +37,12 @@ func (s *directorySchema) Install() {
 		dagql.Func("glob", s.glob).
 			Doc(`Returns a list of files and directories that matche the given pattern.`).
 			ArgDoc("pattern", `Pattern to match (e.g., "*.md").`),
+		dagql.Func("digest", s.digest).
+			Doc(
+				`Return the directory's digest.
+				The format of the digest is not guaranteed to be stable between releases of Dagger.
+				It is guaranteed to be stable between invocations of the same Dagger engine.`,
+			),
 		dagql.Func("file", s.file).
 			Doc(`Retrieves a file at the given path.`).
 			ArgDoc("path", `Location of the file to retrieve (e.g., "README.md").`),
@@ -57,6 +64,9 @@ func (s *directorySchema) Install() {
 		dagql.Func("withoutFile", s.withoutFile).
 			Doc(`Retrieves this directory with the file at the given path removed.`).
 			ArgDoc("path", `Location of the file to remove (e.g., "/file.txt").`),
+		dagql.Func("withoutFiles", s.withoutFiles).
+			Doc(`Retrieves this directory with the files at the given paths removed.`).
+			ArgDoc("paths", `Location of the file to remove (e.g., ["/file.txt"]).`),
 		dagql.Func("directory", s.subdirectory).
 			Doc(`Retrieves a directory at the given path.`).
 			ArgDoc("path", `Location of the directory to retrieve (e.g., "/src").`),
@@ -129,7 +139,7 @@ func (s *directorySchema) pipeline(ctx context.Context, parent *core.Directory, 
 
 func (s *directorySchema) directory(ctx context.Context, parent *core.Query, _ struct{}) (*core.Directory, error) {
 	platform := parent.Platform()
-	return core.NewScratchDirectory(parent, platform), nil
+	return core.NewScratchDirectory(ctx, parent, platform)
 }
 
 type subdirectoryArgs struct {
@@ -190,6 +200,15 @@ type globArgs struct {
 
 func (s *directorySchema) glob(ctx context.Context, parent *core.Directory, args globArgs) ([]string, error) {
 	return parent.Glob(ctx, args.Pattern)
+}
+
+func (s *directorySchema) digest(ctx context.Context, parent *core.Directory, args struct{}) (dagql.String, error) {
+	digest, err := parent.Digest(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	return dagql.NewString(digest), nil
 }
 
 type dirFileArgs struct {
@@ -256,6 +275,14 @@ type withoutFileArgs struct {
 
 func (s *directorySchema) withoutFile(ctx context.Context, parent *core.Directory, args withoutFileArgs) (*core.Directory, error) {
 	return parent.Without(ctx, args.Path)
+}
+
+type withoutFilesArgs struct {
+	Paths []string
+}
+
+func (s *directorySchema) withoutFiles(ctx context.Context, parent *core.Directory, args withoutFilesArgs) (*core.Directory, error) {
+	return parent.Without(ctx, args.Paths...)
 }
 
 type diffArgs struct {

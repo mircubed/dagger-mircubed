@@ -258,18 +258,6 @@ type Container {
   """Retrieves the list of paths where a directory is mounted."""
   mounts: [String!]!
 
-  """Creates a named sub-pipeline."""
-  pipeline(
-    """Description of the sub-pipeline."""
-    description: String = ""
-
-    """Labels to apply to the sub-pipeline."""
-    labels: [PipelineLabel!] = []
-
-    """Name of the sub-pipeline."""
-    name: String!
-  ): Container! @deprecated(reason: "Explicit pipeline creation is now a no-op")
-
   """The platform this container executes and publishes as."""
   platform: Platform!
 
@@ -366,8 +354,34 @@ type Container {
     insecureRootCapabilities: Boolean = false
   ): Container!
 
+  """
+  Starts a Service and creates a tunnel that forwards traffic from the caller's network to that service.
+  
+  Be sure to set any exposed ports before calling this api.
+  """
+  up(
+    """
+    List of frontend/backend port mappings to forward.
+    
+    Frontend is the port accepting traffic on the host, backend is the service port.
+    """
+    ports: [PortForward!] = []
+
+    """Bind each tunnel port to a random port on the host."""
+    random: Boolean = false
+  ): Void
+
   """Retrieves the user to be set for all commands."""
   user: String!
+
+  """Retrieves this container plus the given OCI anotation."""
+  withAnnotation(
+    """The name of the annotation."""
+    name: String!
+
+    """The value of the annotation."""
+    value: String!
+  ): Container!
 
   """Configures default arguments for future commands."""
   withDefaultArgs(
@@ -489,11 +503,6 @@ type Container {
     Redirect the command's standard output to a file in the container (e.g., "/tmp/stdout").
     """
     redirectStdout: String = ""
-
-    """
-    DEPRECATED: For true this can be removed. For false, use `useEntrypoint` instead.
-    """
-    skipEntrypoint: Boolean = true
 
     """
     Content to write to the command's standard input before closing (e.g., "Hello world").
@@ -711,6 +720,12 @@ type Container {
     permissions: Int = 420
   ): Container!
 
+  """Retrieves this container minus the given OCI annotation."""
+  withoutAnnotation(
+    """The name of the annotation."""
+    name: String!
+  ): Container!
+
   """
   Retrieves this container with unset default arguments for future commands.
   """
@@ -747,6 +762,12 @@ type Container {
   withoutFile(
     """Location of the file to remove (e.g., "/file.txt")."""
     path: String!
+  ): Container!
+
+  """Retrieves this container with the files at the given paths removed."""
+  withoutFiles(
+    """Location of the files to remove (e.g., ["/file.txt"])."""
+    paths: [String!]!
   ): Container!
 
   """
@@ -1063,6 +1084,13 @@ type Directory {
     other: DirectoryID!
   ): Directory!
 
+  """
+  Return the directory's digest. The format of the digest is not guaranteed to
+  be stable between releases of Dagger. It is guaranteed to be stable between
+  invocations of the same Dagger engine.
+  """
+  digest: String!
+
   """Retrieves a directory at the given path."""
   directory(
     """Location of the directory to retrieve (e.g., "/src")."""
@@ -1127,18 +1155,6 @@ type Directory {
 
   """A unique identifier for this Directory."""
   id: DirectoryID!
-
-  """Creates a named sub-pipeline."""
-  pipeline(
-    """Description of the sub-pipeline."""
-    description: String = ""
-
-    """Labels to apply to the sub-pipeline."""
-    labels: [PipelineLabel!] = []
-
-    """Name of the sub-pipeline."""
-    name: String!
-  ): Directory! @deprecated(reason: "Explicit pipeline creation is now a no-op")
 
   """Force evaluation in the engine."""
   sync: DirectoryID!
@@ -1253,6 +1269,12 @@ type Directory {
   withoutFile(
     """Location of the file to remove (e.g., "/file.txt")."""
     path: String!
+  ): Directory!
+
+  """Retrieves this directory with the files at the given paths removed."""
+  withoutFiles(
+    """Location of the file to remove (e.g., ["/file.txt"])."""
+    paths: [String!]!
   ): Directory!
 
   """
@@ -1444,12 +1466,20 @@ type Function {
   """Returns the function with the provided argument"""
   withArg(
     """
+    If the argument is a Directory or File type, default to load path from context directory, relative to root directory.
+    """
+    defaultPath: String = ""
+
+    """
     A default value to use for this argument if not explicitly set by the caller, if any
     """
     defaultValue: JSON
 
     """A doc string for the argument, if any"""
     description: String = ""
+
+    """Patterns to ignore when loading the contextual argument value."""
+    ignore: [String!] = []
 
     """The name of the argument"""
     name: String!
@@ -1472,6 +1502,12 @@ This is a specification for an argument at function definition time, not an argu
 """
 type FunctionArg {
   """
+  Only applies to arguments of type File or Directory. If the argument is not
+  set, load it from the given path in the context directory
+  """
+  defaultPath: String!
+
+  """
   A default value to use for this argument when not explicitly set by the caller, if any.
   """
   defaultValue: JSON!
@@ -1481,6 +1517,13 @@ type FunctionArg {
 
   """A unique identifier for this FunctionArg."""
   id: FunctionArgID!
+
+  """
+  Only applies to arguments of type Directory. The ignore patterns are applied
+  to the input directory, and matching entries are filtered out, in a
+  cache-efficient manner.
+  """
+  ignore: [String!]!
 
   """The name of the argument in lowerCamelCase format."""
   name: String!
@@ -1584,9 +1627,6 @@ type GitModuleSource {
   """The ref to clone the root of the git repo from"""
   cloneRef: String!
 
-  """The URL to clone the root of the git repo from"""
-  cloneURL: String! @deprecated(reason: "Use CloneRef instead. CloneRef supports both URL-style and SCP-like SSH references")
-
   """The resolved commit of the git repo this source points to."""
   commit: String!
 
@@ -1634,7 +1674,10 @@ type GitRef {
   id: GitRefID!
 
   """The filesystem tree at this ref."""
-  tree: Directory!
+  tree(
+    """Set to true to discard .git directory."""
+    discardGitDir: Boolean = false
+  ): Directory!
 }
 
 """
@@ -1904,6 +1947,9 @@ type LocalModuleSource {
   """A unique identifier for this LocalModuleSource."""
   id: LocalModuleSourceID!
 
+  """The relative path to the module root from the host directory"""
+  relHostPath: String!
+
   """
   The path to the root of the module source under the context directory. This
   directory contains its configuration file. It also contains its source code
@@ -2062,6 +2108,13 @@ type ModuleSource {
   dependencies: [ModuleDependency!]!
 
   """
+  Return the module source's content digest. The format of the digest is not
+  guaranteed to be stable between releases of Dagger. It is guaranteed to be
+  stable between invocations of the same Dagger engine.
+  """
+  digest: String!
+
+  """
   The directory containing the module configuration and source code (source code may be in a subdir).
   """
   directory(
@@ -2100,6 +2153,9 @@ type ModuleSource {
 
   """Load a directory from the caller optionally with a given view applied."""
   resolveDirectoryFromCaller(
+    """Patterns to ignore when loading the directory."""
+    ignore: [String!] = []
+
     """The path on the caller's filesystem to load."""
     path: String!
 
@@ -2390,8 +2446,8 @@ type Query {
     """A service which must be started before the repo is fetched."""
     experimentalServiceHost: ServiceID
 
-    """Set to true to keep .git directory."""
-    keepGitDir: Boolean = false
+    """DEPRECATED: Set to true to keep .git directory."""
+    keepGitDir: Boolean = true
 
     """Set SSH auth socket"""
     sshAuthSocket: SocketID
@@ -2560,23 +2616,14 @@ type Query {
     """The string ref representation of the module source"""
     refString: String!
 
+    """The relative path to the module root from the host directory"""
+    relHostPath: String = ""
+
     """
     If true, enforce that the source is a stable version for source kinds that support versioning.
     """
     stable: Boolean = false
   ): ModuleSource!
-
-  """Creates a named sub-pipeline."""
-  pipeline(
-    """Description of the sub-pipeline."""
-    description: String = ""
-
-    """Labels to apply to the sub-pipeline."""
-    labels: [PipelineLabel!]
-
-    """Name of the sub-pipeline."""
-    name: String!
-  ): Query! @deprecated(reason: "Explicit pipeline creation is now a no-op")
 
   """Reference a secret by name."""
   secret(accessor: String, name: String!): Secret!

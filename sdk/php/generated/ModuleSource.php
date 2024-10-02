@@ -80,6 +80,15 @@ class ModuleSource extends Client\AbstractObject implements Client\IdAble
     }
 
     /**
+     * Return the module source's content digest. The format of the digest is not guaranteed to be stable between releases of Dagger. It is guaranteed to be stable between invocations of the same Dagger engine.
+     */
+    public function digest(): string
+    {
+        $leafQueryBuilder = new \Dagger\Client\QueryBuilder('digest');
+        return (string)$this->queryLeaf($leafQueryBuilder, 'digest');
+    }
+
+    /**
      * The directory containing the module configuration and source code (source code may be in a subdir).
      */
     public function directory(string $path): Directory
@@ -147,12 +156,18 @@ class ModuleSource extends Client\AbstractObject implements Client\IdAble
     /**
      * Load a directory from the caller optionally with a given view applied.
      */
-    public function resolveDirectoryFromCaller(string $path, ?string $viewName = null): Directory
-    {
+    public function resolveDirectoryFromCaller(
+        string $path,
+        ?string $viewName = null,
+        ?array $ignore = null,
+    ): Directory {
         $innerQueryBuilder = new \Dagger\Client\QueryBuilder('resolveDirectoryFromCaller');
         $innerQueryBuilder->setArgument('path', $path);
         if (null !== $viewName) {
         $innerQueryBuilder->setArgument('viewName', $viewName);
+        }
+        if (null !== $ignore) {
+        $innerQueryBuilder->setArgument('ignore', $ignore);
         }
         return new \Dagger\Directory($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
     }

@@ -22,6 +22,7 @@ import (
 	"github.com/containerd/console"
 	runc "github.com/containerd/go-runc"
 	"github.com/dagger/dagger/dagql/call"
+	"github.com/dagger/dagger/engine/server/resource"
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/executor"
 	"github.com/moby/buildkit/executor/oci"
@@ -72,7 +73,7 @@ type ExecutionMetadata struct {
 	// Needed to handle finding any secrets, sockets or other client resources
 	// that this client should have access to due to being set in the parent
 	// object.
-	ParentIDs map[digest.Digest]*call.ID
+	ParentIDs map[digest.Digest]*resource.ID
 
 	CachePerSession bool
 
@@ -557,7 +558,7 @@ func (k procKiller) Kill(ctx context.Context) (err error) {
 	// shorter timeout but here as a fail-safe for future refactoring.
 	ctx, cancel := context.WithCancelCause(ctx)
 	ctx, _ = context.WithTimeoutCause(ctx, 10*time.Second, context.DeadlineExceeded)
-	defer cancel(context.Canceled)
+	defer cancel(nil)
 
 	if k.pidfile == "" {
 		// for `runc run` process we use `runc kill` to terminate the process

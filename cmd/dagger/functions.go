@@ -18,6 +18,7 @@ import (
 	"dagger.io/dagger"
 	"dagger.io/dagger/querybuilder"
 	"dagger.io/dagger/telemetry"
+	"github.com/dagger/dagger/dagql/idtui"
 	"github.com/dagger/dagger/engine/client"
 	"github.com/dagger/dagger/engine/slog"
 )
@@ -159,9 +160,12 @@ func (fc *FuncCommand) Command() *cobra.Command {
 
 				return nil
 			},
-
 			// Between PreRunE and RunE, flags are validated.
 			RunE: func(c *cobra.Command, a []string) error {
+				if isPrintTraceLinkEnabled(c.Annotations) {
+					c.SetContext(idtui.WithPrintTraceLink(c.Context(), true))
+				}
+
 				return withEngine(c.Context(), client.Params{}, func(ctx context.Context, engineClient *client.Client) (rerr error) {
 					fc.c = engineClient
 					fc.q = querybuilder.Query().Client(engineClient.Dagger().GraphQLClient())
@@ -333,7 +337,7 @@ func initializeModule(ctx context.Context, dag *dagger.Client, loadModule bool) 
 	}
 
 	if def.MainObject == nil {
-		return nil, fmt.Errorf("main object not found")
+		return nil, fmt.Errorf("main object not found, check that your module's name and main object match")
 	}
 
 	return def, nil
@@ -554,7 +558,7 @@ func (fc *FuncCommand) selectFunc(fn *modFunction, cmd *cobra.Command) error {
 
 		switch v := val.(type) {
 		case DaggerValue:
-			obj, err := v.Get(fc.ctx, dag, fc.mod.Source)
+			obj, err := v.Get(fc.ctx, dag, fc.mod.Source, arg)
 			if err != nil {
 				return fmt.Errorf("failed to get value for argument %q: %w", arg.FlagName(), err)
 			}

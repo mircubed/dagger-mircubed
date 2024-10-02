@@ -76,9 +76,11 @@ func (fn *Function) FieldSpec() (dagql.FieldSpec, error) {
 		// NB: functions actually _are_ cached per-session, which matches the
 		// lifetime of the server, so we might as well consider them pure. That way
 		// there will be locking around concurrent calls, so the user won't see
-		// multiple in parallel. Reconsider if/when we have a global cache and/or
-		// figure out function caching.
-		ImpurityReason: "",
+		// multiple in parallel.
+		//
+		// However, we can't *quite* mark them as pure, since Call has special
+		// logic for transferring secrets between cached calls.
+		ImpurityReason: "secrets still need transferring on cached calls",
 	}
 	for _, arg := range fn.Args {
 		input := arg.TypeDef.ToInput()
@@ -112,7 +114,7 @@ func (fn *Function) WithDescription(desc string) *Function {
 	return fn
 }
 
-func (fn *Function) WithArg(name string, typeDef *TypeDef, desc string, defaultValue JSON) *Function {
+func (fn *Function) WithArg(name string, typeDef *TypeDef, desc string, defaultValue JSON, defaultPath string, ignore []string) *Function {
 	fn = fn.Clone()
 	fn.Args = append(fn.Args, &FunctionArg{
 		Name:         strcase.ToLowerCamel(name),
@@ -120,6 +122,8 @@ func (fn *Function) WithArg(name string, typeDef *TypeDef, desc string, defaultV
 		TypeDef:      typeDef,
 		DefaultValue: defaultValue,
 		OriginalName: name,
+		DefaultPath:  defaultPath,
+		Ignore:       ignore,
 	})
 	return fn
 }
@@ -183,6 +187,8 @@ type FunctionArg struct {
 	Description  string   `field:"true" doc:"A doc string for the argument, if any."`
 	TypeDef      *TypeDef `field:"true" doc:"The type of the argument."`
 	DefaultValue JSON     `field:"true" doc:"A default value to use for this argument when not explicitly set by the caller, if any."`
+	DefaultPath  string   `field:"true" doc:"Only applies to arguments of type File or Directory. If the argument is not set, load it from the given path in the context directory"`
+	Ignore       []string `field:"true" doc:"Only applies to arguments of type Directory. The ignore patterns are applied to the input directory, and matching entries are filtered out, in a cache-efficient manner."`
 
 	// Below are not in public API
 
@@ -235,6 +241,9 @@ func (d DynamicID) TypeName() string {
 var _ dagql.InputDecoder = DynamicID{}
 
 func (d DynamicID) DecodeInput(val any) (dagql.Input, error) {
+	if val == nil {
+		val = ""
+	}
 	switch x := val.(type) {
 	case string:
 		var idp call.ID

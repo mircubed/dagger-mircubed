@@ -19,10 +19,11 @@ import (
 )
 
 const (
-	daggerGenFilename     = "dagger.gen.go"
-	contextTypename       = "context.Context"
-	constructorFuncName   = "New"
-	daggerObjectIfaceName = "DaggerObject"
+	daggerGenFilename   = "dagger.gen.go"
+	contextTypename     = "context.Context"
+	constructorFuncName = "New"
+	// this is aliased as `type DaggerObject = querybuilder.GraphQLMarshaller`
+	daggerObjectIfaceName = "GraphQLMarshaller"
 )
 
 func (funcs goTemplateFuncs) isModuleCode() bool {
@@ -131,6 +132,8 @@ func (funcs goTemplateFuncs) moduleMainSrc() (string, error) { //nolint: gocyclo
 	for len(tps) != 0 {
 		var nextTps []types.Type
 		for _, tp := range tps {
+			tp = dealias(tp)
+
 			named, isNamed := tp.(*types.Named)
 			if !isNamed {
 				continue
@@ -295,7 +298,7 @@ func dispatch(ctx context.Context) error {
 		semconv.ServiceNameKey.String("dagger-go-sdk"),
 		// TODO version?
 	))
-	defer telemetry.Close(ctx)
+	defer telemetry.Close()
 
 	// A lot of the "work" actually happens when we're marshalling the return
 	// value, which entails getting object IDs, which happens in MarshalJSON,
@@ -410,6 +413,9 @@ func invokeSrc(objFunctionCases map[string][]Code, createMod Code) string {
 
 // TODO: use jennifer for generating this magical typedef
 func (ps *parseState) renderNameOrStruct(t types.Type) string {
+	if alias, ok := t.(*types.Alias); ok {
+		return ps.renderNameOrStruct(alias.Rhs())
+	}
 	if ptr, ok := t.(*types.Pointer); ok {
 		return "*" + ps.renderNameOrStruct(ptr.Elem())
 	}
@@ -497,7 +503,9 @@ func (ps *parseState) checkConstructor(obj types.Object) bool {
 }
 
 func (ps *parseState) checkDaggerObjectIface(obj types.Object) (bool, error) {
-	named, isNamed := obj.Type().(*types.Named)
+	objType := dealias(obj.Type())
+
+	named, isNamed := objType.(*types.Named)
 	if !isNamed {
 		return false, nil
 	}
@@ -506,7 +514,7 @@ func (ps *parseState) checkDaggerObjectIface(obj types.Object) (bool, error) {
 	}
 	iface, isIface := named.Underlying().(*types.Interface)
 	if !isIface {
-		return false, fmt.Errorf("exected %s to be %T, but got %T", daggerObjectIfaceName, &types.Interface{}, named.Underlying())
+		return false, fmt.Errorf("expected %s to be %T, but got %T (%s)", daggerObjectIfaceName, &types.Interface{}, named.Underlying(), named.Underlying().String())
 	}
 
 	ps.daggerObjectIfaceType = iface
@@ -565,6 +573,7 @@ func (ps *parseState) fillObjectFunctionCases(type_ types.Type, cases map[string
 		if ptrType, ok := resultType.(*types.Pointer); ok {
 			resultType = ptrType.Elem()
 		}
+		resultType = dealias(resultType)
 		namedType, ok := resultType.(*types.Named)
 		if !ok {
 			return fmt.Errorf("%s must return the main module object %q", constructorFuncName, objName)
@@ -634,7 +643,7 @@ func (ps *parseState) fillObjectFunctionCase(
 
 			tp := varType
 			fnCallArgCode := Id(varName)
-			tp2, fnCallArgCode2, ok, err := ps.functionCallArgCode(varType, Id(varName))
+			tp2, fnCallArgCode2, ok, err := ps.functionCallArgCode(tp, Id(varName))
 			if err != nil {
 				return fmt.Errorf("failed to get function call arg code for %s: %w", varName, err)
 			}
@@ -990,24 +999,29 @@ func (ps *parseState) commentForFuncField(fnDecl *ast.FuncDecl, unpackedParams [
 		}
 
 		if allowDocComment {
-			// take the last position in the last line, and try and find a
-			// comment that contains it
-			npos := tokenFile.LineStart(tokenFile.Line(pos)) - 1
-			for _, comment := range f.Comments {
-				if comment.Pos() <= npos && npos <= comment.End() {
-					docComment = comment
+			// find the line that ends the last comment, and check that
+			// it's right before the declaration
+			for _, commentGroup := range f.Comments {
+				comment := commentGroup.List[len(commentGroup.List)-1]
+
+				// we do this little line-counting dance since comment.End()
+				// returns nonsense when we have carriage returns
+				lastLine := tokenFile.Line(comment.Pos()) + strings.Count(comment.Text, "\n")
+				if lastLine == line || lastLine == line-1 {
+					docComment = commentGroup
 					break
 				}
 			}
 		}
 
 		if allowLineComment {
-			// take the last position in the current line, and try and find a
-			// comment that contains it
-			npos := tokenFile.LineStart(tokenFile.Line(pos)+1) - 1
-			for _, comment := range f.Comments {
-				if comment.Pos() <= npos && npos <= comment.End() {
-					lineComment = comment
+			// find the line that starts the comment and check that's on
+			// the same line as the declaration
+			for _, commentGroup := range f.Comments {
+				comment := commentGroup.List[0]
+
+				if tokenFile.Line(comment.Pos()) == line {
+					lineComment = commentGroup
 					break
 				}
 			}
@@ -1034,6 +1048,8 @@ This is needed to handle various special cases:
 */
 func (ps *parseState) functionCallArgCode(t types.Type, access *Statement) (types.Type, *Statement, bool, error) {
 	switch t := t.(type) {
+	case *types.Alias:
+		return ps.functionCallArgCode(t.Rhs(), access)
 	case *types.Pointer:
 		// taking the address of an address isn't allowed - so we use a ptr
 		// helper function
@@ -1060,7 +1076,8 @@ func (ps *parseState) functionCallArgCode(t types.Type, access *Statement) (type
 		}
 		return nil, nil, false, nil
 	case *types.Slice:
-		elemNamed, ok := t.Elem().(*types.Named)
+		elem := dealias(t.Elem())
+		elemNamed, ok := elem.(*types.Named)
 		if !ok {
 			return nil, nil, false, nil
 		}
@@ -1085,7 +1102,7 @@ func (ps *parseState) functionCallArgCode(t types.Type, access *Statement) (type
 	}
 }
 
-var pragmaCommentRegexp = regexp.MustCompile(`\+\s*(\S+?)(?:=(.+?))?(?:\r?\n|$)`)
+var pragmaCommentRegexp = regexp.MustCompile(`[ \t]*\+[ \t]*(\S+?)(?:=(.+?))?(?:\r?\n|$)`)
 
 // parsePragmaComment parses a dagger "pragma", that is used to define additional metadata about a parameter.
 func parsePragmaComment(comment string) (data map[string]string, rest string) {
@@ -1149,4 +1166,14 @@ func unpackASTFields(fields *ast.FieldList) []*ast.Field {
 		}
 	}
 	return unpacked
+}
+
+func dealias(t types.Type) types.Type {
+	for {
+		alias, isAlias := t.(*types.Alias)
+		if !isAlias {
+			return t
+		}
+		t = alias.Rhs()
+	}
 }

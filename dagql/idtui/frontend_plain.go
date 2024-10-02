@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/dagger/dagger/dagql/call/callpbv1"
+	"github.com/dagger/dagger/dagql/dagui"
 	"github.com/dagger/dagger/engine/slog"
 	"github.com/muesli/termenv"
 	"github.com/pkg/browser"
@@ -23,10 +24,10 @@ import (
 const plainMaxLiteralLen = 256 // same value as cloud currently
 
 type frontendPlain struct {
-	FrontendOpts
+	dagui.FrontendOpts
 
 	// db stores info about all the spans
-	db   *DB
+	db   *dagui.DB
 	data map[trace.SpanID]*spanData
 
 	// idx is an incrementing counter to assign human-readable names to spans
@@ -60,8 +61,8 @@ type frontendPlain struct {
 	output  *termenv.Output
 	profile termenv.Profile
 
-	// msgsBuffer contains messages to display on the final render
-	msgsBuffer strings.Builder
+	// msgPreFinalRender contains messages to display on the final render
+	msgPreFinalRender strings.Builder
 
 	// ticker keeps a constant frame rate
 	ticker *time.Ticker
@@ -100,12 +101,12 @@ type spanData struct {
 }
 
 type logLine struct {
-	line string
+	line cursorBuffer
 	time time.Time
 }
 
 func NewPlain() Frontend {
-	db := NewDB()
+	db := dagui.NewDB()
 	return &frontendPlain{
 		db:   db,
 		data: make(map[trace.SpanID]*spanData),
@@ -137,10 +138,13 @@ func (fe *frontendPlain) SetCloudURL(ctx context.Context, url string, msg string
 		return
 	}
 	fe.addVirtualLog(trace.SpanFromContext(ctx), "cloud", "url", url)
-	if logged {
-		fmt.Fprintln(os.Stderr, traceMessage(fe.profile, url, msg)+"\n")
-	} else if !skipLoggedOutTraceMsg() {
-		fmt.Fprintf(os.Stderr, loggedOutTraceMsg+"\n\n", url)
+
+	if cmdContext, ok := FromCmdContext(ctx); ok && cmdContext.printTraceLink {
+		if logged {
+			fe.msgPreFinalRender.WriteString(traceMessage(fe.profile, url, msg))
+		} else if !skipLoggedOutTraceMsg() {
+			fe.msgPreFinalRender.WriteString(fmt.Sprintf(loggedOutTraceMsg, url))
+		}
 	}
 }
 
@@ -164,11 +168,11 @@ func (fe *frontendPlain) addVirtualLog(span trace.Span, name string, fields ...s
 		spanDt = &spanData{}
 		fe.data[span.SpanContext().SpanID()] = spanDt
 	}
-	spanDt.logs = append(spanDt.logs, logLine{line: line})
+	spanDt.logs = append(spanDt.logs, logLine{newCursorBuffer([]byte(line)), time.Now()})
 	fe.wakeUpSpan(spanID)
 }
 
-func (fe *frontendPlain) Run(ctx context.Context, opts FrontendOpts, run func(context.Context) error) error {
+func (fe *frontendPlain) Run(ctx context.Context, opts dagui.FrontendOpts, run func(context.Context) error) error {
 	if opts.TooFastThreshold == 0 {
 		opts.TooFastThreshold = 100 * time.Millisecond
 	}
@@ -299,35 +303,22 @@ func (fe plainLogExporter) Export(ctx context.Context, logs []sdklog.Record) err
 				continue
 			}
 
-			// there's no neat way to handle carriage returns, so remove them
-			lineParts := strings.Split(line, "\r")
-			line = lineParts[len(lineParts)-1]
-
-			// TODO: we might also want to ignore escape sequences that move
-			// the cursor, while keeping colors/etc. this feels tricky.
+			hasNewline := line[len(line)-1] == '\n'
+			if hasNewline {
+				line = line[:len(line)-1]
+			}
 
 			if spanDt.logsPending && len(spanDt.logs) > 0 {
-				// append to the previous line
-				if len(lineParts) > 1 {
-					spanDt.logs[len(spanDt.logs)-1].line = line
-				} else {
-					spanDt.logs[len(spanDt.logs)-1].line += line
-				}
+				spanDt.logs[len(spanDt.logs)-1].line.Write([]byte(line))
 				spanDt.logs[len(spanDt.logs)-1].time = log.Timestamp()
 			} else {
-				// append the line to the logs
 				spanDt.logs = append(spanDt.logs, logLine{
-					line: line,
+					line: newCursorBuffer([]byte(line)),
 					time: log.Timestamp(),
 				})
 			}
 
-			// determine if this log line is full
-			if line == "" {
-				spanDt.logsPending = true
-			} else {
-				spanDt.logsPending = line[len(line)-1] != '\n'
-			}
+			spanDt.logsPending = !hasNewline
 		}
 	}
 	return nil
@@ -363,8 +354,8 @@ func (fe *frontendPlain) finalRender() {
 		// if we rendered anything, leave a newline
 		fmt.Fprintln(os.Stderr)
 	}
-	if fe.msgsBuffer.Len() > 0 {
-		fmt.Fprintln(os.Stderr, fe.msgsBuffer.String())
+	if fe.msgPreFinalRender.Len() > 0 {
+		fmt.Fprintln(os.Stderr, "\n"+fe.msgPreFinalRender.String()+"\n")
 	}
 	renderPrimaryOutput(fe.db)
 }
@@ -403,7 +394,7 @@ func (fe *frontendPlain) renderProgress() {
 	}
 }
 
-func (fe *frontendPlain) renderRow(row *TraceTree) {
+func (fe *frontendPlain) renderRow(row *dagui.TraceTree) {
 	span := row.Span
 	spanDt := fe.data[span.ID]
 	if !spanDt.ready {
@@ -465,7 +456,7 @@ func (fe *frontendPlain) renderRow(row *TraceTree) {
 	}
 }
 
-func (fe *frontendPlain) renderStep(span *Span, depth int, done bool) {
+func (fe *frontendPlain) renderStep(span *dagui.Span, depth int, done bool) {
 	spanDt := fe.data[span.ID]
 	if spanDt.idx == 0 {
 		fe.idx++
@@ -496,7 +487,7 @@ func (fe *frontendPlain) renderStep(span *Span, depth int, done bool) {
 		} else {
 			fmt.Fprint(fe.output, fe.output.String(" DONE").Foreground(termenv.ANSIGreen))
 		}
-		duration := fmtDuration(span.EndTime().Sub(span.StartTime()))
+		duration := dagui.FormatDuration(span.EndTime().Sub(span.StartTime()))
 		fmt.Fprint(fe.output, fe.output.String(fmt.Sprintf(" [%s]", duration)).Foreground(termenv.ANSIBrightBlack))
 
 		if span.Status().Code == codes.Error && span.Status().Description != "" {
@@ -513,7 +504,7 @@ func (fe *frontendPlain) renderStep(span *Span, depth int, done bool) {
 	fmt.Fprintln(fe.output)
 }
 
-func (fe *frontendPlain) renderLogs(row *TraceTree, depth int) {
+func (fe *frontendPlain) renderLogs(row *dagui.TraceTree, depth int) {
 	out := fe.output
 
 	span := row.Span
@@ -537,15 +528,15 @@ func (fe *frontendPlain) renderLogs(row *TraceTree, depth int) {
 		r.indent(fe.output, depth)
 
 		if !logLine.time.IsZero() {
-			duration := fmtDuration(logLine.time.Sub(span.StartTime()))
+			duration := dagui.FormatDuration(logLine.time.Sub(span.StartTime()))
 			fmt.Fprint(out, out.String(fmt.Sprintf("[%s] ", duration)).Foreground(termenv.ANSIBrightBlack))
 		}
 		pipe := out.String("|").Foreground(termenv.ANSIBrightBlack)
-		fmt.Fprintln(out, pipe, strings.TrimSuffix(logLine.line, "\n"))
+		fmt.Fprintln(out, pipe, strings.TrimSuffix(logLine.line.String(), "\n"))
 	}
 }
 
-func (fe *frontendPlain) stepPrefix(span *Span, dt *spanData) string {
+func (fe *frontendPlain) stepPrefix(span *dagui.Span, dt *spanData) string {
 	prefix := fe.output.String(fmt.Sprintf("%-4d: ", dt.idx)).Foreground(termenv.ANSIBrightMagenta).String()
 	if fe.Debug {
 		prefix += fe.output.String(fmt.Sprintf("%s: ", span.ID.String())).Foreground(termenv.ANSIBrightBlack).String()
@@ -553,7 +544,7 @@ func (fe *frontendPlain) stepPrefix(span *Span, dt *spanData) string {
 	return prefix
 }
 
-func (fe *frontendPlain) renderContext(row *TraceTree) (int, bool) {
+func (fe *frontendPlain) renderContext(row *dagui.TraceTree) (int, bool) {
 	now := time.Now()
 
 	if row.Span.ID == fe.lastVertex() {
@@ -568,7 +559,7 @@ func (fe *frontendPlain) renderContext(row *TraceTree) (int, bool) {
 
 	// determine the current context
 	switchContext := fe.lastContextLock.IsValid()
-	currentContext := []*TraceTree{}
+	currentContext := []*dagui.TraceTree{}
 	for parent := row; parent != nil; parent = parent.Parent {
 		if switchContext && parent.Span.ID == fe.lastContextLock {
 			// this span is a child to the last context
@@ -626,7 +617,7 @@ func (fe *frontendPlain) lastVertex() trace.SpanID {
 }
 
 // sampleContext selects vertices from a row context to display
-func sampleContext(rows []*TraceTree) []int {
+func sampleContext(rows []*dagui.TraceTree) []int {
 	if len(rows) == 0 {
 		return nil
 	}

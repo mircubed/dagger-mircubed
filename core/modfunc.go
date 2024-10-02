@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"dagger.io/dagger/telemetry"
@@ -16,8 +17,9 @@ import (
 
 	"github.com/dagger/dagger/analytics"
 	"github.com/dagger/dagger/dagql"
-	"github.com/dagger/dagger/dagql/call"
 	"github.com/dagger/dagger/engine/buildkit"
+	"github.com/dagger/dagger/engine/server/resource"
+	"github.com/dagger/dagger/engine/slog"
 )
 
 type ModuleFunction struct {
@@ -84,6 +86,7 @@ type CallOpts struct {
 	ParentFields   map[string]any
 	Cache          bool
 	SkipSelfSchema bool
+	Server         *dagql.Server
 }
 
 type CallInput struct {
@@ -111,22 +114,15 @@ func (fn *ModuleFunction) recordCall(ctx context.Context) {
 	analytics.Ctx(ctx).Capture(ctx, "module_call", props)
 }
 
-//nolint:gocyclo
-func (fn *ModuleFunction) Call(ctx context.Context, opts *CallOpts) (t dagql.Typed, rerr error) {
-	mod := fn.mod
-
-	lg := bklog.G(ctx).WithField("module", mod.Name()).WithField("function", fn.metadata.Name)
-	if fn.objDef != nil {
-		lg = lg.WithField("object", fn.objDef.Name)
-	}
-	ctx = bklog.WithLogger(ctx, lg)
-
-	// Capture analytics for the function call.
-	// Calls without function name are internal and excluded.
-	fn.recordCall(ctx)
-
+// setCallInputs sets the call inputs for the function call.
+//
+// It first load the argument set by the user.
+// Then the default values.
+// Finally the contextual arguments.
+func (fn *ModuleFunction) setCallInputs(ctx context.Context, opts *CallOpts) ([]*FunctionCallArgValue, error) {
 	callInputs := make([]*FunctionCallArgValue, len(opts.Inputs))
 	hasArg := map[string]bool{}
+
 	for i, input := range opts.Inputs {
 		normalizedName := gqlArgName(input.Name)
 		arg, ok := fn.args[normalizedName]
@@ -154,6 +150,7 @@ func (fn *ModuleFunction) Call(ctx context.Context, opts *CallOpts) (t dagql.Typ
 		hasArg[name] = true
 	}
 
+	// Load default value
 	for _, arg := range fn.metadata.Args {
 		name := arg.OriginalName
 		if hasArg[name] || arg.DefaultValue == nil {
@@ -163,6 +160,50 @@ func (fn *ModuleFunction) Call(ctx context.Context, opts *CallOpts) (t dagql.Typ
 			Name:  name,
 			Value: arg.DefaultValue,
 		})
+
+		hasArg[name] = true
+	}
+
+	// Load contextual arguments
+	for _, arg := range fn.metadata.Args {
+		name := arg.OriginalName
+
+		// Skip contextual arguments if already set.
+		if hasArg[name] || arg.DefaultPath == "" {
+			continue
+		}
+
+		// Load contextual argument value.
+		ctxVal, err := fn.loadContextualArg(ctx, opts.Server, arg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load contextual arg %q: %w", arg.Name, err)
+		}
+
+		callInputs = append(callInputs, &FunctionCallArgValue{
+			Name:  name,
+			Value: ctxVal,
+		})
+	}
+
+	return callInputs, nil
+}
+
+func (fn *ModuleFunction) Call(ctx context.Context, opts *CallOpts) (t dagql.Typed, rerr error) {
+	mod := fn.mod
+
+	lg := bklog.G(ctx).WithField("module", mod.Name()).WithField("function", fn.metadata.Name)
+	if fn.objDef != nil {
+		lg = lg.WithField("object", fn.objDef.Name)
+	}
+	ctx = bklog.WithLogger(ctx, lg)
+
+	// Capture analytics for the function call.
+	// Calls without function name are internal and excluded.
+	fn.recordCall(ctx)
+
+	callInputs, err := fn.setCallInputs(ctx, opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to set call inputs: %w", err)
 	}
 
 	bklog.G(ctx).Debug("function call")
@@ -201,7 +242,7 @@ func (fn *ModuleFunction) Call(ctx context.Context, opts *CallOpts) (t dagql.Typ
 		if !ok {
 			return nil, fmt.Errorf("failed to find mod type for parent %q", fn.objDef.Name)
 		}
-		execMD.ParentIDs = map[digest.Digest]*call.ID{}
+		execMD.ParentIDs = map[digest.Digest]*resource.ID{}
 		if err := parentModType.CollectCoreIDs(ctx, opts.ParentTyped, execMD.ParentIDs); err != nil {
 			return nil, fmt.Errorf("failed to collect IDs from parent fields: %w", err)
 		}
@@ -227,7 +268,10 @@ func (fn *ModuleFunction) Call(ctx context.Context, opts *CallOpts) (t dagql.Typ
 
 	ctr := fn.runtime
 
-	metaDir := NewScratchDirectory(mod.Query, mod.Query.Platform())
+	metaDir, err := NewScratchDirectory(ctx, mod.Query, mod.Query.Platform())
+	if err != nil {
+		return nil, fmt.Errorf("failed to create mod metadata directory: %w", err)
+	}
 	ctr, err = ctr.WithMountedDirectory(ctx, modMetaDirPath, metaDir, "", false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to mount mod metadata directory: %w", err)
@@ -289,17 +333,24 @@ func (fn *ModuleFunction) Call(ctx context.Context, opts *CallOpts) (t dagql.Typ
 		return nil, fmt.Errorf("failed to convert return value: %w", err)
 	}
 
+	// Get the client ID actually used during the function call - this might not
+	// be the same as execMD.ClientID if the function call was cached at the
+	// buildkit level
+	clientID, err := ctr.usedClientID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("could not get used client id")
+	}
+
 	// If the function returned anything that's isolated per-client, this caller client should
 	// have access to it now since it was returned to them (i.e. secrets/sockets/etc).
-	if fn.metadata.Name != "" {
-		returnedIDs := map[digest.Digest]*call.ID{}
-		if err := fn.returnType.CollectCoreIDs(ctx, returnValueTyped, returnedIDs); err != nil {
-			return nil, fmt.Errorf("failed to collect IDs: %w", err)
-		}
-		for _, id := range returnedIDs {
-			if err := fn.root.AddClientResourcesFromID(ctx, id, execMD.ClientID, false); err != nil {
-				return nil, fmt.Errorf("failed to add client resources from ID: %w", err)
-			}
+	returnedIDs := map[digest.Digest]*resource.ID{}
+	if err := fn.returnType.CollectCoreIDs(ctx, returnValueTyped, returnedIDs); err != nil {
+		return nil, fmt.Errorf("failed to collect IDs: %w", err)
+	}
+
+	for _, id := range returnedIDs {
+		if err := fn.root.AddClientResourcesFromID(ctx, id, clientID, false); err != nil {
+			return nil, fmt.Errorf("failed to add client resources from ID: %w", err)
 		}
 	}
 
@@ -335,12 +386,12 @@ func moduleAnalyticsProps(mod *Module, prefix string, props map[string]string) {
 		git := source.AsGitSource.Value
 		props[prefix+"source_kind"] = "git"
 		props[prefix+"git_symbolic"] = git.Symbolic()
-		props[prefix+"git_clone_url"] = git.CloneURL // todo(guillaume): remove as deprecated
+		props[prefix+"git_clone_url"] = git.CloneRef // todo(guillaume): remove as deprecated
 		props[prefix+"git_clone_ref"] = git.CloneRef
 		props[prefix+"git_subpath"] = git.RootSubpath
 		props[prefix+"git_version"] = git.Version
 		props[prefix+"git_commit"] = git.Commit
-		props[prefix+"git_html_repo_url"] = git.HtmlRepoURL
+		props[prefix+"git_html_repo_url"] = git.HTMLRepoURL
 	}
 }
 
@@ -382,4 +433,77 @@ func (fn *ModuleFunction) linkDependencyBlobs(ctx context.Context, cacheResult *
 		return fmt.Errorf("failed to add dependency blob: %w", err)
 	}
 	return nil
+}
+
+// loadContextualArg loads a contextual argument from the module context directory.
+//
+// For Directory, it will load the directory from the module context directory.
+// For file, it will loa the directory containing the file and then query the file ID from this directory.
+//
+// This functions returns the ID of the loaded object.
+func (fn *ModuleFunction) loadContextualArg(ctx context.Context, dag *dagql.Server, arg *FunctionArg) (JSON, error) {
+	if arg.TypeDef.Kind != TypeDefKindObject {
+		return nil, fmt.Errorf("contextual argument %q must be a Directory or a File", arg.OriginalName)
+	}
+
+	if dag == nil {
+		return nil, fmt.Errorf("dagql server is nil but required for contextual argument %q", arg.OriginalName)
+	}
+
+	switch arg.TypeDef.AsObject.Value.Name {
+	case "Directory":
+		slog.Debug("moduleFunction.loadContextualArg: loading contextual directory", "fn", arg.Name, "dir", arg.DefaultPath)
+
+		dir, err := fn.mod.Source.Self.LoadContext(ctx, dag, arg.DefaultPath, arg.Ignore)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load contextual directory %q: %w", arg.DefaultPath, err)
+		}
+
+		dirID, err := dir.ID().Encode()
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode dir ID: %w", err)
+		}
+
+		return JSON(fmt.Sprintf(`"%s"`, dirID)), nil
+	case "File":
+		slog.Debug("moduleFunction.loadContextualArg: loading contextual file", "fn", arg.Name, "file", arg.DefaultPath)
+
+		// We first load the directory from the context path, then we load the file from the path relative to the directory.
+		dirPath := filepath.Dir(arg.DefaultPath)
+		filePath := filepath.Base(arg.DefaultPath)
+
+		// Load the directory containing the file.
+		dir, err := fn.mod.Source.Self.LoadContext(ctx, dag, dirPath, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load contextual directory %q: %w", dirPath, err)
+		}
+
+		var fileID FileID
+
+		// We need to load the fileID from the directory itself, because `*File` doesn't have a `ID` field,
+		// we use select instead.
+		err = dag.Select(ctx, dir, &fileID,
+			dagql.Selector{
+				Field: "file",
+				Args: []dagql.NamedInput{
+					{Name: "path", Value: dagql.String(filePath)},
+				},
+			},
+			dagql.Selector{
+				Field: "id",
+			},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load contextual file %q: %w", filePath, err)
+		}
+
+		encodedFileID, err := fileID.Encode()
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode file ID: %w", err)
+		}
+
+		return JSON(fmt.Sprintf(`"%s"`, encodedFileID)), nil
+	default:
+		return nil, fmt.Errorf("unknown contextual argument type %q", arg.TypeDef.AsObject.Value.Name)
+	}
 }

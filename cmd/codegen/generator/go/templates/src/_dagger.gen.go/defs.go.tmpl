@@ -1,21 +1,19 @@
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
-	"strconv"
-	"runtime"
-	"fmt"
 	"reflect"
+	"strconv"
+	"strings"
 
 	"github.com/Khan/genqlient/graphql"
 	"github.com/vektah/gqlparser/v2/gqlerror"
-	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
 {{ if IsModuleCode }}
@@ -54,7 +52,7 @@ func assertNotNil(argName string, value any) {
 	}
 }
 
-type DaggerObject querybuilder.GraphQLMarshaller
+type DaggerObject = querybuilder.GraphQLMarshaller
 
 // getCustomError parses a GraphQL error into a more specific error type.
 func getCustomError(err error) error {

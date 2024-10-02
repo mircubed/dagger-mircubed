@@ -7,6 +7,23 @@ module.exports = {
       "label": "Introduction"
     },
     {
+      "type": "category",
+      "label": "Features",
+      "link": {
+        "type": "doc",
+        "id": "features/index"
+      },
+      "items": [
+        "features/programmable-pipelines",
+        "features/reusable-modules",
+        "features/caching",
+        "features/debugging",
+        "features/services",
+        "features/secrets",
+        "features/visualization",
+      ]
+    },
+    {
       "type": "doc",
       "label": "Installation",
       "id": "install"
@@ -58,15 +75,11 @@ module.exports = {
         },
         {
           "type": "doc",
-          "id": "integrations/containerd"
-        },
-        {
-          "type": "doc",
           "id": "integrations/circleci"
         },
         {
           "type": "doc",
-          "id": "integrations/github-actions"
+          "id": "integrations/github"
         },
         {
           "type": "doc",
@@ -87,6 +100,10 @@ module.exports = {
         {
           "type": "doc",
           "id": "integrations/kubernetes"
+        },
+        {
+          "type": "doc",
+          "id": "integrations/nerdctl"
         },
         {
           "type": "doc",
@@ -356,7 +373,7 @@ module.exports = {
         },
         {
           "type": "doc",
-          "id": "manuals/developer/module-dependencies"
+          "id": "manuals/developer/dependencies"
         },
         {
           "type": "doc",
@@ -389,10 +406,6 @@ module.exports = {
         {
           "type": "doc",
           "id": "manuals/developer/interfaces"
-        },
-        {
-          "type": "doc",
-          "id": "manuals/developer/language-dependencies"
         },
         {
           "type": "doc",

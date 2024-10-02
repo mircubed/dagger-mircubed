@@ -27,7 +27,7 @@ use RuntimeException;
 class ArgumentTest extends TestCase
 {
     #[Test]
-    public function ItRequiresTypeHint(): void
+    public function itRequiresTypeHint(): void
     {
         $reflection = (new ReflectionFunction(fn ($noTypeHint) => null))
             ->getParameters()[0];
@@ -40,8 +40,19 @@ class ArgumentTest extends TestCase
     }
 
     #[Test]
+    public function itCannotDefaultToNullIfNonNullable(): void
+    {
+        $nonNullableType = new Type('string', false);
+        $nullDefault = new Json('null');
+
+        self::expectException(RuntimeException::class);
+
+        new Argument('sut', '', $nonNullableType, $nullDefault);
+    }
+
+    #[Test]
     #[DataProvider('provideReflectionParameters')]
-    public function ItBuildsFromReflectionParameter(
+    public function itBuildsFromReflectionParameter(
         Argument $expected,
         ReflectionParameter $reflectionParameter,
     ): void {
@@ -54,7 +65,7 @@ class ArgumentTest extends TestCase
     public static function provideReflectionParameters(): Generator
     {
         yield 'bool' => [
-            new Argument('value', null, new Type('bool'), null),
+            new Argument('value', '', new Type('bool'), null),
             self::getReflectionParameter(
                 DaggerObjectWithDaggerFunctions::class,
                 'requiredBool',
@@ -65,7 +76,7 @@ class ArgumentTest extends TestCase
         yield 'implicitly optional string' => [
             new Argument(
                 'value',
-                null,
+                '',
                 new Type('string', true),
                 new Json('null'),
             ),
@@ -79,7 +90,7 @@ class ArgumentTest extends TestCase
         yield 'explicitly optional string' => [
             new Argument(
                 'value',
-                null,
+                '',
                 new Type('string', true),
                 new Json('null'),
             ),
@@ -107,7 +118,7 @@ class ArgumentTest extends TestCase
         yield 'implicitly optional Container' => [
             new Argument(
                 'value',
-                null,
+                '',
                 new Type(Container::class, true),
                 new Json('null'),
             ),
@@ -121,13 +132,28 @@ class ArgumentTest extends TestCase
         yield 'explicitly optional File' => [
             new Argument(
                 'value',
-                null,
+                '',
                 new Type(File::class, true),
                 new Json('null'),
             ),
             self::getReflectionParameter(
                 DaggerObjectWithDaggerFunctions::class,
                 'explicitlyOptionalFile',
+                'value',
+            )
+        ];
+
+        yield 'File with default path' => [
+            new Argument(
+                'value',
+                '',
+                new Type(File::class, false),
+                null,
+                './test',
+            ),
+            self::getReflectionParameter(
+                DaggerObjectWithDaggerFunctions::class,
+                'fileWithDefaultPath',
                 'value',
             )
         ];

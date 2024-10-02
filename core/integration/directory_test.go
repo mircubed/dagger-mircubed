@@ -485,7 +485,7 @@ func (DirectorySuite) TestWithTimestamps(ctx context.Context, t *testctx.T) {
 	})
 }
 
-func (DirectorySuite) TestWithoutDirectoryWithoutFile(ctx context.Context, t *testctx.T) {
+func (DirectorySuite) TestWithoutPaths(ctx context.Context, t *testctx.T) {
 	c := connect(ctx, t)
 
 	dir1 := c.Directory().
@@ -557,6 +557,17 @@ func (DirectorySuite) TestWithoutDirectoryWithoutFile(ctx context.Context, t *te
 		WithNewFile("some-file", "some-content").
 		WithNewFile("some-dir/sub-file", "sub-content").
 		WithoutFile("some-file")
+
+	entries, err = filesDir.Entries(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []string{"some-dir"}, entries)
+
+	// Test WithoutFiles
+	filesDir = c.Directory().
+		WithNewFile("some-file", "some-content").
+		WithNewFile("some-file-2", "some-content").
+		WithNewFile("some-dir/sub-file", "sub-content").
+		WithoutFiles([]string{"some-file", "some-file-2"})
 
 	entries, err = filesDir.Entries(ctx)
 	require.NoError(t, err)
@@ -1148,5 +1159,51 @@ func (DirectorySuite) TestGlob(ctx context.Context, t *testctx.T) {
 	t.Run("directory doesn't exist", func(ctx context.Context, t *testctx.T) {
 		_, err := c.Directory().Directory("foo").Glob(ctx, "**/*")
 		require.ErrorContains(t, err, "no such file or directory")
+	})
+}
+
+func (DirectorySuite) TestDigest(ctx context.Context, t *testctx.T) {
+	c := connect(ctx, t)
+
+	t.Run("compute directory digest", func(ctx context.Context, t *testctx.T) {
+		dir := c.Directory().WithNewFile("/foo.txt", "Hello, World!")
+
+		digest, err := dir.Directory("/").Digest(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "sha256:48ac4b4b73af8a75a3c77e9dc6211d89321c6ed4f13c6987c6837ac58645bd89", digest)
+	})
+
+	t.Run("directory digest with same contents should be same", func(ctx context.Context, t *testctx.T) {
+		a := c.Directory().WithNewDirectory("a").WithNewFile("a/foo.txt", "Hello, World!")
+		b := c.Directory().WithNewDirectory("b").WithNewFile("b/foo.txt", "Hello, World!")
+
+		aDigest, err := a.Directory("a").Digest(ctx)
+		require.NoError(t, err)
+		bDigest, err := b.Directory("b").Digest(ctx)
+		require.NoError(t, err)
+		require.Equal(t, aDigest, bDigest)
+	})
+
+	t.Run("directory digest with different metadata should be different", func(ctx context.Context, t *testctx.T) {
+		fileWithOverwrittenMetadata := c.Directory().WithNewFile("foo.txt", "Hello, World!", dagger.DirectoryWithNewFileOpts{
+			Permissions: 0777,
+		}).File("foo.txt")
+		fileWithDefaultMetadata := c.Directory().WithNewFile("foo.txt", "Hello, World!").File("foo.txt")
+
+		digestFileWithOverwrittenMetadata, err := fileWithOverwrittenMetadata.Digest(ctx)
+		require.NoError(t, err)
+
+		digestFileWithDefaultMetadata, err := fileWithDefaultMetadata.Digest(ctx)
+		require.NoError(t, err)
+
+		require.NotEqual(t, digestFileWithOverwrittenMetadata, digestFileWithDefaultMetadata)
+	})
+
+	t.Run("scratch directory", func(ctx context.Context, t *testctx.T) {
+		dir := c.Directory()
+
+		digest, err := dir.Digest(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", digest)
 	})
 }

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"testing"
 
 	"github.com/containerd/platforms"
 	"github.com/dagger/dagger/engine/distconsts"
@@ -21,7 +22,13 @@ import (
 	"dagger.io/dagger"
 )
 
-func (ModuleSuite) TestDaggerCallHelp(ctx context.Context, t *testctx.T) {
+type CallSuite struct{}
+
+func TestCall(t *testing.T) {
+	testctx.Run(testCtx, t, CallSuite{}, Middleware()...)
+}
+
+func (CallSuite) TestHelp(ctx context.Context, t *testctx.T) {
 	c := connect(ctx, t)
 
 	modGen := modInit(t, c, "go", `package main
@@ -64,7 +71,7 @@ func (m *Test) Container() *dagger.Container {
 	})
 }
 
-func (ModuleSuite) TestDaggerCallArgTypes(ctx context.Context, t *testctx.T) {
+func (CallSuite) TestArgTypes(ctx context.Context, t *testctx.T) {
 	t.Run("service args", func(ctx context.Context, t *testctx.T) {
 		t.Run("used as service binding", func(ctx context.Context, t *testctx.T) {
 			c := connect(ctx, t)
@@ -593,11 +600,15 @@ func (m *Test) Cacher(ctx context.Context, cache *dagger.CacheVolume, val string
 			WithWorkdir("/work").
 			With(daggerExec("init", "--source=.", "--name=test", "--sdk=go")).
 			WithNewFile("main.go", `package main
+
 import "dagger/test/internal/dagger"
 
-type Test struct {}
+type Test struct{}
 
-func (m *Test) FromPlatform(platform dagger.Platform) string {
+func (m *Test) FromPlatform(
+    // +default="linux/arm64"
+    platform dagger.Platform,
+) string {
 	return string(platform)
 }
 
@@ -607,20 +618,109 @@ func (m *Test) ToPlatform(platform string) dagger.Platform {
 `,
 			)
 
-		out, err := modGen.With(daggerCall("from-platform", "--platform", "linux/amd64")).Stdout(ctx)
-		require.NoError(t, err)
-		require.Equal(t, "linux/amd64", out)
-		out, err = modGen.With(daggerCall("from-platform", "--platform", "current")).Stdout(ctx)
-		require.NoError(t, err)
-		require.Equal(t, platforms.DefaultString(), out)
-		_, err = modGen.With(daggerCall("from-platform", "--platform", "invalid")).Stdout(ctx)
-		require.ErrorContains(t, err, "unknown operating system or architecture")
+		t.Run("default input value", func(ctx context.Context, t *testctx.T) {
+			out, err := modGen.With(daggerCall("from-platform")).Stdout(ctx)
+			require.NoError(t, err)
+			require.Equal(t, "linux/arm64", out)
+		})
 
-		out, err = modGen.With(daggerCall("to-platform", "--platform", "linux/amd64")).Stdout(ctx)
-		require.NoError(t, err)
-		require.Equal(t, "linux/amd64", out)
-		_, err = modGen.With(daggerCall("to-platform", "--platform", "invalid")).Stdout(ctx)
-		require.ErrorContains(t, err, "unknown operating system or architecture")
+		t.Run("valid input", func(ctx context.Context, t *testctx.T) {
+			out, err := modGen.With(daggerCall("from-platform", "--platform", "linux/amd64")).Stdout(ctx)
+			require.NoError(t, err)
+			require.Equal(t, "linux/amd64", out)
+		})
+
+		t.Run("value from host", func(ctx context.Context, t *testctx.T) {
+			out, err := modGen.With(daggerCall("from-platform", "--platform", "current")).Stdout(ctx)
+			require.NoError(t, err)
+			require.Equal(t, platforms.DefaultString(), out)
+		})
+
+		t.Run("invalid input", func(ctx context.Context, t *testctx.T) {
+			_, err := modGen.With(daggerCall("from-platform", "--platform", "invalid")).Stdout(ctx)
+			require.ErrorContains(t, err, "unknown operating system or architecture")
+		})
+
+		t.Run("valid output", func(ctx context.Context, t *testctx.T) {
+			out, err := modGen.With(daggerCall("to-platform", "--platform", "linux/amd64")).Stdout(ctx)
+			require.NoError(t, err)
+			require.Equal(t, "linux/amd64", out)
+		})
+
+		t.Run("invalid output", func(ctx context.Context, t *testctx.T) {
+			_, err := modGen.With(daggerCall("to-platform", "--platform", "invalid")).Stdout(ctx)
+			require.ErrorContains(t, err, "unknown operating system or architecture")
+		})
+	})
+
+	t.Run("platform list args", func(ctx context.Context, t *testctx.T) {
+		c := connect(ctx, t)
+
+		modGen := c.Container().From(golangImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work").
+			With(daggerExec("init", "--source=.", "--name=test", "--sdk=go")).
+			WithNewFile("main.go", `package main
+
+import "dagger/test/internal/dagger"
+
+type Test struct{}
+
+func (m *Test) FromPlatforms(
+    // +default=["linux/arm64", "linux/amd64"]
+    platforms []dagger.Platform,
+) []string {
+    r := make([]string, 0, len(platforms))
+    for _, p := range platforms {
+        r = append(r, string(p))
+    }
+	return r
+}
+
+func (m *Test) ToPlatforms(platforms []string) []dagger.Platform {
+    r := make([]dagger.Platform, 0, len(platforms))
+    for _, p := range platforms {
+        r = append(r, dagger.Platform(p))
+    }
+	return r
+}
+`,
+			)
+
+		t.Run("default input value", func(ctx context.Context, t *testctx.T) {
+			out, err := modGen.With(daggerCall("from-platforms", "--json")).Stdout(ctx)
+			require.NoError(t, err)
+			require.JSONEq(t, `["linux/arm64", "linux/amd64"]`, out)
+		})
+
+		t.Run("valid input", func(ctx context.Context, t *testctx.T) {
+			out, err := modGen.With(daggerCall("from-platforms", "--platforms", "linux/amd64,linux/arm64", "--json")).Stdout(ctx)
+			require.NoError(t, err)
+			// different order from default on purpose
+			require.JSONEq(t, `["linux/amd64", "linux/arm64"]`, out)
+		})
+
+		t.Run("value from host", func(ctx context.Context, t *testctx.T) {
+			out, err := modGen.With(daggerCall("from-platforms", "--platforms", "linux/amd64,current", "--json")).Stdout(ctx)
+			require.NoError(t, err)
+			require.JSONEq(t, fmt.Sprintf(`["linux/amd64", "%s"]`, platforms.DefaultString()), out)
+		})
+
+		t.Run("invalid input", func(ctx context.Context, t *testctx.T) {
+			_, err := modGen.With(daggerCall("from-platforms", "--platforms", "invalid")).Stdout(ctx)
+			require.ErrorContains(t, err, "unknown operating system or architecture")
+		})
+
+		t.Run("valid output", func(ctx context.Context, t *testctx.T) {
+			out, err := modGen.With(daggerCall("to-platforms", "--platforms", "linux/amd64,linux/arm64", "--json")).Stdout(ctx)
+			require.NoError(t, err)
+			require.JSONEq(t, `["linux/amd64", "linux/arm64"]`, out)
+		})
+
+		t.Run("invalid output", func(ctx context.Context, t *testctx.T) {
+			_, err := modGen.With(daggerCall("to-platforms", "--platforms", "invalid")).Stdout(ctx)
+			require.ErrorContains(t, err, "unknown operating system or architecture")
+		})
 	})
 
 	t.Run("enum args", func(ctx context.Context, t *testctx.T) {
@@ -807,7 +907,7 @@ func (m *Test) Mod(ctx context.Context, module *dagger.Module) *dagger.Module {
 	})
 }
 
-func (ModuleSuite) TestDaggerCallSocketArg(ctx context.Context, t *testctx.T) {
+func (CallSuite) TestSocketArg(ctx context.Context, t *testctx.T) {
 	getHostSocket := func(t *testctx.T) (string, func()) {
 		sockDir := t.TempDir()
 		sockPath := filepath.Join(sockDir, "host.sock")
@@ -1208,7 +1308,7 @@ func (m *Test) Fn(ctx context.Context, sockPath string, runContainerQuery string
 	})
 }
 
-func (ModuleSuite) TestDaggerCallReturnTypes(ctx context.Context, t *testctx.T) {
+func (CallSuite) TestReturnTypes(ctx context.Context, t *testctx.T) {
 	t.Run("return list objects", func(ctx context.Context, t *testctx.T) {
 		c := connect(ctx, t)
 
@@ -1424,6 +1524,50 @@ type Test struct {
 		})
 	})
 
+	t.Run("return secret", func(ctx context.Context, t *testctx.T) {
+		c := connect(ctx, t)
+
+		modGen := modInit(t, c, "go", `package main
+
+import (
+	"dagger/test/internal/dagger"
+)
+
+type Test struct{}
+
+func (*Test) Secret() *dagger.Secret {
+    return dag.SetSecret("foo", "bar")
+}
+
+func (m *Test) Secrets() []*dagger.Secret {
+    return []*dagger.Secret{
+        m.Secret(),
+    }
+}
+`,
+		)
+
+		t.Run("single", func(context.Context, *testctx.T) {
+			out, err := modGen.
+				With(daggerCall("secret")).
+				Stdout(ctx)
+
+			require.NoError(t, err)
+			require.Contains(t, out, "foo")
+			require.NotContains(t, out, "bar")
+		})
+
+		t.Run("multiple", func(context.Context, *testctx.T) {
+			out, err := modGen.
+				With(daggerCall("secrets")).
+				Stdout(ctx)
+
+			require.NoError(t, err)
+			require.Contains(t, out, "foo")
+			require.NotContains(t, out, "bar")
+		})
+	})
+
 	t.Run("sync", func(ctx context.Context, t *testctx.T) {
 		c := connect(ctx, t)
 
@@ -1454,7 +1598,7 @@ type Test struct {
 	})
 }
 
-func (ModuleSuite) TestDaggerCallCoreChaining(ctx context.Context, t *testctx.T) {
+func (CallSuite) TestCoreChaining(ctx context.Context, t *testctx.T) {
 	t.Run("container", func(ctx context.Context, t *testctx.T) {
 		c := connect(ctx, t)
 
@@ -1574,9 +1718,7 @@ type Test struct {
 	})
 }
 
-func (ModuleSuite) TestDaggerCallReturnObject(ctx context.Context, t *testctx.T) {
-	// NB: Container, Directory and File are tested in TestDaggerCallReturnTypes.
-
+func (CallSuite) TestReturnObject(ctx context.Context, t *testctx.T) {
 	c := connect(ctx, t)
 
 	modGen := modInit(t, c, "go", `package main
@@ -1639,7 +1781,7 @@ type Foo struct {
 	})
 }
 
-func (ModuleSuite) TestDaggerCallSaveOutput(ctx context.Context, t *testctx.T) {
+func (CallSuite) TestSaveOutput(ctx context.Context, t *testctx.T) {
 	// NB: Normal usage is tested in TestModuleDaggerCallReturnTypes.
 
 	c := connect(ctx, t)
@@ -1746,7 +1888,7 @@ exec "$@"
 	})
 }
 
-func (ModuleSuite) TestCallByName(ctx context.Context, t *testctx.T) {
+func (CallSuite) TestByName(ctx context.Context, t *testctx.T) {
 	t.Run("local", func(ctx context.Context, t *testctx.T) {
 		c := connect(ctx, t)
 
@@ -1949,7 +2091,7 @@ func (ModuleSuite) TestCallByName(ctx context.Context, t *testctx.T) {
 	})
 }
 
-func (ModuleSuite) TestCallGitMod(ctx context.Context, t *testctx.T) {
+func (CallSuite) TestGitMod(ctx context.Context, t *testctx.T) {
 	testOnMultipleVCS(t, func(ctx context.Context, t *testctx.T, tc vcsTestCase) {
 		c := connect(ctx, t)
 
@@ -1994,7 +2136,7 @@ func (ModuleSuite) TestCallGitMod(ctx context.Context, t *testctx.T) {
 	})
 }
 
-func (ModuleSuite) TestCallFindup(ctx context.Context, t *testctx.T) {
+func (CallSuite) TestFindup(ctx context.Context, t *testctx.T) {
 	prep := func(t *testctx.T) (*dagger.Client, *safeBuffer, *dagger.Container) {
 		var logs safeBuffer
 		c := connect(ctx, t, dagger.WithLogOutput(&logs))
@@ -2037,7 +2179,7 @@ func (ModuleSuite) TestCallFindup(ctx context.Context, t *testctx.T) {
 	})
 }
 
-func (ModuleSuite) TestCallUnsupportedFunctions(ctx context.Context, t *testctx.T) {
+func (CallSuite) TestUnsupportedFunctions(ctx context.Context, t *testctx.T) {
 	c := connect(ctx, t)
 
 	modGen := modInit(t, c, "go", `package main
@@ -2111,7 +2253,7 @@ func (m *Chain) Echo(msg string) string {
 	})
 }
 
-func (ModuleSuite) TestCallInvalidEnum(ctx context.Context, t *testctx.T) {
+func (CallSuite) TestInvalidEnum(ctx context.Context, t *testctx.T) {
 	t.Run("duplicated enum value", func(ctx context.Context, t *testctx.T) {
 		c := connect(ctx, t)
 
@@ -2215,7 +2357,7 @@ func (m *Test) FromStatus(status Status) string {
 	})
 }
 
-func (ModuleSuite) TestCallEnumList(ctx context.Context, t *testctx.T) {
+func (CallSuite) TestEnumList(ctx context.Context, t *testctx.T) {
 	type testCase struct {
 		sdk    string
 		source string
@@ -2242,7 +2384,10 @@ const (
 
 type Test struct{}
 
-func (m *Test) Faves(langs []Language) string {
+func (m *Test) Faves(
+    // +default=["GO", "PYTHON"]
+    langs []Language,
+) string {
 	return strings.Trim(fmt.Sprint(langs), "[]")
 }
 
@@ -2253,7 +2398,9 @@ func (m *Test) Official() []Language {
 		},
 		{
 			sdk: "python",
-			source: `import dagger
+			source: `from typing import Final
+
+import dagger
 from dagger import dag
 
 
@@ -2266,10 +2413,13 @@ class Language(dagger.Enum):
     ELIXIR = "ELIXIR"
 
 
+FAVES: Final = [Language.GO, Language.PYTHON]
+
+
 @dagger.object_type
 class Test:
     @dagger.function
-    def faves(self, langs: list[Language]) -> str:
+    def faves(self, langs: list[Language] = FAVES) -> str:
         return " ".join(langs)
 
     @dagger.function
@@ -2293,7 +2443,7 @@ class Language {
 @object()
 export class Test {
   @func()
-  faves(langs: Language[]): string {
+  faves(langs: Language[] = ["GO", "PYTHON"]): string {
     return langs.join(" ")
   }
 
@@ -2311,10 +2461,16 @@ export class Test {
 			c := connect(ctx, t)
 			modGen := modInit(t, c, tc.sdk, tc.source)
 
-			t.Run("happy input", func(ctx context.Context, t *testctx.T) {
-				out, err := modGen.With(daggerCall("faves", "--langs", "GO,PYTHON")).Stdout(ctx)
+			t.Run("default input", func(ctx context.Context, t *testctx.T) {
+				out, err := modGen.With(daggerCall("faves")).Stdout(ctx)
 				require.NoError(t, err)
 				require.Equal(t, "GO PYTHON", out)
+			})
+
+			t.Run("happy input", func(ctx context.Context, t *testctx.T) {
+				out, err := modGen.With(daggerCall("faves", "--langs", "TYPESCRIPT,PHP")).Stdout(ctx)
+				require.NoError(t, err)
+				require.Equal(t, "TYPESCRIPT PHP", out)
 			})
 
 			t.Run("sad input", func(ctx context.Context, t *testctx.T) {
@@ -2332,7 +2488,7 @@ export class Test {
 	}
 }
 
-func (ModuleSuite) TestCallExit(ctx context.Context, t *testctx.T) {
+func (CallSuite) TestExit(ctx context.Context, t *testctx.T) {
 	c := connect(ctx, t)
 	_, err := modInit(t, c, "go", `package main
 
@@ -2353,7 +2509,7 @@ func (m *Test) Quit() {
 	require.Equal(t, 6, exErr.ExitCode)
 }
 
-func (ModuleSuite) TestCallCore(ctx context.Context, t *testctx.T) {
+func (CallSuite) TestCore(ctx context.Context, t *testctx.T) {
 	t.Run("call container", func(ctx context.Context, t *testctx.T) {
 		c := connect(ctx, t)
 		out, err := daggerCliBase(t, c).

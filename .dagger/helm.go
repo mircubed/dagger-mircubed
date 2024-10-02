@@ -33,7 +33,7 @@ func (h *Helm) Test(ctx context.Context) error {
 		return err
 	}
 
-	k3s := dag.K3S("helm2-test")
+	k3s := dag.K3S("helm-test")
 
 	// NOTE: force starting here - without this, the config won't be generated
 	k3ssvc, err := k3s.Server().Start(ctx)
@@ -48,7 +48,7 @@ func (h *Helm) Test(ctx context.Context) error {
 		WithEnvVariable("KUBECONFIG", "/.kube/config").
 		WithEnvVariable("CACHEBUSTER", identity.NewID()).
 		WithExec([]string{"kubectl", "get", "nodes"}).
-		WithExec([]string{"helm", "install", "--wait", "--create-namespace", "--namespace=dagger", "dagger", "."}).
+		WithExec([]string{"helm", "install", "--wait", "--create-namespace", "--namespace=dagger", "--set=engine.image.ref=registry.dagger.io/engine:main", "dagger", "."}).
 		Sync(ctx)
 	if err != nil {
 		return err
@@ -97,7 +97,7 @@ func (h *Helm) chart() *dagger.Container {
 func (h *Helm) SetVersion(
 	ctx context.Context,
 
-	// Version to set the chart & app to, e.g. --version=v0.12.0
+	// Version to set the chart to, e.g. --version=v0.12.0
 	version string,
 ) (*dagger.File, error) {
 	c := h.chart()
@@ -113,7 +113,6 @@ func (h *Helm) SetVersion(
 
 	version = strings.TrimPrefix(version, "v")
 	meta.Version = version
-	meta.AppVersion = version
 
 	err = meta.Validate()
 	if err != nil {

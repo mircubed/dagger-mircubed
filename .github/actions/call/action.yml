@@ -13,7 +13,7 @@ inputs:
 
   version:
     description: "Dagger version to run against"
-    default: "v0.12.5"
+    default: "v0.13.3"
     required: false
 
   dev-engine:
@@ -63,8 +63,8 @@ runs:
       uses: actions/setup-go@v5
       if: inputs.dev-engine == 'true'
       with:
-        go-version: "1.22"
-        cache-dependency-path: "dev/go.sum"
+        go-version: "1.23"
+        cache-dependency-path: ".dagger/go.sum"
 
     - name: Start dev dagger
       shell: bash
@@ -120,9 +120,9 @@ runs:
         if [[ "${{ inputs.module }}" == "." ]]; then
           # set some sane defaults for the current module
           if [[ -f $HOME/.docker/config.json ]]; then
-            redirect_logs dagger -m "${{ inputs.module }}" call --source=".:default" --docker-cfg=file:"$HOME/.docker/config.json" ${{ inputs.function }}
+            redirect_logs dagger -m "${{ inputs.module }}" call --docker-cfg=file:"$HOME/.docker/config.json" ${{ inputs.function }}
           else
-            redirect_logs dagger -m "${{ inputs.module }}" call --source=".:default" ${{ inputs.function }}
+            redirect_logs dagger -m "${{ inputs.module }}" call ${{ inputs.function }}
           fi
         else
           redirect_logs dagger -m "${{ inputs.module }}" call ${{ inputs.function }}

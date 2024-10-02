@@ -41,6 +41,15 @@ defmodule Dagger.Directory do
     }
   end
 
+  @doc "Return the directory's digest. The format of the digest is not guaranteed to be stable between releases of Dagger. It is guaranteed to be stable between invocations of the same Dagger engine."
+  @spec digest(t()) :: {:ok, String.t()} | {:error, term()}
+  def digest(%__MODULE__{} = directory) do
+    query_builder =
+      directory.query_builder |> QB.select("digest")
+
+    Client.execute(directory.client, query_builder)
+  end
+
   @doc "Retrieves a directory at the given path."
   @spec directory(t(), String.t()) :: Dagger.Directory.t()
   def directory(%__MODULE__{} = directory, path) do
@@ -135,26 +144,6 @@ defmodule Dagger.Directory do
       directory.query_builder |> QB.select("id")
 
     Client.execute(directory.client, query_builder)
-  end
-
-  @deprecated "Explicit pipeline creation is now a no-op"
-  @doc "Creates a named sub-pipeline."
-  @spec pipeline(t(), String.t(), [
-          {:description, String.t() | nil},
-          {:labels, [Dagger.PipelineLabel.t()]}
-        ]) :: Dagger.Directory.t()
-  def pipeline(%__MODULE__{} = directory, name, optional_args \\ []) do
-    query_builder =
-      directory.query_builder
-      |> QB.select("pipeline")
-      |> QB.put_arg("name", name)
-      |> QB.maybe_put_arg("description", optional_args[:description])
-      |> QB.maybe_put_arg("labels", optional_args[:labels])
-
-    %Dagger.Directory{
-      query_builder: query_builder,
-      client: directory.client
-    }
   end
 
   @doc "Force evaluation in the engine."
@@ -316,6 +305,18 @@ defmodule Dagger.Directory do
   def without_file(%__MODULE__{} = directory, path) do
     query_builder =
       directory.query_builder |> QB.select("withoutFile") |> QB.put_arg("path", path)
+
+    %Dagger.Directory{
+      query_builder: query_builder,
+      client: directory.client
+    }
+  end
+
+  @doc "Retrieves this directory with the files at the given paths removed."
+  @spec without_files(t(), [String.t()]) :: Dagger.Directory.t()
+  def without_files(%__MODULE__{} = directory, paths) do
+    query_builder =
+      directory.query_builder |> QB.select("withoutFiles") |> QB.put_arg("paths", paths)
 
     %Dagger.Directory{
       query_builder: query_builder,

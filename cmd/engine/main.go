@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/pkg/seed" //nolint:staticcheck // SA1019 deprecated
-	"github.com/containerd/containerd/pkg/userns"
 	"github.com/containerd/containerd/sys"
 	sddaemon "github.com/coreos/go-systemd/v22/daemon"
 	"github.com/docker/docker/pkg/reexec"
@@ -31,6 +30,7 @@ import (
 	"github.com/moby/buildkit/util/profiler"
 	"github.com/moby/buildkit/util/stack"
 	"github.com/moby/buildkit/version"
+	"github.com/moby/sys/userns"
 	sloglogrus "github.com/samber/slog-logrus/v2"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
@@ -245,10 +245,10 @@ func main() { //nolint:gocyclo
 
 	addFlags(app)
 
-	ctx, cancel := context.WithCancel(appcontext.Context())
+	ctx, cancel := context.WithCancelCause(appcontext.Context())
 
 	app.Action = func(c *cli.Context) error {
-		defer cancel()
+		defer cancel(errors.New("main done"))
 		// TODO: On Windows this always returns -1. The actual "are you admin" check is very Windows-specific.
 		// See https://github.com/golang/go/issues/28804#issuecomment-505326268 for the "short" version.
 		if os.Geteuid() > 0 {
@@ -274,8 +274,8 @@ func main() { //nolint:gocyclo
 		}
 
 		bklog.G(ctx).Debug("setting up engine networking")
-		networkContext, cancelNetworking := context.WithCancel(context.Background())
-		defer cancelNetworking()
+		networkContext, cancelNetworking := context.WithCancelCause(context.Background())
+		defer cancelNetworking(errors.New("main done"))
 		netConf, err := setupNetwork(networkContext,
 			c.GlobalString("network-name"),
 			c.GlobalString("network-cidr"),
@@ -424,7 +424,7 @@ func main() { //nolint:gocyclo
 		select {
 		case serverErr := <-errCh:
 			err = serverErr
-			cancel()
+			cancel(fmt.Errorf("server error: %w", serverErr))
 		case <-ctx.Done():
 			// context should only be cancelled when a signal is received, which
 			// isn't an error
@@ -442,7 +442,7 @@ func main() { //nolint:gocyclo
 			bklog.G(ctx).WithError(stopCacheErr).Error("failed to stop cache")
 		}
 		err = errors.Join(err, stopCacheErr)
-		cancelNetworking()
+		cancelNetworking(errors.New("shutdown"))
 
 		bklog.G(ctx).Infof("stopping server")
 		if os.Getenv("NOTIFY_SOCKET") != "" {
@@ -454,7 +454,7 @@ func main() { //nolint:gocyclo
 	}
 
 	app.After = func(*cli.Context) error {
-		telemetry.Close(ctx)
+		telemetry.Close()
 		return nil
 	}
 

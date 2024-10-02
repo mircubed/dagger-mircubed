@@ -31,6 +31,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/dagger/dagger/analytics"
+	"github.com/dagger/dagger/dagql/dagui"
 	"github.com/dagger/dagger/dagql/idtui"
 	"github.com/dagger/dagger/engine"
 	"github.com/dagger/dagger/engine/slog"
@@ -57,6 +58,7 @@ var (
 	interactiveCommand       string
 	interactiveCommandParsed []string
 	web                      bool
+	noExit                   bool
 
 	stdoutIsTTY = isatty.IsTerminal(os.Stdout.Fd())
 	stderrIsTTY = isatty.IsTerminal(os.Stderr.Fd())
@@ -74,7 +76,7 @@ func init() {
 
 	rootCmd.AddCommand(
 		listenCmd,
-		versionCmd,
+		versionCmd(),
 		queryCmd,
 		runCmd,
 		watchCmd,
@@ -167,14 +169,45 @@ var rootCmd = &cobra.Command{
 			t.Close()
 		})
 
-		if cmdName := commandName(cmd); cmdName != "session" {
-			t.Capture(cmd.Context(), "cli_command", map[string]string{
-				"name": cmdName,
-			})
-		}
+		checkForUpdates(cmd.Context(), cmd.ErrOrStderr())
+
+		t.Capture(cmd.Context(), "cli_command", map[string]string{
+			"name": commandName(cmd),
+		})
 
 		return nil
 	},
+}
+
+func checkForUpdates(ctx context.Context, w io.Writer) {
+	ctx, cancel := context.WithCancel(ctx)
+
+	updateCh := make(chan string)
+	go func() {
+		defer close(updateCh)
+
+		updateAvailable, err := updateAvailable(ctx)
+		if err != nil {
+			// Silently ignore the error -- it's already being caught by OTEL
+			return
+		}
+
+		updateCh <- updateAvailable
+	}()
+
+	cobra.OnFinalize(func() {
+		select {
+		case updateAvailable := <-updateCh:
+			if updateAvailable == "" {
+				return
+			}
+			versionNag(w, updateAvailable)
+		default:
+			// If we didn't have enough time to check for updates,
+			// cancel the update check.
+			cancel()
+		}
+	})
 }
 
 func installGlobalFlags(flags *pflag.FlagSet) {
@@ -187,6 +220,7 @@ func installGlobalFlags(flags *pflag.FlagSet) {
 	flags.BoolVarP(&interactive, "interactive", "i", false, "Spawn a terminal on container exec failure")
 	flags.StringVar(&interactiveCommand, "interactive-command", "/bin/sh", "Change the default command for interactive mode")
 	flags.BoolVarP(&web, "web", "w", false, "Open trace URL in a web browser")
+	flags.BoolVarP(&noExit, "no-exit", "E", false, "Leave the TUI running after completion")
 
 	for _, fl := range []string{"workdir"} {
 		if err := flags.MarkHidden(fl); err != nil {
@@ -251,16 +285,17 @@ func (e ExitError) Error() string {
 
 const InstrumentationLibrary = "dagger.io/cli"
 
-var opts idtui.FrontendOpts
+var opts dagui.FrontendOpts
 
 func main() {
 	parseGlobalFlags()
-	opts.Verbosity += idtui.ShowCompletedVerbosity // keep progress by default
+	opts.Verbosity += dagui.ShowCompletedVerbosity // keep progress by default
 	opts.Verbosity += verbose                      // raise verbosity with -v
 	opts.Verbosity -= quiet                        // lower verbosity with -q
 	opts.Silent = silent                           // show no progress
 	opts.Debug = debug                             // show everything
 	opts.OpenWeb = web
+	opts.NoExit = noExit
 	if progress == "auto" {
 		if hasTTY {
 			progress = "tty"

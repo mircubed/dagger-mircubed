@@ -99,6 +99,15 @@ defmodule Dagger.ModuleSource do
     end
   end
 
+  @doc "Return the module source's content digest. The format of the digest is not guaranteed to be stable between releases of Dagger. It is guaranteed to be stable between invocations of the same Dagger engine."
+  @spec digest(t()) :: {:ok, String.t()} | {:error, term()}
+  def digest(%__MODULE__{} = module_source) do
+    query_builder =
+      module_source.query_builder |> QB.select("digest")
+
+    Client.execute(module_source.client, query_builder)
+  end
+
   @doc "The directory containing the module configuration and source code (source code may be in a subdir)."
   @spec directory(t(), String.t()) :: Dagger.Directory.t()
   def directory(%__MODULE__{} = module_source, path) do
@@ -121,12 +130,15 @@ defmodule Dagger.ModuleSource do
   end
 
   @doc "The kind of source (e.g. local, git, etc.)"
-  @spec kind(t()) :: Dagger.ModuleSourceKind.t()
+  @spec kind(t()) :: {:ok, Dagger.ModuleSourceKind.t()} | {:error, term()}
   def kind(%__MODULE__{} = module_source) do
     query_builder =
       module_source.query_builder |> QB.select("kind")
 
-    Client.execute(module_source.client, query_builder)
+    case Client.execute(module_source.client, query_builder) do
+      {:ok, enum} -> {:ok, Dagger.ModuleSourceKind.from_string(enum)}
+      error -> error
+    end
   end
 
   @doc "If set, the name of the module this source references, including any overrides at runtime by callers."
@@ -171,14 +183,17 @@ defmodule Dagger.ModuleSource do
   end
 
   @doc "Load a directory from the caller optionally with a given view applied."
-  @spec resolve_directory_from_caller(t(), String.t(), [{:view_name, String.t() | nil}]) ::
-          Dagger.Directory.t()
+  @spec resolve_directory_from_caller(t(), String.t(), [
+          {:view_name, String.t() | nil},
+          {:ignore, [String.t()]}
+        ]) :: Dagger.Directory.t()
   def resolve_directory_from_caller(%__MODULE__{} = module_source, path, optional_args \\ []) do
     query_builder =
       module_source.query_builder
       |> QB.select("resolveDirectoryFromCaller")
       |> QB.put_arg("path", path)
       |> QB.maybe_put_arg("viewName", optional_args[:view_name])
+      |> QB.maybe_put_arg("ignore", optional_args[:ignore])
 
     %Dagger.Directory{
       query_builder: query_builder,

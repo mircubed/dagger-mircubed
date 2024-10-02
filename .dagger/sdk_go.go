@@ -82,6 +82,20 @@ func (t GoSDK) Generate(ctx context.Context) (*dagger.Directory, error) {
 	return dag.Directory().WithDirectory("sdk/go", generated), nil
 }
 
+// Test the publishing process
+func (t GoSDK) TestPublish(ctx context.Context, tag string) error {
+	return t.Publish(
+		ctx,
+		tag,
+		true,
+		"https://github.com/dagger/dagger-go-sdk.git",
+		"https://github.com/dagger/dagger.git",
+		"dagger-ci",
+		"hello@dagger.io",
+		nil,
+	)
+}
+
 // Publish the Go SDK
 func (t GoSDK) Publish(
 	ctx context.Context,
@@ -106,7 +120,9 @@ func (t GoSDK) Publish(
 	// +optional
 	githubToken *dagger.Secret,
 ) error {
-	return gitPublish(ctx, gitPublishOpts{
+	version, isVersioned := strings.CutPrefix(tag, "sdk/go/")
+
+	if err := gitPublish(ctx, gitPublishOpts{
 		sdk:          "go",
 		source:       gitRepoSource,
 		sourceTag:    tag,
@@ -114,12 +130,28 @@ func (t GoSDK) Publish(
 		sourceFilter: "if [ -f go.mod ]; then go mod edit -dropreplace github.com/dagger/dagger; fi",
 		sourceEnv:    t.Dagger.Go().Env(),
 		dest:         gitRepo,
-		destTag:      strings.TrimPrefix(tag, "sdk/go/"),
+		destTag:      version,
 		username:     gitUserName,
 		email:        gitUserEmail,
 		githubToken:  githubToken,
 		dryRun:       dryRun,
-	})
+	}); err != nil {
+		return err
+	}
+
+	if isVersioned {
+		if err := githubRelease(ctx, githubReleaseOpts{
+			tag:         tag,
+			notes:       sdkChangeNotes(t.Dagger.Src, "go", version),
+			gitRepo:     gitRepoSource,
+			githubToken: githubToken,
+			dryRun:      dryRun,
+		}); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // Bump the Go SDK's Engine dependency

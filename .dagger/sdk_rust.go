@@ -89,6 +89,11 @@ func (r RustSDK) Generate(ctx context.Context) (*dagger.Directory, error) {
 		WithFile(rustGeneratedAPIPath, generated), nil
 }
 
+// Test the publishing process
+func (r RustSDK) TestPublish(ctx context.Context, tag string) error {
+	return r.Publish(ctx, tag, true, nil, "https://github.com/dagger/dagger.git", nil)
+}
+
 // Publish the Rust SDK
 func (r RustSDK) Publish(
 	ctx context.Context,
@@ -99,11 +104,19 @@ func (r RustSDK) Publish(
 
 	// +optional
 	cargoRegistryToken *dagger.Secret,
+
+	// +optional
+	// +default="https://github.com/dagger/dagger.git"
+	gitRepoSource string,
+	// +optional
+	githubToken *dagger.Secret,
 ) error {
-	version := strings.TrimPrefix(tag, "sdk/rust/v")
+	version, isVersioned := strings.CutPrefix(tag, "sdk/rust/")
+
+	versionFlag := strings.TrimPrefix(version, "v")
 	if dryRun {
 		// just pick any version, it's a dry-run
-		version = "--bump=rc"
+		versionFlag = "--bump=rc"
 	}
 
 	crate := "dagger-sdk"
@@ -114,7 +127,7 @@ func (r RustSDK) Publish(
 			"cargo", "install", "cargo-edit", "--locked",
 		}).
 		WithExec([]string{
-			"cargo", "set-version", "-p", crate, version,
+			"cargo", "set-version", "-p", crate, versionFlag,
 		})
 	args := []string{
 		"cargo", "publish", "-p", crate, "-v", "--all-features",
@@ -128,9 +141,24 @@ func (r RustSDK) Publish(
 			WithSecretVariable("CARGO_REGISTRY_TOKEN", cargoRegistryToken).
 			WithExec(args)
 	}
-
 	_, err := base.Sync(ctx)
-	return err
+	if err != nil {
+		return err
+	}
+
+	if isVersioned {
+		if err := githubRelease(ctx, githubReleaseOpts{
+			tag:         tag,
+			notes:       sdkChangeNotes(r.Dagger.Src, "rust", version),
+			gitRepo:     gitRepoSource,
+			githubToken: githubToken,
+			dryRun:      dryRun,
+		}); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // Bump the Rust SDK's Engine dependency

@@ -125,15 +125,18 @@ func (t ElixirSDK) Generate(ctx context.Context) (*dagger.Directory, error) {
 	gen := t.elixirBase(elixirVersions[elixirLatestVersion]).
 		With(installer).
 		WithWorkdir("dagger_codegen").
-		WithExec([]string{"mix", "deps.get"}).
-		WithExec([]string{"mix", "escript.build"}).
 		WithMountedFile("/schema.json", introspection).
-		WithExec([]string{"./dagger_codegen", "generate", "--introspection", "/schema.json", "--outdir", "gen"}).
+		WithExec([]string{"mix", "dagger.codegen", "generate", "--introspection", "/schema.json", "--outdir", "gen"}).
 		WithExec([]string{"mix", "format", "gen/*.ex"}).
 		Directory("gen")
 
 	dir := dag.Directory().WithDirectory("sdk/elixir/lib/dagger/gen", gen)
 	return dir, nil
+}
+
+// Test the publishing process
+func (t ElixirSDK) TestPublish(ctx context.Context, tag string) error {
+	return t.Publish(ctx, tag, true, nil, "https://github.com/dagger/dagger.git", nil)
 }
 
 // Publish the Elixir SDK
@@ -145,11 +148,15 @@ func (t ElixirSDK) Publish(
 	dryRun bool,
 	// +optional
 	hexAPIKey *dagger.Secret,
+
+	// +optional
+	// +default="https://github.com/dagger/dagger.git"
+	gitRepoSource string,
+	// +optional
+	githubToken *dagger.Secret,
 ) error {
-	var (
-		version = strings.TrimPrefix(tag, "sdk/elixir/v")
-		mixFile = "/sdk/elixir/mix.exs"
-	)
+	version, isVersioned := strings.CutPrefix(tag, "sdk/elixir/")
+	mixFile := "/sdk/elixir/mix.exs"
 
 	ctr := t.elixirBase(elixirVersions[elixirLatestVersion])
 
@@ -158,7 +165,7 @@ func (t ElixirSDK) Publish(
 		if err != nil {
 			return err
 		}
-		newMixExs := strings.Replace(mixExs, `@version "0.0.0"`, `@version "`+version+`"`, 1)
+		newMixExs := strings.Replace(mixExs, `@version "0.0.0"`, `@version "`+strings.TrimPrefix(version, "v")+`"`, 1)
 		ctr = ctr.WithNewFile(mixFile, newMixExs)
 	}
 
@@ -171,9 +178,24 @@ func (t ElixirSDK) Publish(
 			WithSecretVariable("HEX_API_KEY", hexAPIKey).
 			WithExec([]string{"mix", "hex.publish", "--yes"})
 	}
-
 	_, err := ctr.Sync(ctx)
-	return err
+	if err != nil {
+		return err
+	}
+
+	if isVersioned {
+		if err := githubRelease(ctx, githubReleaseOpts{
+			tag:         tag,
+			notes:       sdkChangeNotes(t.Dagger.Src, "elixir", version),
+			gitRepo:     gitRepoSource,
+			githubToken: githubToken,
+			dryRun:      dryRun,
+		}); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 var elixirVersionRe = regexp.MustCompile(`@dagger_cli_version "([0-9\.-a-zA-Z]+)"`)

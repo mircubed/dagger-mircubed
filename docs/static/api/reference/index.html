@@ -85,7 +85,6 @@
               <li><a href="#query-module">module</a></li>
               <li><a href="#query-moduleDependency">moduleDependency</a></li>
               <li><a href="#query-moduleSource">moduleSource</a></li>
-              <li><a href="#query-pipeline">pipeline</a></li>
               <li><a href="#query-secret">secret</a></li>
               <li><a href="#query-setSecret">setSecret</a></li>
               <li><a href="#query-typeDef">typeDef</a></li>
@@ -824,7 +823,7 @@
                         <td>
                           <span class="property-name"><code>keepGitDir</code></span> - <span class="property-type"><a href="#definition-Boolean"><code>Boolean</code></a></span>
                         </td>
-                        <td> Set to true to keep .git directory. Default = <code>false</code> </td>
+                        <td> DEPRECATED: Set to true to keep .git directory. Default = <code>true</code> </td>
                       </tr>
                       <tr>
                         <td>
@@ -3194,6 +3193,12 @@
                       </tr>
                       <tr>
                         <td>
+                          <span class="property-name"><code>relHostPath</code></span> - <span class="property-type"><a href="#definition-String"><code>String</code></a></span>
+                        </td>
+                        <td> The relative path to the module root from the host directory. Default = <code>""</code> </td>
+                      </tr>
+                      <tr>
+                        <td>
                           <span class="property-name"><code>stable</code></span> - <span class="property-type"><a href="#definition-Boolean"><code>Boolean</code></a></span>
                         </td>
                         <td> If true, enforce that the source is a stable version for source kinds that support versioning. Default = <code>false</code> </td>
@@ -3207,86 +3212,6 @@
               <div class="doc-copy">
                 <div class="operation-example doc-copy-section">
                   <h5>Example</h5>
-                </div>
-              </div>
-            </div>
-          </section>
-          <section id="query-pipeline" class="operation operation-query" data-traverse-target="query-pipeline">
-            <div class="operation-group-name">
-              <a href="#group-Queries">Queries</a>
-            </div>
-            <h2 class="operation-heading operation-deprecated">
-              <code>pipeline</code>
-            </h2>
-            <div class="doc-row">
-              <div class="doc-copy">
-                <div class="doc-copy-section">
-                  <div class="deprecation-reason"> Explicit pipeline creation is now a no-op </div>
-                </div>
-              </div>
-            </div>
-            <div class="doc-row">
-              <div class="doc-copy">
-                <div class="operation-description doc-copy-section">
-                  <h5>Description</h5>
-                  <p>Creates a named sub-pipeline.</p>
-                </div>
-              </div>
-            </div>
-            <div class="doc-row">
-              <div class="doc-copy">
-                <div class="operation-response doc-copy-section">
-                  <h5>Type</h5>
-                  <p>
-                    <a href="#definition-Query"><code>Query!</code></a>
-                  </p>
-                </div>
-                <div class="operation-arguments test doc-copy-section">
-                  <h5>Arguments</h5>
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Name</th>
-                        <th>Description</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr>
-                        <td>
-                          <span class="property-name"><code>description</code></span> - <span class="property-type"><a href="#definition-String"><code>String</code></a></span>
-                        </td>
-                        <td> Description of the sub-pipeline. Default = <code>""</code> </td>
-                      </tr>
-                      <tr>
-                        <td>
-                          <span class="property-name"><code>labels</code></span> - <span class="property-type"><a href="#definition-PipelineLabel"><code>[PipelineLabel!]</code></a></span>
-                        </td>
-                        <td> Labels to apply to the sub-pipeline. </td>
-                      </tr>
-                      <tr>
-                        <td>
-                          <span class="property-name"><code>name</code></span> - <span class="property-type"><a href="#definition-String"><code>String!</code></a></span>
-                        </td>
-                        <td> Name of the sub-pipeline. </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-            <div class="doc-row">
-              <div class="doc-copy">
-                <div class="operation-example doc-copy-section">
-                  <h5>Example</h5>
-                  <pre><code class="hljs language-gql"><span class="hljs-symbol"><span class="hljs-keyword">query</span> <span class="hljs-tag">{
-  <span class="hljs-symbol">pipeline<span class="hljs-tag">(name: &quot;build&quot;, description: <span class="hljs-type">&quot;Builds </span>the app container&quot;)</span> <span class="hljs-tag">{
-    <span class="hljs-symbol">container <span class="hljs-tag">{
-      <span class="hljs-symbol">id</span>
-    }</span></span>
-  }</span></span>
-}</span></span>
-</code></pre>
-                  <p><a href="https://play.dagger.cloud/playground/JqqwzSV0wBO" target="_blank">Try it in the API Playground!</a></p>
                 </div>
               </div>
             </div>
@@ -3953,32 +3878,6 @@
                         <td data-property-name=""><a class="property-name" id="Container-mounts" href="#Container-mounts"><code>mounts</code></a> - <span class="property-type"><a href="#definition-String"><code>[String!]!</code></a></span> </td>
                         <td> Retrieves the list of paths where a directory is mounted. </td>
                       </tr>
-                      <tr class="row-has-field-arguments">
-                        <td data-property-name="" class="definition-deprecated"><a class="property-name" id="Container-pipeline" href="#Container-pipeline"><code>pipeline</code></a> - <span class="property-type"><a href="#definition-Container"><code>Container!</code></a></span> </td>
-                        <td> Creates a named sub-pipeline. <span class="deprecation-reason">Explicit pipeline creation is now a no-op</span>
-                        </td>
-                      </tr>
-                      <tr class="row-field-arguments">
-                        <td colspan="2">
-                          <div class="field-arguments">
-                            <h5 class="field-arguments-heading"> Arguments </h5>
-                            <div class="field-argument-list">
-                              <div class="field-argument">
-                                <h6 class="field-argument-name"><span class="property-name"><code>description</code></span> - <span class="property-type"><a href="#definition-String"><code>String</code></a></span></h6>
-                                <p>Description of the sub-pipeline.</p>
-                              </div>
-                              <div class="field-argument">
-                                <h6 class="field-argument-name"><span class="property-name"><code>labels</code></span> - <span class="property-type"><a href="#definition-PipelineLabel"><code>[PipelineLabel!]</code></a></span></h6>
-                                <p>Labels to apply to the sub-pipeline.</p>
-                              </div>
-                              <div class="field-argument">
-                                <h6 class="field-argument-name"><span class="property-name"><code>name</code></span> - <span class="property-type"><a href="#definition-String"><code>String!</code></a></span></h6>
-                                <p>Name of the sub-pipeline.</p>
-                              </div>
-                            </div>
-                          </div>
-                        </td>
-                      </tr>
                       <tr>
                         <td data-property-name=""><a class="property-name" id="Container-platform" href="#Container-platform"><code>platform</code></a> - <span class="property-type"><a href="#definition-Platform"><code>Platform!</code></a></span> </td>
                         <td> The platform this container executes and publishes as. </td>
@@ -4071,9 +3970,55 @@
                           </div>
                         </td>
                       </tr>
+                      <tr class="row-has-field-arguments">
+                        <td data-property-name=""><a class="property-name" id="Container-up" href="#Container-up"><code>up</code></a> - <span class="property-type"><a href="#definition-Void"><code>Void</code></a></span> </td>
+                        <td>
+                          <p>Starts a Service and creates a tunnel that forwards traffic from the caller&#39;s network to that service.</p>
+                          <p>Be sure to set any exposed ports before calling this api.</p>
+                        </td>
+                      </tr>
+                      <tr class="row-field-arguments">
+                        <td colspan="2">
+                          <div class="field-arguments">
+                            <h5 class="field-arguments-heading"> Arguments </h5>
+                            <div class="field-argument-list">
+                              <div class="field-argument">
+                                <h6 class="field-argument-name"><span class="property-name"><code>ports</code></span> - <span class="property-type"><a href="#definition-PortForward"><code>[PortForward!]</code></a></span></h6>
+                                <p>List of frontend/backend port mappings to forward.</p>
+                                <p>Frontend is the port accepting traffic on the host, backend is the service port.</p>
+                              </div>
+                              <div class="field-argument">
+                                <h6 class="field-argument-name"><span class="property-name"><code>random</code></span> - <span class="property-type"><a href="#definition-Boolean"><code>Boolean</code></a></span></h6>
+                                <p>Bind each tunnel port to a random port on the host.</p>
+                              </div>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
                       <tr>
                         <td data-property-name=""><a class="property-name" id="Container-user" href="#Container-user"><code>user</code></a> - <span class="property-type"><a href="#definition-String"><code>String!</code></a></span> </td>
                         <td> Retrieves the user to be set for all commands. </td>
+                      </tr>
+                      <tr class="row-has-field-arguments">
+                        <td data-property-name=""><a class="property-name" id="Container-withAnnotation" href="#Container-withAnnotation"><code>withAnnotation</code></a> - <span class="property-type"><a href="#definition-Container"><code>Container!</code></a></span> </td>
+                        <td> Retrieves this container plus the given OCI anotation. </td>
+                      </tr>
+                      <tr class="row-field-arguments">
+                        <td colspan="2">
+                          <div class="field-arguments">
+                            <h5 class="field-arguments-heading"> Arguments </h5>
+                            <div class="field-argument-list">
+                              <div class="field-argument">
+                                <h6 class="field-argument-name"><span class="property-name"><code>name</code></span> - <span class="property-type"><a href="#definition-String"><code>String!</code></a></span></h6>
+                                <p>The name of the annotation.</p>
+                              </div>
+                              <div class="field-argument">
+                                <h6 class="field-argument-name"><span class="property-name"><code>value</code></span> - <span class="property-type"><a href="#definition-String"><code>String!</code></a></span></h6>
+                                <p>The value of the annotation.</p>
+                              </div>
+                            </div>
+                          </div>
+                        </td>
                       </tr>
                       <tr class="row-has-field-arguments">
                         <td data-property-name=""><a class="property-name" id="Container-withDefaultArgs" href="#Container-withDefaultArgs"><code>withDefaultArgs</code></a> - <span class="property-type"><a href="#definition-Container"><code>Container!</code></a></span> </td>
@@ -4229,10 +4174,6 @@
                               <div class="field-argument">
                                 <h6 class="field-argument-name"><span class="property-name"><code>redirectStdout</code></span> - <span class="property-type"><a href="#definition-String"><code>String</code></a></span></h6>
                                 <p>Redirect the command&#39;s standard output to a file in the container (e.g., &quot;/tmp/stdout&quot;).</p>
-                              </div>
-                              <div class="field-argument">
-                                <h6 class="field-argument-name"><span class="property-name"><code>skipEntrypoint</code></span> - <span class="property-type"><a href="#definition-Boolean"><code>Boolean</code></a></span></h6>
-                                <p>DEPRECATED: For true this can be removed. For false, use <code>useEntrypoint</code> instead.</p>
                               </div>
                               <div class="field-argument">
                                 <h6 class="field-argument-name"><span class="property-name"><code>stdin</code></span> - <span class="property-type"><a href="#definition-String"><code>String</code></a></span></h6>
@@ -4543,6 +4484,23 @@
                           </div>
                         </td>
                       </tr>
+                      <tr class="row-has-field-arguments">
+                        <td data-property-name=""><a class="property-name" id="Container-withoutAnnotation" href="#Container-withoutAnnotation"><code>withoutAnnotation</code></a> - <span class="property-type"><a href="#definition-Container"><code>Container!</code></a></span> </td>
+                        <td> Retrieves this container minus the given OCI annotation. </td>
+                      </tr>
+                      <tr class="row-field-arguments">
+                        <td colspan="2">
+                          <div class="field-arguments">
+                            <h5 class="field-arguments-heading"> Arguments </h5>
+                            <div class="field-argument-list">
+                              <div class="field-argument">
+                                <h6 class="field-argument-name"><span class="property-name"><code>name</code></span> - <span class="property-type"><a href="#definition-String"><code>String!</code></a></span></h6>
+                                <p>The name of the annotation.</p>
+                              </div>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
                       <tr>
                         <td data-property-name=""><a class="property-name" id="Container-withoutDefaultArgs" href="#Container-withoutDefaultArgs"><code>withoutDefaultArgs</code></a> - <span class="property-type"><a href="#definition-Container"><code>Container!</code></a></span> </td>
                         <td> Retrieves this container with unset default arguments for future commands. </td>
@@ -4631,6 +4589,23 @@
                               <div class="field-argument">
                                 <h6 class="field-argument-name"><span class="property-name"><code>path</code></span> - <span class="property-type"><a href="#definition-String"><code>String!</code></a></span></h6>
                                 <p>Location of the file to remove (e.g., &quot;/file.txt&quot;).</p>
+                              </div>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                      <tr class="row-has-field-arguments">
+                        <td data-property-name=""><a class="property-name" id="Container-withoutFiles" href="#Container-withoutFiles"><code>withoutFiles</code></a> - <span class="property-type"><a href="#definition-Container"><code>Container!</code></a></span> </td>
+                        <td> Retrieves this container with the files at the given paths removed. </td>
+                      </tr>
+                      <tr class="row-field-arguments">
+                        <td colspan="2">
+                          <div class="field-arguments">
+                            <h5 class="field-arguments-heading"> Arguments </h5>
+                            <div class="field-argument-list">
+                              <div class="field-argument">
+                                <h6 class="field-argument-name"><span class="property-name"><code>paths</code></span> - <span class="property-type"><a href="#definition-String"><code>[String!]!</code></a></span></h6>
+                                <p>Location of the files to remove (e.g., [&quot;/file.txt&quot;]).</p>
                               </div>
                             </div>
                           </div>
@@ -5302,6 +5277,10 @@
                           </div>
                         </td>
                       </tr>
+                      <tr>
+                        <td data-property-name=""><a class="property-name" id="Directory-digest" href="#Directory-digest"><code>digest</code></a> - <span class="property-type"><a href="#definition-String"><code>String!</code></a></span> </td>
+                        <td> Return the directory's digest. The format of the digest is not guaranteed to be stable between releases of Dagger. It is guaranteed to be stable between invocations of the same Dagger engine. </td>
+                      </tr>
                       <tr class="row-has-field-arguments">
                         <td data-property-name=""><a class="property-name" id="Directory-directory" href="#Directory-directory"><code>directory</code></a> - <span class="property-type"><a href="#definition-Directory"><code>Directory!</code></a></span> </td>
                         <td> Retrieves a directory at the given path. </td>
@@ -5428,32 +5407,6 @@
                       <tr>
                         <td data-property-name=""><a class="property-name" id="Directory-id" href="#Directory-id"><code>id</code></a> - <span class="property-type"><a href="#definition-DirectoryID"><code>DirectoryID!</code></a></span> </td>
                         <td> A unique identifier for this Directory. </td>
-                      </tr>
-                      <tr class="row-has-field-arguments">
-                        <td data-property-name="" class="definition-deprecated"><a class="property-name" id="Directory-pipeline" href="#Directory-pipeline"><code>pipeline</code></a> - <span class="property-type"><a href="#definition-Directory"><code>Directory!</code></a></span> </td>
-                        <td> Creates a named sub-pipeline. <span class="deprecation-reason">Explicit pipeline creation is now a no-op</span>
-                        </td>
-                      </tr>
-                      <tr class="row-field-arguments">
-                        <td colspan="2">
-                          <div class="field-arguments">
-                            <h5 class="field-arguments-heading"> Arguments </h5>
-                            <div class="field-argument-list">
-                              <div class="field-argument">
-                                <h6 class="field-argument-name"><span class="property-name"><code>description</code></span> - <span class="property-type"><a href="#definition-String"><code>String</code></a></span></h6>
-                                <p>Description of the sub-pipeline.</p>
-                              </div>
-                              <div class="field-argument">
-                                <h6 class="field-argument-name"><span class="property-name"><code>labels</code></span> - <span class="property-type"><a href="#definition-PipelineLabel"><code>[PipelineLabel!]</code></a></span></h6>
-                                <p>Labels to apply to the sub-pipeline.</p>
-                              </div>
-                              <div class="field-argument">
-                                <h6 class="field-argument-name"><span class="property-name"><code>name</code></span> - <span class="property-type"><a href="#definition-String"><code>String!</code></a></span></h6>
-                                <p>Name of the sub-pipeline.</p>
-                              </div>
-                            </div>
-                          </div>
-                        </td>
                       </tr>
                       <tr>
                         <td data-property-name=""><a class="property-name" id="Directory-sync" href="#Directory-sync"><code>sync</code></a> - <span class="property-type"><a href="#definition-DirectoryID"><code>DirectoryID!</code></a></span> </td>
@@ -5643,6 +5596,23 @@
                               <div class="field-argument">
                                 <h6 class="field-argument-name"><span class="property-name"><code>path</code></span> - <span class="property-type"><a href="#definition-String"><code>String!</code></a></span></h6>
                                 <p>Location of the file to remove (e.g., &quot;/file.txt&quot;).</p>
+                              </div>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                      <tr class="row-has-field-arguments">
+                        <td data-property-name=""><a class="property-name" id="Directory-withoutFiles" href="#Directory-withoutFiles"><code>withoutFiles</code></a> - <span class="property-type"><a href="#definition-Directory"><code>Directory!</code></a></span> </td>
+                        <td> Retrieves this directory with the files at the given paths removed. </td>
+                      </tr>
+                      <tr class="row-field-arguments">
+                        <td colspan="2">
+                          <div class="field-arguments">
+                            <h5 class="field-arguments-heading"> Arguments </h5>
+                            <div class="field-argument-list">
+                              <div class="field-argument">
+                                <h6 class="field-argument-name"><span class="property-name"><code>paths</code></span> - <span class="property-type"><a href="#definition-String"><code>[String!]!</code></a></span></h6>
+                                <p>Location of the file to remove (e.g., [&quot;/file.txt&quot;]).</p>
                               </div>
                             </div>
                           </div>
@@ -6097,12 +6067,20 @@
                             <h5 class="field-arguments-heading"> Arguments </h5>
                             <div class="field-argument-list">
                               <div class="field-argument">
+                                <h6 class="field-argument-name"><span class="property-name"><code>defaultPath</code></span> - <span class="property-type"><a href="#definition-String"><code>String</code></a></span></h6>
+                                <p>If the argument is a Directory or File type, default to load path from context directory, relative to root directory.</p>
+                              </div>
+                              <div class="field-argument">
                                 <h6 class="field-argument-name"><span class="property-name"><code>defaultValue</code></span> - <span class="property-type"><a href="#definition-JSON"><code>JSON</code></a></span></h6>
                                 <p>A default value to use for this argument if not explicitly set by the caller, if any</p>
                               </div>
                               <div class="field-argument">
                                 <h6 class="field-argument-name"><span class="property-name"><code>description</code></span> - <span class="property-type"><a href="#definition-String"><code>String</code></a></span></h6>
                                 <p>A doc string for the argument, if any</p>
+                              </div>
+                              <div class="field-argument">
+                                <h6 class="field-argument-name"><span class="property-name"><code>ignore</code></span> - <span class="property-type"><a href="#definition-String"><code>[String!]</code></a></span></h6>
+                                <p>Patterns to ignore when loading the contextual argument value.</p>
                               </div>
                               <div class="field-argument">
                                 <h6 class="field-argument-name"><span class="property-name"><code>name</code></span> - <span class="property-type"><a href="#definition-String"><code>String!</code></a></span></h6>
@@ -6162,6 +6140,10 @@
                     </thead>
                     <tbody>
                       <tr>
+                        <td data-property-name=""><a class="property-name" id="FunctionArg-defaultPath" href="#FunctionArg-defaultPath"><code>defaultPath</code></a> - <span class="property-type"><a href="#definition-String"><code>String!</code></a></span> </td>
+                        <td> Only applies to arguments of type File or Directory. If the argument is not set, load it from the given path in the context directory </td>
+                      </tr>
+                      <tr>
                         <td data-property-name=""><a class="property-name" id="FunctionArg-defaultValue" href="#FunctionArg-defaultValue"><code>defaultValue</code></a> - <span class="property-type"><a href="#definition-JSON"><code>JSON!</code></a></span> </td>
                         <td> A default value to use for this argument when not explicitly set by the caller, if any. </td>
                       </tr>
@@ -6172,6 +6154,10 @@
                       <tr>
                         <td data-property-name=""><a class="property-name" id="FunctionArg-id" href="#FunctionArg-id"><code>id</code></a> - <span class="property-type"><a href="#definition-FunctionArgID"><code>FunctionArgID!</code></a></span> </td>
                         <td> A unique identifier for this FunctionArg. </td>
+                      </tr>
+                      <tr>
+                        <td data-property-name=""><a class="property-name" id="FunctionArg-ignore" href="#FunctionArg-ignore"><code>ignore</code></a> - <span class="property-type"><a href="#definition-String"><code>[String!]!</code></a></span> </td>
+                        <td> Only applies to arguments of type Directory. The ignore patterns are applied to the input directory, and matching entries are filtered out, in a cache-efficient manner. </td>
                       </tr>
                       <tr>
                         <td data-property-name=""><a class="property-name" id="FunctionArg-name" href="#FunctionArg-name"><code>name</code></a> - <span class="property-type"><a href="#definition-String"><code>String!</code></a></span> </td>
@@ -6461,11 +6447,6 @@
                         <td> The ref to clone the root of the git repo from </td>
                       </tr>
                       <tr>
-                        <td data-property-name="" class="definition-deprecated"><a class="property-name" id="GitModuleSource-cloneURL" href="#GitModuleSource-cloneURL"><code>cloneURL</code></a> - <span class="property-type"><a href="#definition-String"><code>String!</code></a></span> </td>
-                        <td> The URL to clone the root of the git repo from <span class="deprecation-reason">Use CloneRef instead. CloneRef supports both URL-style and SCP-like SSH references</span>
-                        </td>
-                      </tr>
-                      <tr>
                         <td data-property-name=""><a class="property-name" id="GitModuleSource-commit" href="#GitModuleSource-commit"><code>commit</code></a> - <span class="property-type"><a href="#definition-String"><code>String!</code></a></span> </td>
                         <td> The resolved commit of the git repo this source points to. </td>
                       </tr>
@@ -6546,9 +6527,22 @@
                         <td data-property-name=""><a class="property-name" id="GitRef-id" href="#GitRef-id"><code>id</code></a> - <span class="property-type"><a href="#definition-GitRefID"><code>GitRefID!</code></a></span> </td>
                         <td> A unique identifier for this GitRef. </td>
                       </tr>
-                      <tr>
+                      <tr class="row-has-field-arguments">
                         <td data-property-name=""><a class="property-name" id="GitRef-tree" href="#GitRef-tree"><code>tree</code></a> - <span class="property-type"><a href="#definition-Directory"><code>Directory!</code></a></span> </td>
                         <td> The filesystem tree at this ref. </td>
+                      </tr>
+                      <tr class="row-field-arguments">
+                        <td colspan="2">
+                          <div class="field-arguments">
+                            <h5 class="field-arguments-heading"> Arguments </h5>
+                            <div class="field-argument-list">
+                              <div class="field-argument">
+                                <h6 class="field-argument-name"><span class="property-name"><code>discardGitDir</code></span> - <span class="property-type"><a href="#definition-Boolean"><code>Boolean</code></a></span></h6>
+                                <p>Set to true to discard .git directory.</p>
+                              </div>
+                            </div>
+                          </div>
+                        </td>
                       </tr>
                     </tbody>
                   </table>
@@ -7310,6 +7304,10 @@
                         <td> A unique identifier for this LocalModuleSource. </td>
                       </tr>
                       <tr>
+                        <td data-property-name=""><a class="property-name" id="LocalModuleSource-relHostPath" href="#LocalModuleSource-relHostPath"><code>relHostPath</code></a> - <span class="property-type"><a href="#definition-String"><code>String!</code></a></span> </td>
+                        <td> The relative path to the module root from the host directory </td>
+                      </tr>
+                      <tr>
                         <td data-property-name=""><a class="property-name" id="LocalModuleSource-rootSubpath" href="#LocalModuleSource-rootSubpath"><code>rootSubpath</code></a> - <span class="property-type"><a href="#definition-String"><code>String!</code></a></span> </td>
                         <td> The path to the root of the module source under the context directory. This directory contains its configuration file. It also contains its source code (possibly as a subdirectory). </td>
                       </tr>
@@ -7638,6 +7636,10 @@
                         <td data-property-name=""><a class="property-name" id="ModuleSource-dependencies" href="#ModuleSource-dependencies"><code>dependencies</code></a> - <span class="property-type"><a href="#definition-ModuleDependency"><code>[ModuleDependency!]!</code></a></span> </td>
                         <td> The dependencies of the module source. Includes dependencies from the configuration and any extras from withDependencies calls. </td>
                       </tr>
+                      <tr>
+                        <td data-property-name=""><a class="property-name" id="ModuleSource-digest" href="#ModuleSource-digest"><code>digest</code></a> - <span class="property-type"><a href="#definition-String"><code>String!</code></a></span> </td>
+                        <td> Return the module source's content digest. The format of the digest is not guaranteed to be stable between releases of Dagger. It is guaranteed to be stable between invocations of the same Dagger engine. </td>
+                      </tr>
                       <tr class="row-has-field-arguments">
                         <td data-property-name=""><a class="property-name" id="ModuleSource-directory" href="#ModuleSource-directory"><code>directory</code></a> - <span class="property-type"><a href="#definition-Directory"><code>Directory!</code></a></span> </td>
                         <td> The directory containing the module configuration and source code (source code may be in a subdir). </td>
@@ -7701,6 +7703,10 @@
                           <div class="field-arguments">
                             <h5 class="field-arguments-heading"> Arguments </h5>
                             <div class="field-argument-list">
+                              <div class="field-argument">
+                                <h6 class="field-argument-name"><span class="property-name"><code>ignore</code></span> - <span class="property-type"><a href="#definition-String"><code>[String!]</code></a></span></h6>
+                                <p>Patterns to ignore when loading the directory.</p>
+                              </div>
                               <div class="field-argument">
                                 <h6 class="field-argument-name"><span class="property-name"><code>path</code></span> - <span class="property-type"><a href="#definition-String"><code>String!</code></a></span></h6>
                                 <p>The path on the caller&#39;s filesystem to load.</p>

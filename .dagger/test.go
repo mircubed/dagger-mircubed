@@ -101,7 +101,7 @@ func (t *Test) test(
 
 	// Add ldflags
 	ldflags := []string{
-		"-X", "github.com/dagger/dagger/engine.Version=" + t.Dagger.Version.String(),
+		"-X", "github.com/dagger/dagger/engine.Version=" + t.Dagger.Version,
 		"-X", "github.com/dagger/dagger/engine.Tag=" + t.Dagger.Tag,
 	}
 	args = append(args, "-ldflags", strings.Join(ldflags, " "))
@@ -162,10 +162,15 @@ func (t *Test) testCmd(ctx context.Context) (*dagger.Container, error) {
 		WithArg(`network-name`, `dagger-dev`).
 		WithArg(`network-cidr`, `10.88.0.0/16`).
 		WithArg(`debugaddr`, `0.0.0.0:6060`)
-	devEngine, err := engine.Container(ctx, "")
+	devEngine, err := engine.Container(ctx, "", nil, false)
 	if err != nil {
 		return nil, err
 	}
+
+	// TODO: mitigation for https://github.com/dagger/dagger/issues/8031
+	// during our test suite
+	devEngine = devEngine.
+		WithEnvVariable("_DAGGER_ENGINE_SYSTEMENV_GODEBUG", "goindex=0")
 
 	devBinary, err := t.Dagger.CLI().Binary(ctx, "")
 	if err != nil {

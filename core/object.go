@@ -11,6 +11,7 @@ import (
 
 	"github.com/dagger/dagger/dagql"
 	"github.com/dagger/dagger/dagql/call"
+	"github.com/dagger/dagger/engine/server/resource"
 	"github.com/dagger/dagger/engine/slog"
 )
 
@@ -81,7 +82,7 @@ func (t *ModuleObjectType) ConvertToSDKInput(ctx context.Context, value dagql.Ty
 	}
 }
 
-func (t *ModuleObjectType) CollectCoreIDs(ctx context.Context, value dagql.Typed, ids map[digest.Digest]*call.ID) error {
+func (t *ModuleObjectType) CollectCoreIDs(ctx context.Context, value dagql.Typed, ids map[digest.Digest]*resource.ID) error {
 	var obj *ModuleObject
 	switch value := value.(type) {
 	case nil:
@@ -103,7 +104,8 @@ func (t *ModuleObjectType) CollectCoreIDs(ctx context.Context, value dagql.Typed
 	for k, v := range obj.Fields {
 		fieldTypeDef, ok := t.typeDef.FieldByOriginalName(k)
 		if !ok {
-			// ok to not be ok when it's a private field
+			// if this is a private field, then we still should do best-effort collection
+			unknownCollectIDs(v, ids)
 			continue
 		}
 		modType, ok, err := t.mod.ModTypeFor(ctx, fieldTypeDef.TypeDef, true)
@@ -123,6 +125,32 @@ func (t *ModuleObjectType) CollectCoreIDs(ctx context.Context, value dagql.Typed
 	}
 
 	return nil
+}
+
+// unknownCollectIDs naively walks a json-decoded value from a module object
+// type, and tries to find *any* IDs that *might* be found
+func unknownCollectIDs(value any, ids map[digest.Digest]*resource.ID) {
+	switch value := value.(type) {
+	case nil:
+		return
+	case string:
+		var idp call.ID
+		if err := idp.Decode(value); err != nil {
+			return
+		}
+		ids[idp.Digest()] = &resource.ID{
+			ID:       idp,
+			Optional: true, // mark this id as optional, since it's a best-guess attempt
+		}
+	case []any:
+		for _, value := range value {
+			unknownCollectIDs(value, ids)
+		}
+	case map[string]any:
+		for _, value := range value {
+			unknownCollectIDs(value, ids)
+		}
+	}
 }
 
 func (t *ModuleObjectType) TypeDef() *TypeDef {
@@ -232,7 +260,7 @@ func (obj *ModuleObject) Install(ctx context.Context, dag *dagql.Server) error {
 	}
 	fields := obj.fields()
 
-	funs, err := obj.functions(ctx)
+	funs, err := obj.functions(ctx, dag)
 	if err != nil {
 		return err
 	}
@@ -313,6 +341,7 @@ func (obj *ModuleObject) installConstructor(ctx context.Context, dag *dagql.Serv
 				Inputs:       callInput,
 				ParentTyped:  nil,
 				ParentFields: nil,
+				Server:       dag,
 			})
 		},
 	)
@@ -328,11 +357,11 @@ func (obj *ModuleObject) fields() (fields []dagql.Field[*ModuleObject]) {
 	return
 }
 
-func (obj *ModuleObject) functions(ctx context.Context) (fields []dagql.Field[*ModuleObject], err error) {
+func (obj *ModuleObject) functions(ctx context.Context, dag *dagql.Server) (fields []dagql.Field[*ModuleObject], err error) {
 	objDef := obj.TypeDef
 	mod := obj.Module
 	for _, fun := range obj.TypeDef.Functions {
-		objFun, err := objFun(ctx, mod, objDef, fun)
+		objFun, err := objFun(ctx, mod, objDef, fun, dag)
 		if err != nil {
 			return nil, err
 		}
@@ -359,14 +388,16 @@ func objField(mod *Module, field *FieldTypeDef) dagql.Field[*ModuleObject] {
 			}
 			fieldVal, found := obj.Self.Fields[field.OriginalName]
 			if !found {
-				return nil, fmt.Errorf("field %q not found on object %q", field.Name, obj.Class.TypeName())
+				// the field *might* not have been set yet on the object (even
+				// though the typedef has it) - so just pick a suitable zero value
+				fieldVal = nil
 			}
 			return modType.ConvertFromSDKResult(ctx, fieldVal)
 		},
 	}
 }
 
-func objFun(ctx context.Context, mod *Module, objDef *ObjectTypeDef, fun *Function) (dagql.Field[*ModuleObject], error) {
+func objFun(ctx context.Context, mod *Module, objDef *ObjectTypeDef, fun *Function, dag *dagql.Server) (dagql.Field[*ModuleObject], error) {
 	var f dagql.Field[*ModuleObject]
 	modFun, err := newModFunction(
 		ctx,
@@ -396,6 +427,7 @@ func objFun(ctx context.Context, mod *Module, objDef *ObjectTypeDef, fun *Functi
 				Cache: dagql.IsInternal(ctx),
 				// Pipeline:  _, // TODO
 				SkipSelfSchema: false, // TODO?
+				Server:         dag,
 			}
 			for name, val := range args {
 				opts.Inputs = append(opts.Inputs, CallInput{

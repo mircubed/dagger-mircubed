@@ -15,15 +15,6 @@ type CLI struct {
 	Dagger *DaggerDev // +private
 }
 
-// Build the CLI binary (deprecated)
-func (cli *CLI) File(
-	ctx context.Context,
-	// +optional
-	platform dagger.Platform,
-) (*dagger.File, error) {
-	return cli.Binary(ctx, platform)
-}
-
 // Build the CLI binary
 func (cli *CLI) Binary(
 	ctx context.Context,
@@ -35,9 +26,6 @@ func (cli *CLI) Binary(
 	if err != nil {
 		return nil, err
 	}
-	builder = builder.
-		WithVersion(cli.Dagger.Version.String()).
-		WithTag(cli.Dagger.Tag)
 	if platform != "" {
 		builder = builder.WithPlatform(platform)
 	}
@@ -46,7 +34,7 @@ func (cli *CLI) Binary(
 
 const (
 	// https://github.com/goreleaser/goreleaser/releases
-	goReleaserVersion = "v1.26.0"
+	goReleaserVersion = "v2.3.2"
 )
 
 // Publish the CLI using GoReleaser
@@ -90,7 +78,7 @@ func (cli *CLI) Publish(
 		ctr = ctr.WithExec([]string{"git", "tag", "0.0.0"})
 	}
 
-	args := []string{"release", "--clean", "--skip-validate", "--debug"}
+	args := []string{"release", "--clean", "--skip=validate", "--verbose"}
 	if tag != "" {
 		args = append(args, "--release-notes", fmt.Sprintf(".changes/%s.md", tag))
 	} else {
@@ -110,7 +98,7 @@ func (cli *CLI) Publish(
 		WithSecretVariable("AWS_REGION", awsRegion).
 		WithSecretVariable("AWS_BUCKET", awsBucket).
 		WithEnvVariable("ARTEFACTS_FQDN", artefactsFQDN).
-		WithEnvVariable("ENGINE_VERSION", cli.Dagger.Version.String()).
+		WithEnvVariable("ENGINE_VERSION", cli.Dagger.Version).
 		WithEnvVariable("ENGINE_TAG", cli.Dagger.Tag).
 		WithEntrypoint([]string{"/sbin/tini", "--", "/entrypoint.sh"}).
 		WithExec(args, dagger.ContainerWithExecOpts{
@@ -134,10 +122,6 @@ func (cli *CLI) TestPublish(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	builder = builder.
-		WithVersion(cli.Dagger.Version.String()).
-		WithTag(cli.Dagger.Tag)
-
 	var eg errgroup.Group
 	for _, os := range oses {
 		for _, arch := range arches {
@@ -176,8 +160,12 @@ func (cli *CLI) TestPublish(ctx context.Context) error {
 }
 
 func publishEnv(ctx context.Context) (*dagger.Container, error) {
+	// TODO: remove after upgrading to GoReleaser Pro has go 1.23.2 (it currently only has go 1.23.1)
+	go1_23_2 := dag.Container().From("golang:1.23.2-alpine@sha256:9dd2625a1ff2859b8d8b01d8f7822c0f528942fe56cfe7a1e7c38d3b8d72d679").Directory("/usr/local/go")
+
 	ctr := dag.Container().
 		From(fmt.Sprintf("ghcr.io/goreleaser/goreleaser-pro:%s-pro", goReleaserVersion)).
+		WithDirectory("/usr/local/go", go1_23_2).
 		WithEntrypoint([]string{}).
 		WithExec([]string{"apk", "add", "aws-cli"})
 

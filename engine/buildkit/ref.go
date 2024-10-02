@@ -57,6 +57,7 @@ const (
 	MetaMountStdinPath    = "stdin"
 	MetaMountStdoutPath   = "stdout"
 	MetaMountStderrPath   = "stderr"
+	MetaMountClientIDPath = "clientID"
 )
 
 type Result = solverresult.Result[*ref]
@@ -94,13 +95,14 @@ func (r *ref) ToState() (llb.State, error) {
 }
 
 func (r *ref) Digest(ctx context.Context, path string) (digest.Digest, error) {
+	if r == nil {
+		return contenthash.Checksum(ctx, nil, path, contenthash.ChecksumOpts{}, nil)
+	}
 	cacheRef, err := r.CacheRef(ctx)
 	if err != nil {
 		return "", err
 	}
-
 	sessionGroup := bksession.NewGroup(r.c.ID())
-
 	return contenthash.Checksum(ctx, cacheRef, path, contenthash.ChecksumOpts{}, sessionGroup)
 }
 
@@ -110,8 +112,6 @@ func (r *ref) Evaluate(ctx context.Context) error {
 	}
 	_, err := r.Result(ctx)
 	if err != nil {
-		// writing log w/ %+v so that we can see stack traces embedded in err by buildkit's usage of pkg/errors
-		bklog.G(ctx).Errorf("ref evaluate error: %+v", err)
 		return err
 	}
 	return nil
@@ -229,6 +229,9 @@ func (r *ref) Result(ctx context.Context) (bksolver.CachedResult, error) {
 	ctx = withOutgoingContext(ctx)
 	res, err := r.resultProxy.Result(ctx)
 	if err != nil {
+		// writing log w/ %+v so that we can see stack traces embedded in err by buildkit's usage of pkg/errors
+		bklog.G(ctx).Errorf("ref evaluate error: %+v", err)
+		err = includeBuildkitContextCancelledLine(err)
 		return nil, wrapError(ctx, err, r.c)
 	}
 	return res, nil
@@ -592,4 +595,30 @@ func withMount(mount snapshot.Mountable, cb func(string) error) error {
 	}
 	lm = nil
 	return nil
+}
+
+// buildkit only sets context cancelled cause errors to "context cancelled" +
+// embedded stack traces from the github.com/pkg/errors library. That library
+// only lets you see the stack trace if you print the error with %+v, so we
+// try doing that, finding a context cancelled error and parsing out the line
+// number that caused the error, including that in the error message so when users
+// hit this we can have a chance of debugging without needing to request their
+// full engine logs.
+// Related to https://github.com/dagger/dagger/issues/7699
+func includeBuildkitContextCancelledLine(err error) error {
+	errStrWithStack := fmt.Sprintf("%+v", err)
+	errStrSplit := strings.Split(errStrWithStack, "\n")
+	for i, errStrLine := range errStrSplit {
+		if errStrLine != "context canceled" {
+			continue
+		}
+		lineNoIndex := i + 2
+		if lineNoIndex >= len(errStrSplit) {
+			break
+		}
+		lineNoLine := errStrSplit[lineNoIndex]
+		err = fmt.Errorf("%w: %s", err, strings.TrimSpace(lineNoLine))
+		break
+	}
+	return err
 }

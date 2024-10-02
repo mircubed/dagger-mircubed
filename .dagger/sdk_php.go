@@ -89,6 +89,11 @@ func (t PHPSDK) Generate(ctx context.Context) (*dagger.Directory, error) {
 	return dag.Directory().WithDirectory(phpSDKPath, generated), nil
 }
 
+// Test the publishing process
+func (t PHPSDK) TestPublish(ctx context.Context, tag string) error {
+	return t.Publish(ctx, tag, true, "https://github.com/dagger/dagger-php-sdk.git", "https://github.com/dagger/dagger.git", "dagger-ci", "hello@dagger.io", nil)
+}
+
 // Publish the PHP SDK
 func (t PHPSDK) Publish(
 	ctx context.Context,
@@ -113,18 +118,35 @@ func (t PHPSDK) Publish(
 	// +optional
 	githubToken *dagger.Secret,
 ) error {
-	return gitPublish(ctx, gitPublishOpts{
+	version, isVersioned := strings.CutPrefix(tag, "sdk/php/")
+	if err := gitPublish(ctx, gitPublishOpts{
 		sdk:         "php",
 		source:      gitRepoSource,
 		sourcePath:  "sdk/php/",
 		sourceTag:   tag,
 		dest:        gitRepo,
-		destTag:     strings.TrimPrefix(tag, "sdk/php/"),
+		destTag:     version,
 		username:    gitUserName,
 		email:       gitUserEmail,
 		githubToken: githubToken,
 		dryRun:      dryRun,
-	})
+	}); err != nil {
+		return err
+	}
+
+	if isVersioned {
+		if err := githubRelease(ctx, githubReleaseOpts{
+			tag:         tag,
+			notes:       sdkChangeNotes(t.Dagger.Src, "php", version),
+			gitRepo:     gitRepoSource,
+			githubToken: githubToken,
+			dryRun:      dryRun,
+		}); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // Bump the PHP SDK's Engine dependency

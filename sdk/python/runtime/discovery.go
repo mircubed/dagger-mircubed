@@ -5,12 +5,10 @@ import (
 	"fmt"
 	"path"
 	"python-sdk/internal/dagger"
-	"python-sdk/internal/telemetry"
 	"strings"
 	"sync"
 
 	"github.com/pelletier/go-toml/v2"
-	"go.opentelemetry.io/otel"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -26,6 +24,12 @@ var DirExcludes = []string{".venv", "sdk"}
 // files concurrently rather than making blocking calls later.
 var FileContents = []string{"pyproject.toml", ".python-version"}
 
+// Uv config bits we'd like to consume.
+type UvConfig struct {
+	IndexURL      string `toml:"index-url"`
+	ExtraIndexURL string `toml:"extra-index-url"`
+}
+
 // PyProject is the parsed pyproject.toml file.
 type PyProject struct {
 	Project struct {
@@ -34,6 +38,7 @@ type PyProject struct {
 	}
 	Tool struct {
 		Dagger UserConfig
+		Uv     UvConfig
 	}
 }
 
@@ -113,6 +118,10 @@ func (d *Discovery) UserConfig() *UserConfig {
 	return &d.Config.Tool.Dagger
 }
 
+func (d *Discovery) UvConfig() *UvConfig {
+	return &d.Config.Tool.Uv
+}
+
 // HasFile returns true if the file exists in the original module's source directory.
 func (d *Discovery) HasFile(name string) bool {
 	_, ok := d.FileSet[name]
@@ -142,6 +151,11 @@ func (d *Discovery) AddLockFile(lock *dagger.File) {
 	d.FileSet[PipCompileLock] = struct{}{}
 }
 
+// UseUvLock returns true if the runtime should expect a uv.lock file.
+func (d *Discovery) UseUvLock() bool {
+	return d.UserConfig().UseUv && (d.HasFile(UvLock) || !d.HasFile(PipCompileLock) && d.IsInit)
+}
+
 // AddDirectory adds a directory to the module's source.
 func (d *Discovery) AddDirectory(name string, dir *dagger.Directory) {
 	d.ContextDir = d.ContextDir.WithDirectory(path.Join(d.SubPath, name), dir)
@@ -159,11 +173,7 @@ func (d *Discovery) Source() *dagger.Directory {
 //
 // This is intended to make all the necessary API calls as efficiently as possibly
 // with concurrency early on, to avoid unnecessary blocking calls later.
-func (d *Discovery) Load(ctx context.Context, modSource *dagger.ModuleSource) (rerr error) {
-	// FIXME: This is only temporarily enabled to measure how long this step takes to run.
-	ctx, span := otel.Tracer("dagger.io/sdk.python").Start(ctx, "runtime configuration discovery")
-	defer telemetry.End(span, func() error { return rerr })
-
+func (d *Discovery) Load(ctx context.Context, modSource *dagger.ModuleSource) error {
 	d.ModSource = modSource
 	d.ContextDir = modSource.ContextDirectory()
 
