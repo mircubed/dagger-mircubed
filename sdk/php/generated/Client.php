@@ -560,6 +560,16 @@ class Client extends Client\AbstractClient
     }
 
     /**
+     * Load a SourceMap from its ID.
+     */
+    public function loadSourceMapFromID(SourceMapId|SourceMap $id): SourceMap
+    {
+        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('loadSourceMapFromID');
+        $innerQueryBuilder->setArgument('id', $id);
+        return new \Dagger\SourceMap($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
+    }
+
+    /**
      * Load a Terminal from its ID.
      */
     public function loadTerminalFromID(TerminalId|Terminal $id): Terminal
@@ -604,10 +614,17 @@ class Client extends Client\AbstractClient
     /**
      * Create a new module source instance from a source ref string.
      */
-    public function moduleSource(string $refString, ?bool $stable = false, ?string $relHostPath = ''): ModuleSource
-    {
+    public function moduleSource(
+        string $refString,
+        ?string $refPin = '',
+        ?bool $stable = false,
+        ?string $relHostPath = '',
+    ): ModuleSource {
         $innerQueryBuilder = new \Dagger\Client\QueryBuilder('moduleSource');
         $innerQueryBuilder->setArgument('refString', $refString);
+        if (null !== $refPin) {
+        $innerQueryBuilder->setArgument('refPin', $refPin);
+        }
         if (null !== $stable) {
         $innerQueryBuilder->setArgument('stable', $stable);
         }
@@ -641,6 +658,18 @@ class Client extends Client\AbstractClient
         $innerQueryBuilder->setArgument('name', $name);
         $innerQueryBuilder->setArgument('plaintext', $plaintext);
         return new \Dagger\Secret($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
+    }
+
+    /**
+     * Creates source map metadata.
+     */
+    public function sourceMap(string $filename, int $line, int $column): SourceMap
+    {
+        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('sourceMap');
+        $innerQueryBuilder->setArgument('filename', $filename);
+        $innerQueryBuilder->setArgument('line', $line);
+        $innerQueryBuilder->setArgument('column', $column);
+        return new \Dagger\SourceMap($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
     }
 
     /**

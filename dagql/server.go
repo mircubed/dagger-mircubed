@@ -162,6 +162,37 @@ var coreDirectives = []DirectiveSpec{
 			DirectiveLocationFieldDefinition,
 		},
 	},
+	{
+		Name:        "sourceMap",
+		Description: FormatDescription(`Indicates the source information for where a given field is defined.`),
+		Args: []InputSpec{
+			{
+				Name: "module",
+				Type: String(""),
+			},
+			{
+				Name: "filename",
+				Type: String(""),
+			},
+			{
+				Name: "line",
+				Type: Int(0),
+			}, {
+				Name: "column",
+				Type: Int(0),
+			},
+		},
+		Locations: []DirectiveLocation{
+			DirectiveLocationScalar,
+			DirectiveLocationObject,
+			DirectiveLocationFieldDefinition,
+			DirectiveLocationArgumentDefinition,
+			DirectiveLocationUnion,
+			DirectiveLocationEnum,
+			DirectiveLocationEnumValue,
+			DirectiveLocationInputObject,
+		},
+	},
 }
 
 // Root returns the root object of the server. It is suitable for passing to
@@ -566,6 +597,30 @@ func CurrentID(ctx context.Context) *call.ID {
 		return nil
 	}
 	return val.(*call.ID)
+}
+
+// NewInstanceForCurrentID creates a new Instance that's set to the current ID from
+// the given self value.
+func NewInstanceForCurrentID[P, T Typed](
+	ctx context.Context,
+	srv *Server,
+	parent Instance[P],
+	self T,
+) (Instance[T], error) {
+	objType, ok := srv.ObjectType(self.Type().Name())
+	if !ok {
+		return Instance[T]{}, fmt.Errorf("unknown type %q", self.Type().Name())
+	}
+	class, ok := objType.(Class[T])
+	if !ok {
+		return Instance[T]{}, fmt.Errorf("not a Class: %T", objType)
+	}
+	return Instance[T]{
+		Constructor: CurrentID(ctx),
+		Self:        self,
+		Class:       class,
+		Module:      parent.Module,
+	}, nil
 }
 
 func NoopDone(res Typed, cached bool, rerr error) {}

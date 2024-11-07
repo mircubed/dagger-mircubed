@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"go.opentelemetry.io/otel/codes"
+	"golang.org/x/mod/semver"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/dagger/dagger/.dagger/internal/dagger"
@@ -66,8 +67,18 @@ func (t PHPSDK) Lint(ctx context.Context) error {
 
 // Test the PHP SDK
 func (t PHPSDK) Test(ctx context.Context) error {
+	installer, err := t.Dagger.installer(ctx, "sdk")
+	if err != nil {
+		return err
+	}
+
 	src := t.Dagger.Source().Directory(phpSDKPath)
-	_, err := dag.PhpSDKDev().Test(src).Sync(ctx)
+	base := t.phpBase().
+		With(installer).
+		WithEnvVariable("PATH", "./vendor/bin:$PATH", dagger.ContainerWithEnvVariableOpts{Expand: true})
+
+	dev := dag.PhpSDKDev(dagger.PhpSDKDevOpts{Container: base})
+	_, err = dev.Test(src).Sync(ctx)
 	return err
 }
 
@@ -118,8 +129,9 @@ func (t PHPSDK) Publish(
 	// +optional
 	githubToken *dagger.Secret,
 ) error {
-	version, isVersioned := strings.CutPrefix(tag, "sdk/php/")
-	if err := gitPublish(ctx, gitPublishOpts{
+	version := strings.TrimPrefix(tag, "sdk/php/")
+
+	if err := gitPublish(ctx, t.Dagger.Git, gitPublishOpts{
 		sdk:         "php",
 		source:      gitRepoSource,
 		sourcePath:  "sdk/php/",
@@ -134,10 +146,11 @@ func (t PHPSDK) Publish(
 		return err
 	}
 
-	if isVersioned {
-		if err := githubRelease(ctx, githubReleaseOpts{
-			tag:         tag,
-			notes:       sdkChangeNotes(t.Dagger.Src, "php", version),
+	if semver.IsValid(version) {
+		if err := githubRelease(ctx, t.Dagger.Git, githubReleaseOpts{
+			tag:         "sdk/php/" + version,
+			target:      tag,
+			notes:       changeNotes(t.Dagger.Src, "sdk/php", version),
 			gitRepo:     gitRepoSource,
 			githubToken: githubToken,
 			dryRun:      dryRun,

@@ -60,7 +60,7 @@ func (sdk *SDK) allSDKs() []sdkBase {
 }
 
 func (dev *DaggerDev) installer(ctx context.Context, name string) (func(*dagger.Container) *dagger.Container, error) {
-	engineSvc, err := dev.Engine().Service(ctx, name, nil, false)
+	engineSvc, err := dev.Engine().Service(ctx, name, nil, false, false)
 	if err != nil {
 		return nil, err
 	}
@@ -77,11 +77,8 @@ func (dev *DaggerDev) installer(ctx context.Context, name string) (func(*dagger.
 			WithEnvVariable("_EXPERIMENTAL_DAGGER_RUNNER_HOST", "tcp://dagger-engine:1234").
 			WithMountedFile(cliBinaryPath, cliBinary).
 			WithEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", cliBinaryPath).
-			WithExec([]string{"ln", "-s", cliBinaryPath, "/usr/local/bin/dagger"})
-		if dev.DockerCfg != nil {
-			// this avoids rate limiting in our ci tests
-			ctr = ctr.WithMountedSecret("/root/.docker/config.json", dev.DockerCfg)
-		}
+			WithExec([]string{"ln", "-s", cliBinaryPath, "/usr/local/bin/dagger"}).
+			With(dev.withDockerCfg) // this avoids rate limiting in our ci tests
 		return ctr
 	}, nil
 }
@@ -118,7 +115,7 @@ type gitPublishOpts struct {
 	dryRun bool
 }
 
-func gitPublish(ctx context.Context, opts gitPublishOpts) error {
+func gitPublish(ctx context.Context, git *dagger.VersionGit, opts gitPublishOpts) error {
 	base := opts.sourceEnv
 	if base == nil {
 		base = dag.
@@ -129,8 +126,7 @@ func gitPublish(ctx context.Context, opts gitPublishOpts) error {
 			Container()
 	}
 
-	// FIXME: move this into std modules
-	git := base.
+	base = base.
 		WithExec([]string{"git", "config", "--global", "user.name", opts.username}).
 		WithExec([]string{"git", "config", "--global", "user.email", opts.email})
 	if !opts.dryRun {
@@ -139,17 +135,17 @@ func gitPublish(ctx context.Context, opts gitPublishOpts) error {
 			return err
 		}
 		encodedPAT := base64.URLEncoding.EncodeToString([]byte("pat:" + githubTokenRaw))
-		git = git.
+		base = base.
 			WithEnvVariable("GIT_CONFIG_COUNT", "1").
 			WithEnvVariable("GIT_CONFIG_KEY_0", "http.https://github.com/.extraheader").
 			WithSecretVariable("GIT_CONFIG_VALUE_0", dag.SetSecret("GITHUB_HEADER", fmt.Sprintf("AUTHORIZATION: Basic %s", encodedPAT)))
 	}
 
-	result := git.
+	result := base.
 		WithEnvVariable("CACHEBUSTER", identity.NewID()).
 		WithWorkdir("/src/dagger").
-		WithExec([]string{"git", "clone", opts.source, "."}).
-		WithExec([]string{"git", "fetch", "origin", "-v", "--update-head-ok", fmt.Sprintf("refs/*%[1]s:refs/*%[1]s", strings.TrimPrefix(opts.sourceTag, "refs/"))}).
+		WithDirectory(".", git.Directory()).
+		WithExec([]string{"git", "restore", "."}). // clean up the dirty state
 		WithEnvVariable("FILTER_BRANCH_SQUELCH_WARNING", "1").
 		WithExec([]string{
 			"git", "filter-branch", "-f", "--prune-empty",
@@ -174,7 +170,7 @@ func gitPublish(ctx context.Context, opts gitPublishOpts) error {
 			return err
 		}
 
-		destCommit, err := git.
+		destCommit, err := base.
 			WithEnvVariable("CACHEBUSTER", identity.NewID()).
 			WithWorkdir("/src/dagger").
 			WithExec([]string{"git", "clone", opts.dest, "."}).
@@ -203,8 +199,9 @@ func gitPublish(ctx context.Context, opts gitPublishOpts) error {
 }
 
 type githubReleaseOpts struct {
-	tag   string
-	notes *dagger.File
+	tag    string
+	target string
+	notes  *dagger.File
 
 	gitRepo     string
 	githubToken *dagger.Secret
@@ -212,7 +209,7 @@ type githubReleaseOpts struct {
 	dryRun bool
 }
 
-func githubRelease(ctx context.Context, opts githubReleaseOpts) error {
+func githubRelease(ctx context.Context, git *dagger.VersionGit, opts githubReleaseOpts) error {
 	u, err := url.Parse(opts.gitRepo)
 	if err != nil {
 		return err
@@ -222,11 +219,16 @@ func githubRelease(ctx context.Context, opts githubReleaseOpts) error {
 	}
 	githubRepo := strings.TrimPrefix(strings.TrimSuffix(u.Path, ".git"), "/")
 
+	commit, err := git.Commit(opts.target).Commit(ctx)
+	if err != nil {
+		return err
+	}
+
 	if opts.dryRun {
-		// sanity check tag is in target repo
+		// sanity check target commit is in target repo
 		_, err = dag.
 			Git(fmt.Sprintf("https://github.com/%s", githubRepo)).
-			Ref(opts.tag).
+			Commit(commit).
 			Tree().
 			Sync(ctx)
 		if err != nil {
@@ -252,14 +254,13 @@ func githubRelease(ctx context.Context, opts githubReleaseOpts) error {
 		opts.tag,
 		opts.tag,
 		dagger.GhReleaseCreateOpts{
-			VerifyTag: true,
-			Draft:     true,
+			Target:    commit,
 			NotesFile: opts.notes,
-			// Latest:    false,  // can't do this yet
+			Latest:    dagger.GhLatestFalse,
 		},
 	)
 }
 
-func sdkChangeNotes(src *dagger.Directory, sdk string, version string) *dagger.File {
-	return src.File(fmt.Sprintf("sdk/%s/.changes/%s.md", sdk, version))
+func changeNotes(src *dagger.Directory, path string, version string) *dagger.File {
+	return src.File(fmt.Sprintf("%s/.changes/%s.md", path, version))
 }

@@ -130,19 +130,23 @@ func (e *Engine) Service(
 	image *Distro,
 	// +optional
 	gpuSupport bool,
+	// +optional
+	sharedCache bool,
 ) (*dagger.Service, error) {
-	version, err := dag.Version().Version(ctx)
-	if err != nil {
-		return nil, err
-	}
-	var cacheVolumeName string
-	if version != "" {
-		cacheVolumeName = "dagger-dev-engine-state-" + version
-	} else {
-		cacheVolumeName = "dagger-dev-engine-state-" + identity.NewID()
-	}
-	if name != "" {
-		cacheVolumeName += "-" + name
+	cacheVolumeName := "dagger-dev-engine-state"
+	if !sharedCache {
+		version, err := dag.Version().Version(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if version != "" {
+			cacheVolumeName = "dagger-dev-engine-state-" + version
+		} else {
+			cacheVolumeName = "dagger-dev-engine-state-" + identity.NewID()
+		}
+		if name != "" {
+			cacheVolumeName += "-" + name
+		}
 	}
 
 	e = e.
@@ -154,7 +158,7 @@ func (e *Engine) Service(
 		return nil, err
 	}
 	devEngine = devEngine.
-		WithExposedPort(1234, dagger.ContainerWithExposedPortOpts{Protocol: dagger.Tcp}).
+		WithExposedPort(1234, dagger.ContainerWithExposedPortOpts{Protocol: dagger.NetworkProtocolTcp}).
 		WithMountedCache(distconsts.EngineDefaultStateDir, dag.CacheVolume(cacheVolumeName), dagger.ContainerWithMountedCacheOpts{
 			// only one engine can run off it's local state dir at a time; Private means that we will attempt to re-use
 			// these cache volumes if they are not already locked to another running engine but otherwise will create a new
@@ -210,7 +214,6 @@ func (e *Engine) Generate() *dagger.Directory {
 
 	// protobuf dependencies
 	generated = generated.
-		WithExec([]string{"apk", "add", "protoc=~3.21.12"}).
 		WithExec([]string{"go", "install", "google.golang.org/protobuf/cmd/protoc-gen-go@v1.34.2"}).
 		WithExec([]string{"go", "install", "github.com/gogo/protobuf/protoc-gen-gogoslick@v1.3.2"}).
 		WithExec([]string{"go", "install", "google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.4.0"})
@@ -272,10 +275,6 @@ func (e *Engine) Publish(
 	// List of tags to use
 	tag []string,
 
-	// add `latest` to the list of tags if tags include a semver version
-	// +optional
-	maybeTagLatest bool,
-
 	// +optional
 	dryRun bool,
 
@@ -286,22 +285,19 @@ func (e *Engine) Publish(
 	// +optional
 	registryPassword *dagger.Secret,
 ) error {
+	for _, t := range tag {
+		if semver.IsValid(t) {
+			tag = append(tag, "latest")
+			break
+		}
+	}
+
 	// collect all the targets that we are trying to build together, along with
 	// where they need to go to
 	targetResults := make([]struct {
 		Platforms []*dagger.Container
 		Tags      []string
 	}, len(targets))
-
-	if maybeTagLatest {
-		for _, t := range tag {
-			if strings.HasPrefix(t, "v") && semver.IsValid(t) {
-				tag = append(tag, "latest")
-				break
-			}
-		}
-	}
-
 	eg, egCtx := errgroup.WithContext(ctx)
 	for i, target := range targets {
 		// determine the target tags
@@ -364,7 +360,7 @@ func (e *Engine) Publish(
 				_, err := ctr.
 					Publish(ctx, fmt.Sprintf("%s:%s", image, tag), dagger.ContainerPublishOpts{
 						PlatformVariants:  result.Platforms,
-						ForcedCompression: dagger.Gzip, // use gzip to avoid incompatibility w/ older docker versions
+						ForcedCompression: dagger.ImageLayerCompressionGzip, // use gzip to avoid incompatibility w/ older docker versions
 					})
 				if err != nil {
 					return err
@@ -393,9 +389,21 @@ func (e *Engine) Scan(ctx context.Context) error {
 	}
 
 	ctr := dag.Container().
-		From("aquasec/trivy:0.53.0").
+		From("aquasec/trivy:0.56.1@sha256:c42bb3221509b0a9fa2291cd79a3a818b30a172ab87e9aac8a43997a5b56f293").
 		WithMountedDirectory("/mnt/ignores", ignoreFiles).
-		WithMountedCache("/root/.cache/", dag.CacheVolume("trivy-cache"))
+		WithMountedCache("/root/.cache/", dag.CacheVolume("trivy-cache")).
+		With(e.Dagger.withDockerCfg)
+
+	commonArgs := []string{
+		"--db-repository=public.ecr.aws/aquasecurity/trivy-db",
+		"--format=json",
+		"--exit-code=1",
+		"--severity=CRITICAL,HIGH",
+		"--show-suppressed",
+	}
+	if len(ignoreFileNames) > 0 {
+		commonArgs = append(commonArgs, "--ignorefile=/mnt/ignores/"+ignoreFileNames[0])
+	}
 
 	eg, ctx := errgroup.WithContext(ctx)
 
@@ -404,16 +412,10 @@ func (e *Engine) Scan(ctx context.Context) error {
 		args := []string{
 			"trivy",
 			"fs",
-			"--format=json",
-			"--exit-code=1",
 			"--scanners=vuln",
 			"--vuln-type=library",
-			"--severity=CRITICAL,HIGH",
-			"--show-suppressed",
 		}
-		if len(ignoreFileNames) > 0 {
-			args = append(args, "--ignorefile=/mnt/ignores/"+ignoreFileNames[0])
-		}
+		args = append(args, commonArgs...)
 		args = append(args, "/mnt/src")
 
 		// HACK: filter out directories that present occasional issues
@@ -434,15 +436,9 @@ func (e *Engine) Scan(ctx context.Context) error {
 		args := []string{
 			"trivy",
 			"image",
-			"--format=json",
-			"--exit-code=1",
 			"--vuln-type=os,library",
-			"--severity=CRITICAL,HIGH",
-			"--show-suppressed",
 		}
-		if len(ignoreFileNames) > 0 {
-			args = append(args, "--ignorefile=/mnt/ignores/"+ignoreFileNames[0])
-		}
+		args = append(args, commonArgs...)
 		engineTarball := "/mnt/engine.tar"
 		args = append(args, "--input", engineTarball)
 

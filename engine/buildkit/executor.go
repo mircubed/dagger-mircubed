@@ -15,7 +15,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"sync"
 	"syscall"
 	"time"
 
@@ -26,7 +25,7 @@ import (
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/executor"
 	"github.com/moby/buildkit/executor/oci"
-	resourcestypes "github.com/moby/buildkit/executor/resources/types"
+	bkresourcestypes "github.com/moby/buildkit/executor/resources/types"
 	gatewayapi "github.com/moby/buildkit/frontend/gateway/pb"
 	randid "github.com/moby/buildkit/identity"
 	"github.com/moby/buildkit/solver"
@@ -75,10 +74,19 @@ type ExecutionMetadata struct {
 	// object.
 	ParentIDs map[digest.Digest]*resource.ID
 
+	// If true, scope the exec cache key to the current session ID. It will be cached in the context
+	// of the session but invalidated across different sessions.
 	CachePerSession bool
+
+	// If true, scope the exec cache key to the current dagql call digest. This is needed currently
+	// for module function calls specifically so that their cache key is based on their arguments and
+	// receiver object.
+	CacheByCall bool
 
 	// hostname -> list of aliases
 	HostAliases map[string][]string
+	// search domains to install prior to the session's domain
+	ExtraSearchDomains []string
 
 	RedirectStdoutPath string
 	RedirectStderrPath string
@@ -94,6 +102,9 @@ type ExecutionMetadata struct {
 
 	// Path to the SSH auth socket. Used for Dagger-in-Dagger support.
 	SSHAuthSocketPath string
+
+	// If true, skip injecting dumb-init into the container.
+	NoInit bool
 }
 
 const executionMetadataKey = "dagger.executionMetadata"
@@ -139,7 +150,7 @@ func (w *Worker) Run(
 	mounts []executor.Mount,
 	procInfo executor.ProcessInfo,
 	started chan<- struct{},
-) (_ resourcestypes.Recorder, rerr error) {
+) (_ bkresourcestypes.Recorder, rerr error) {
 	if id == "" {
 		id = randid.NewID()
 	}
@@ -148,8 +159,8 @@ func (w *Worker) Run(
 		return nil, err
 	}
 
-	state := newExecState(id, &procInfo, rootMount, mounts)
-	return nil, w.run(ctx, state, started,
+	state := newExecState(id, &procInfo, rootMount, mounts, started)
+	return nil, w.run(ctx, state,
 		w.setupNetwork,
 		w.injectDumbInit,
 		w.generateBaseSpec,
@@ -165,16 +176,15 @@ func (w *Worker) Run(
 		w.createCWD,
 		w.setupNestedClient,
 		w.installCACerts,
+		w.runContainer,
 	)
 }
 
 func (w *Worker) run(
 	ctx context.Context,
 	state *execState,
-	started chan<- struct{},
 	setupFuncs ...executorSetupFunc,
 ) (rerr error) {
-	startedOnce := sync.Once{}
 	w.mu.Lock()
 	w.running[state.id] = state
 	w.mu.Unlock()
@@ -190,80 +200,21 @@ func (w *Worker) run(
 		}
 		state.doneErr = rerr
 
-		if started != nil {
-			startedOnce.Do(func() {
-				close(started)
+		if state.startedCh != nil {
+			state.startedOnce.Do(func() {
+				close(state.startedCh)
 			})
 		}
 	}()
 
 	for _, f := range setupFuncs {
 		if err := f(ctx, state); err != nil {
-			bklog.G(ctx).Errorf("executor setup failed: %v", err)
+			bklog.G(ctx).WithError(err).Error("executor run")
 			return err
 		}
 	}
 
-	bundle := filepath.Join(w.executorRoot, state.id)
-	if err := os.Mkdir(bundle, 0o711); err != nil {
-		return err
-	}
-	defer os.RemoveAll(bundle)
-
-	configPath := filepath.Join(bundle, "config.json")
-	f, err := os.Create(configPath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	if err := json.NewEncoder(f).Encode(state.spec); err != nil {
-		return fmt.Errorf("failed to encode spec: %w", err)
-	}
-	f.Close()
-
-	lg := bklog.G(ctx).
-		WithField("id", state.id).
-		WithField("args", state.spec.Process.Args)
-	if w.execMD != nil {
-		lg = lg.WithField("caller_client_id", w.execMD.CallerClientID)
-		if w.execMD.CallID != nil {
-			lg = lg.WithField("call_id", w.execMD.CallID.Display())
-		}
-		if w.execMD.ClientID != "" {
-			lg = lg.WithField("nested_client_id", w.execMD.ClientID)
-		}
-	}
-	lg.Debug("starting container")
-	defer func() {
-		lg.WithError(rerr).Debug("container done")
-	}()
-
-	trace.SpanFromContext(ctx).AddEvent("Container created")
-	killer := newRunProcKiller(w.runc, state.id)
-	startedCallback := func() {
-		startedOnce.Do(func() {
-			trace.SpanFromContext(ctx).AddEvent("Container started")
-			if started != nil {
-				close(started)
-			}
-		})
-	}
-	runcCall := func(ctx context.Context, started chan<- int, io runc.IO, pidfile string) error {
-		_, err := w.runc.Run(ctx, state.id, bundle, &runc.CreateOpts{
-			Started:   started,
-			IO:        io,
-			ExtraArgs: []string{"--keep"},
-		})
-		return err
-	}
-	err = exitError(ctx, state.exitCodePath, w.callWithIO(ctx, state.procInfo, startedCallback, killer, runcCall))
-	if err != nil {
-		w.runc.Delete(context.TODO(), state.id, &runc.DeleteOpts{})
-		return err
-	}
-
-	return w.runc.Delete(context.TODO(), state.id, &runc.DeleteOpts{})
+	return nil
 }
 
 // Namespaced is something that has Linux namespaces set up.
@@ -406,7 +357,7 @@ func (w *Worker) Exec(ctx context.Context, id string, process executor.ProcessIn
 	}
 
 	err = w.exec(ctx, id, spec.Process, process, nil)
-	return exitError(ctx, "", err)
+	return exitError(ctx, "", err, process.Meta.ValidExitCodes)
 }
 
 func (w *Worker) exec(ctx context.Context, id string, specsProcess *specs.Process, process executor.ProcessInfo, started func()) error {
@@ -432,46 +383,50 @@ func (w *Worker) validateEntitlements(meta executor.Meta) error {
 	})
 }
 
-func exitError(ctx context.Context, exitCodePath string, err error) error {
-	if err != nil {
-		exitErr := &gatewayapi.ExitError{
-			ExitCode: gatewayapi.UnknownExitStatus,
-			Err:      err,
-		}
+func exitError(ctx context.Context, exitCodePath string, err error, validExitCodes []int) error {
+	exitErr := &gatewayapi.ExitError{ExitCode: uint32(gatewayapi.UnknownExitStatus), Err: err}
+
+	if err == nil {
+		exitErr.ExitCode = 0
+	} else {
 		var runcExitError *runc.ExitError
-		if errors.As(err, &runcExitError) && runcExitError.Status >= 0 {
-			exitErr = &gatewayapi.ExitError{
-				ExitCode: uint32(runcExitError.Status),
-			}
+		if errors.As(err, &runcExitError) {
+			exitErr = &gatewayapi.ExitError{ExitCode: uint32(runcExitError.Status)}
 		}
+	}
 
-		if exitCodePath != "" {
-			if err := os.WriteFile(exitCodePath, []byte(fmt.Sprintf("%d", exitErr.ExitCode)), 0o600); err != nil {
-				bklog.G(ctx).Errorf("failed to write exit code %d to %s: %v", exitErr.ExitCode, exitCodePath, err)
-			}
-		}
-
-		trace.SpanFromContext(ctx).AddEvent(
-			"Container exited",
-			trace.WithAttributes(
-				attribute.Int("exit.code", int(exitErr.ExitCode)),
-			),
-		)
-
-		select {
-		case <-ctx.Done():
-			exitErr.Err = fmt.Errorf("%s: %w", exitErr.Error(), context.Cause(ctx))
-			return exitErr
-		default:
-			return stack.Enable(exitErr)
+	if exitCodePath != "" {
+		if err := os.WriteFile(exitCodePath, []byte(fmt.Sprintf("%d", exitErr.ExitCode)), 0o600); err != nil {
+			bklog.G(ctx).Errorf("failed to write exit code %d to %s: %v", exitErr.ExitCode, exitCodePath, err)
 		}
 	}
 
 	trace.SpanFromContext(ctx).AddEvent(
 		"Container exited",
-		trace.WithAttributes(attribute.Int("exit.code", 0)),
+		trace.WithAttributes(attribute.Int("exit.code", int(exitErr.ExitCode))),
 	)
-	return nil
+
+	if validExitCodes == nil {
+		// no exit codes specified, so only 0 is allowed
+		if exitErr.ExitCode == 0 {
+			return nil
+		}
+	} else {
+		for _, code := range validExitCodes {
+			// exit code in allowed list, so exit cleanly
+			if code == int(exitErr.ExitCode) {
+				return nil
+			}
+		}
+	}
+
+	select {
+	case <-ctx.Done():
+		exitErr.Err = fmt.Errorf("%s: %w", exitErr.Error(), context.Cause(ctx))
+		return exitErr
+	default:
+		return stack.Enable(exitErr)
+	}
 }
 
 type forwardIO struct {

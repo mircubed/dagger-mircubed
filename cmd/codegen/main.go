@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"dagger.io/dagger"
+	"dagger.io/dagger/telemetry"
 	"github.com/dagger/dagger/cmd/codegen/generator"
 	"github.com/dagger/dagger/cmd/codegen/introspection"
 )
@@ -56,6 +57,7 @@ func init() {
 
 func ClientGen(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
+	ctx = telemetry.InitEmbedded(ctx, nil)
 	dag, err := dagger.Connect(ctx)
 	if err != nil {
 		return err
@@ -82,14 +84,19 @@ func ClientGen(cmd *cobra.Command, args []string) error {
 		if modulePath == "" {
 			return fmt.Errorf("--module-name requires --module-context-path")
 		}
-		modulePath, err = relativeTo(outputDir, modulePath)
+		modPath, err := relativeTo(outputDir, modulePath)
 		if err != nil {
 			return err
 		}
-		if part, _, _ := strings.Cut(modulePath, string(filepath.Separator)); part == ".." {
+		if part, _, _ := strings.Cut(modPath, string(filepath.Separator)); part == ".." {
 			return fmt.Errorf("module path must be child of output directory")
 		}
-		cfg.ModuleContextPath = modulePath
+		cfg.ModuleContextPath = modPath
+		moduleParentPath, err := relativeTo(modulePath, outputDir)
+		if err != nil {
+			return err
+		}
+		cfg.ModuleParentPath = moduleParentPath
 	}
 
 	if introspectionJSONPath != "" {

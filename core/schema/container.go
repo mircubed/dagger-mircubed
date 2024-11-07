@@ -7,10 +7,14 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/distribution/reference"
+	"github.com/moby/buildkit/client/llb"
+	"github.com/moby/buildkit/client/llb/sourceresolver"
 	"github.com/moby/buildkit/frontend/dockerfile/shell"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/vektah/gqlparser/v2/ast"
@@ -50,7 +54,7 @@ func (s *containerSchema) Install() {
 			ArgDoc("description", "Description of the sub-pipeline.").
 			ArgDoc("labels", "Labels to apply to the sub-pipeline."),
 
-		dagql.Func("from", s.from).
+		dagql.NodeFunc("from", s.from).
 			Doc(`Initializes this container from a pulled base image.`).
 			ArgDoc("address",
 				`Image's address from its registry.`,
@@ -81,11 +85,17 @@ func (s *containerSchema) Install() {
 		dagql.Func("directory", s.directory).
 			Doc(`Retrieves a directory at the given path.`,
 				`Mounts are included.`).
-			ArgDoc("path", `The path of the directory to retrieve (e.g., "./src").`),
+			ArgDoc("path", `The path of the directory to retrieve (e.g., "./src").`).
+			ArgDoc("expand",
+				`Replace "${VAR}" or "$VAR" in the value of path according to the current `+
+					`environment variables defined in the container (e.g. "/$VAR/foo").`),
 
 		dagql.Func("file", s.file).
 			Doc(`Retrieves a file at the given path.`, `Mounts are included.`).
-			ArgDoc("path", `The path of the file to retrieve (e.g., "./README.md").`),
+			ArgDoc("path", `The path of the file to retrieve (e.g., "./README.md").`).
+			ArgDoc("expand",
+				`Replace "${VAR}" or "$VAR" in the value of path according to the current `+
+					`environment variables defined in the container (e.g. "/$VAR/foo.txt").`),
 
 		dagql.Func("user", s.user).
 			Doc("Retrieves the user to be set for all commands."),
@@ -103,7 +113,10 @@ func (s *containerSchema) Install() {
 
 		dagql.Func("withWorkdir", s.withWorkdir).
 			Doc(`Retrieves this container with a different working directory.`).
-			ArgDoc("path", `The path to set as the working directory (e.g., "/app").`),
+			ArgDoc("path", `The path to set as the working directory (e.g., "/app").`).
+			ArgDoc("expand",
+				`Replace "${VAR}" or "$VAR" in the value of path according to the current `+
+					`environment variables defined in the container (e.g. "/$VAR/foo").`),
 
 		dagql.Func("withoutWorkdir", s.withoutWorkdir).
 			Doc(`Retrieves this container with an unset working directory.`,
@@ -121,9 +134,8 @@ func (s *containerSchema) Install() {
 			ArgDoc("name", `The name of the environment variable (e.g., "HOST").`).
 			ArgDoc("value", `The value of the environment variable. (e.g., "localhost").`).
 			ArgDoc("expand",
-				"Replace `${VAR}` or `$VAR` in the value according to the current "+
-					`environment variables defined in the container (e.g.,
-				"/opt/bin:$PATH").`),
+				`Replace "${VAR}" or "$VAR" in the value according to the current `+
+					`environment variables defined in the container (e.g. "/opt/bin:$PATH").`),
 
 		// NOTE: this is internal-only for now (hidden from codegen via the __ prefix) as we
 		// currently only want to use it for allowing the Go SDK to inherit custom GOPROXY
@@ -193,7 +205,10 @@ func (s *containerSchema) Install() {
 			ArgDoc("owner",
 				`A user:group to set for the mounted directory and its contents.`,
 				`The user and group can either be an ID (1000:1000) or a name (foo:bar).`,
-				`If the group is omitted, it defaults to the same as the user.`),
+				`If the group is omitted, it defaults to the same as the user.`).
+			ArgDoc("expand",
+				`Replace "${VAR}" or "$VAR" in the value of path according to the current `+
+					`environment variables defined in the container (e.g. "/$VAR/foo").`),
 
 		dagql.Func("withMountedFile", s.withMountedFile).
 			Doc(`Retrieves this container plus a file mounted at the given path.`).
@@ -202,11 +217,18 @@ func (s *containerSchema) Install() {
 			ArgDoc("owner",
 				`A user or user:group to set for the mounted file.`,
 				`The user and group can either be an ID (1000:1000) or a name (foo:bar).`,
-				`If the group is omitted, it defaults to the same as the user.`),
+				`If the group is omitted, it defaults to the same as the user.`).
+			ArgDoc("expand",
+				`Replace "${VAR}" or "$VAR" in the value of path according to the current `+
+					`environment variables defined in the container (e.g. "/$VAR/foo.txt").`),
 
 		dagql.Func("withMountedTemp", s.withMountedTemp).
 			Doc(`Retrieves this container plus a temporary directory mounted at the given path. Any writes will be ephemeral to a single withExec call; they will not be persisted to subsequent withExecs.`).
-			ArgDoc("path", `Location of the temporary directory (e.g., "/tmp/temp_dir").`),
+			ArgDoc("path", `Location of the temporary directory (e.g., "/tmp/temp_dir").`).
+			ArgDoc("size", `Size of the temporary directory in bytes.`).
+			ArgDoc("expand",
+				`Replace "${VAR}" or "$VAR" in the value of path according to the current `+
+					`environment variables defined in the container (e.g. "/$VAR/foo").`),
 
 		dagql.Func("withMountedCache", s.withMountedCache).
 			Doc(`Retrieves this container plus a cache volume mounted at the given path.`).
@@ -220,7 +242,10 @@ func (s *containerSchema) Install() {
 				the initial filesystem provided by source (if any). It does not have
 				any effect if/when the cache has already been created.`,
 				`The user and group can either be an ID (1000:1000) or a name (foo:bar).`,
-				`If the group is omitted, it defaults to the same as the user.`),
+				`If the group is omitted, it defaults to the same as the user.`).
+			ArgDoc("expand",
+				`Replace "${VAR}" or "$VAR" in the value of path according to the current `+
+					`environment variables defined in the container (e.g. "/$VAR/foo").`),
 
 		dagql.Func("withMountedSecret", s.withMountedSecret).
 			Doc(`Retrieves this container plus a secret mounted into a file at the given path.`).
@@ -231,7 +256,10 @@ func (s *containerSchema) Install() {
 				`The user and group can either be an ID (1000:1000) or a name (foo:bar).`,
 				`If the group is omitted, it defaults to the same as the user.`).
 			ArgDoc("mode", `Permission given to the mounted secret (e.g., 0600).`,
-				`This option requires an owner to be set to be active.`),
+				`This option requires an owner to be set to be active.`).
+			ArgDoc("expand",
+				`Replace "${VAR}" or "$VAR" in the value of path according to the current `+
+					`environment variables defined in the container (e.g. "/$VAR/foo").`),
 
 		dagql.Func("withUnixSocket", s.withUnixSocket).
 			Doc(`Retrieves this container plus a socket forwarded to the given Unix socket path.`).
@@ -240,15 +268,24 @@ func (s *containerSchema) Install() {
 			ArgDoc("owner",
 				`A user:group to set for the mounted socket.`,
 				`The user and group can either be an ID (1000:1000) or a name (foo:bar).`,
-				`If the group is omitted, it defaults to the same as the user.`),
+				`If the group is omitted, it defaults to the same as the user.`).
+			ArgDoc("expand",
+				`Replace "${VAR}" or "$VAR" in the value of path according to the current `+
+					`environment variables defined in the container (e.g. "/$VAR/foo").`),
 
 		dagql.Func("withoutUnixSocket", s.withoutUnixSocket).
 			Doc(`Retrieves this container with a previously added Unix socket removed.`).
-			ArgDoc("path", `Location of the socket to remove (e.g., "/tmp/socket").`),
+			ArgDoc("path", `Location of the socket to remove (e.g., "/tmp/socket").`).
+			ArgDoc("expand",
+				`Replace "${VAR}" or "$VAR" in the value of path according to the current `+
+					`environment variables defined in the container (e.g. "/$VAR/foo").`),
 
 		dagql.Func("withoutMount", s.withoutMount).
 			Doc(`Retrieves this container after unmounting everything at the given path.`).
-			ArgDoc("path", `Location of the cache directory (e.g., "/cache/node_modules").`),
+			ArgDoc("path", `Location of the cache directory (e.g., "/cache/node_modules").`).
+			ArgDoc("expand",
+				`Replace "${VAR}" or "$VAR" in the value of path according to the current `+
+					`environment variables defined in the container (e.g. "/$VAR/foo").`),
 
 		dagql.Func("withFile", s.withFile).
 			Doc(`Retrieves this container plus the contents of the given file copied to the given path.`).
@@ -258,14 +295,24 @@ func (s *containerSchema) Install() {
 			ArgDoc("owner",
 				`A user:group to set for the file.`,
 				`The user and group can either be an ID (1000:1000) or a name (foo:bar).`,
-				`If the group is omitted, it defaults to the same as the user.`),
+				`If the group is omitted, it defaults to the same as the user.`).
+			ArgDoc("expand",
+				`Replace "${VAR}" or "$VAR" in the value of path according to the current `+
+					`environment variables defined in the container (e.g. "/$VAR/foo.txt").`),
 
 		dagql.Func("withoutFile", s.withoutFile).
 			Doc(`Retrieves this container with the file at the given path removed.`).
-			ArgDoc("path", `Location of the file to remove (e.g., "/file.txt").`),
+			ArgDoc("path", `Location of the file to remove (e.g., "/file.txt").`).
+			ArgDoc("expand",
+				`Replace "${VAR}" or "$VAR" in the value of path according to the current `+
+					`environment variables defined in the container (e.g. "/$VAR/foo.txt").`),
+
 		dagql.Func("withoutFiles", s.withoutFiles).
 			Doc(`Retrieves this container with the files at the given paths removed.`).
-			ArgDoc("paths", `Location of the files to remove (e.g., ["/file.txt"]).`),
+			ArgDoc("paths", `Location of the files to remove (e.g., ["/file.txt"]).`).
+			ArgDoc("expand",
+				`Replace "${VAR}" or "$VAR" in the value of paths according to the current `+
+					`environment variables defined in the container (e.g. "/$VAR/foo.txt").`),
 
 		dagql.Func("withFiles", s.withFiles).
 			Doc(`Retrieves this container plus the contents of the given files copied to the given path.`).
@@ -275,7 +322,10 @@ func (s *containerSchema) Install() {
 			ArgDoc("owner",
 				`A user:group to set for the files.`,
 				`The user and group can either be an ID (1000:1000) or a name (foo:bar).`,
-				`If the group is omitted, it defaults to the same as the user.`),
+				`If the group is omitted, it defaults to the same as the user.`).
+			ArgDoc("expand",
+				`Replace "${VAR}" or "$VAR" in the value of path according to the current `+
+					`environment variables defined in the container (e.g. "/$VAR/foo.txt").`),
 
 		dagql.Func("withNewFile", s.withNewFile).
 			View(AllVersion).
@@ -286,7 +336,10 @@ func (s *containerSchema) Install() {
 			ArgDoc("owner",
 				`A user:group to set for the file.`,
 				`The user and group can either be an ID (1000:1000) or a name (foo:bar).`,
-				`If the group is omitted, it defaults to the same as the user.`),
+				`If the group is omitted, it defaults to the same as the user.`).
+			ArgDoc("expand",
+				`Replace "${VAR}" or "$VAR" in the value of path according to the current `+
+					`environment variables defined in the container (e.g. "/$VAR/foo.txt").`),
 		dagql.Func("withNewFile", s.withNewFileLegacy).
 			View(BeforeVersion("v0.12.0")).
 			Doc(`Retrieves this container plus a new file written at the given path.`).
@@ -307,11 +360,17 @@ func (s *containerSchema) Install() {
 			ArgDoc("owner",
 				`A user:group to set for the directory and its contents.`,
 				`The user and group can either be an ID (1000:1000) or a name (foo:bar).`,
-				`If the group is omitted, it defaults to the same as the user.`),
+				`If the group is omitted, it defaults to the same as the user.`).
+			ArgDoc("expand",
+				`Replace "${VAR}" or "$VAR" in the value of path according to the current `+
+					`environment variables defined in the container (e.g. "/$VAR/foo").`),
 
 		dagql.Func("withoutDirectory", s.withoutDirectory).
 			Doc(`Retrieves this container with the directory at the given path removed.`).
-			ArgDoc("path", `Location of the directory to remove (e.g., ".github/").`),
+			ArgDoc("path", `Location of the directory to remove (e.g., ".github/").`).
+			ArgDoc("expand",
+				`Replace "${VAR}" or "$VAR" in the value of path according to the current `+
+					`environment variables defined in the container (e.g. "/$VAR/foo").`),
 
 		dagql.Func("withExec", s.withExec).
 			View(AllVersion).
@@ -331,6 +390,7 @@ func (s *containerSchema) Install() {
 			ArgDoc("redirectStderr",
 				`Redirect the command's standard error to a file in the container (e.g.,
 			"/tmp/stderr").`).
+			ArgDoc("expect", `Exit codes this command is allowed to exit with without error`).
 			ArgDoc("experimentalPrivilegedNesting",
 				`Provides Dagger access to the executed command.`,
 				`Do not use this option unless you trust the command being executed;
@@ -341,7 +401,15 @@ func (s *containerSchema) Install() {
 				running a command with "sudo" or executing "docker run" with the
 				"--privileged" flag. Containerization does not provide any security
 				guarantees when using this option. It should only be used when
-				absolutely necessary and only with trusted commands.`),
+				absolutely necessary and only with trusted commands.`).
+			ArgDoc("expand",
+				`Replace "${VAR}" or "$VAR" in the args according to the current `+
+					`environment variables defined in the container (e.g. "/$VAR/foo").`).
+			ArgDoc("noInit",
+				`If set, skip the automatic init process injected into containers by default.`,
+				`This should only be used if the user requires that their exec process be the
+				pid 1 process in the container. Otherwise it may result in unexpected behavior.`,
+			),
 
 		dagql.Func("withExec", s.withExec).
 			View(BeforeVersion("v0.13.0")).
@@ -361,6 +429,7 @@ func (s *containerSchema) Install() {
 			ArgDoc("redirectStderr",
 				`Redirect the command's standard error to a file in the container (e.g.,
 			"/tmp/stderr").`).
+			ArgDoc("expect", `Exit codes this command is allowed to exit with without error`).
 			ArgDoc("experimentalPrivilegedNesting",
 				`Provides Dagger access to the executed command.`,
 				`Do not use this option unless you trust the command being executed;
@@ -390,6 +459,7 @@ func (s *containerSchema) Install() {
 			ArgDoc("redirectStderr",
 				`Redirect the command's standard error to a file in the container (e.g.,
 			"/tmp/stderr").`).
+			ArgDoc("expect", `Exit codes this command is allowed to exit with without error`).
 			ArgDoc("experimentalPrivilegedNesting",
 				`Provides Dagger access to the executed command.`,
 				`Do not use this option unless you trust the command being executed;
@@ -405,12 +475,12 @@ func (s *containerSchema) Install() {
 		dagql.Func("stdout", s.stdout).
 			View(AllVersion).
 			Doc(`The output stream of the last executed command.`,
-				`Will execute default command if none is set, or error if there's no default.`),
+				`Returns an error if no command was set.`),
 
 		dagql.Func("stderr", s.stderr).
 			View(AllVersion).
 			Doc(`The error stream of the last executed command.`,
-				`Will execute default command if none is set, or error if there's no default.`),
+				`Returns an error if no command was set.`),
 
 		dagql.Func("stdout", s.stdoutLegacy).
 			View(BeforeVersion("v0.12.0")).
@@ -421,6 +491,10 @@ func (s *containerSchema) Install() {
 			View(BeforeVersion("v0.12.0")).
 			Doc(`The error stream of the last executed command.`,
 				`Will execute default command if none is set, or error if there's no default.`),
+
+		dagql.Func("exitCode", s.exitCode).
+			Doc(`The exit code of the last executed command.`,
+				`Returns an error if no command was set.`),
 
 		dagql.Func("withAnnotation", s.withAnnotation).
 			Doc(`Retrieves this container plus the given OCI anotation.`).
@@ -481,7 +555,10 @@ func (s *containerSchema) Install() {
 				`Use the specified media types for the exported image's layers.`,
 				`Defaults to OCI, which is largely compatible with most recent
 				container runtimes, but Docker may be needed for older runtimes without
-				OCI support.`),
+				OCI support.`).
+			ArgDoc("expand",
+				`Replace "${VAR}" or "$VAR" in the value of path according to the current `+
+					`environment variables defined in the container (e.g. "/$VAR/foo").`),
 		dagql.Func("export", s.exportLegacy).
 			View(BeforeVersion("v0.12.0")).
 			Extend(),
@@ -554,9 +631,11 @@ func (s *containerSchema) Install() {
 			ArgDoc("service", `Identifier of the service container`),
 
 		dagql.Func("withFocus", s.withFocus).
+			View(BeforeVersion("v0.13.4")).
 			Doc(`Indicate that subsequent operations should be featured more prominently in the UI.`),
 
 		dagql.Func("withoutFocus", s.withoutFocus).
+			View(BeforeVersion("v0.13.4")).
 			Doc(`Indicate that subsequent operations should not be featured more prominently in the UI.`,
 				`This is the initial state of all containers.`),
 
@@ -649,8 +728,59 @@ type containerFromArgs struct {
 	Address string
 }
 
-func (s *containerSchema) from(ctx context.Context, parent *core.Container, args containerFromArgs) (*core.Container, error) {
-	return parent.From(ctx, args.Address)
+func (s *containerSchema) from(ctx context.Context, parent dagql.Instance[*core.Container], args containerFromArgs) (inst dagql.Instance[*core.Container], _ error) {
+	bk, err := parent.Self.Query.Buildkit(ctx)
+	if err != nil {
+		return inst, fmt.Errorf("failed to get buildkit client: %w", err)
+	}
+	platform := parent.Self.Platform
+
+	refName, err := reference.ParseNormalizedNamed(args.Address)
+	if err != nil {
+		return inst, fmt.Errorf("failed to parse image address %s: %w", args.Address, err)
+	}
+	// add a default :latest if no tag or digest, otherwise this is a no-op
+	refName = reference.TagNameOnly(refName)
+
+	if refName, isCanonical := refName.(reference.Canonical); isCanonical {
+		ctr, err := parent.Self.FromCanonicalRef(ctx, refName, nil)
+		if err != nil {
+			return inst, err
+		}
+
+		return dagql.NewInstanceForCurrentID(ctx, s.srv, parent, ctr)
+	}
+
+	// Doesn't have a digest, resolve that now and re-call this field using the canonical
+	// digested ref instead. This ensures the ID returned here is always stable w/ the
+	// digested image ref.
+	_, digest, _, err := bk.ResolveImageConfig(ctx, refName.String(), sourceresolver.Opt{
+		Platform: ptr(platform.Spec()),
+		ImageOpt: &sourceresolver.ResolveImageOpt{
+			ResolveMode: llb.ResolveModeDefault.String(),
+		},
+	})
+	if err != nil {
+		return inst, fmt.Errorf("failed to resolve image %s: %w", refName.String(), err)
+	}
+	refName, err = reference.WithDigest(refName, digest)
+	if err != nil {
+		return inst, fmt.Errorf("failed to set digest on image %s: %w", refName.String(), err)
+	}
+
+	err = s.srv.Select(ctx, parent, &inst,
+		dagql.Selector{
+			Field: "from",
+			Args: []dagql.NamedInput{
+				{Name: "address", Value: dagql.String(refName.String())},
+			},
+		},
+	)
+	if err != nil {
+		return inst, err
+	}
+
+	return inst, nil
 }
 
 type containerBuildArgs struct {
@@ -726,6 +856,18 @@ func (s *containerSchema) withExec(ctx context.Context, parent *core.Container, 
 			args.ContainerExecOpts.UseEntrypoint = true
 		}
 	}
+
+	expandedArgs := make([]string, len(args.Args))
+	for i, arg := range args.Args {
+		expandedArg, err := expandEnvVar(ctx, parent, arg, args.Expand)
+		if err != nil {
+			return nil, err
+		}
+
+		expandedArgs[i] = expandedArg
+	}
+	args.Args = expandedArgs
+
 	return parent.WithExec(ctx, args.ContainerExecOpts)
 }
 
@@ -746,6 +888,9 @@ type containerExecArgsLegacy struct {
 	// Redirect the command's standard error to a file in the container
 	RedirectStderr string `default:""`
 
+	// Exit codes this exec is allowed to exit with
+	Expect core.ReturnTypes `default:"SUCCESS"`
+
 	// Provide the executed command access back to the Dagger API
 	ExperimentalPrivilegedNesting bool `default:"false"`
 
@@ -763,6 +908,7 @@ func (s *containerSchema) withExecLegacy(ctx context.Context, parent *core.Conta
 		Stdin:                         args.Stdin,
 		RedirectStdout:                args.RedirectStdout,
 		RedirectStderr:                args.RedirectStderr,
+		Expect:                        args.Expect,
 		ExperimentalPrivilegedNesting: args.ExperimentalPrivilegedNesting,
 		InsecureRootCapabilities:      args.InsecureRootCapabilities,
 		NestedExecMetadata:            args.NestedExecMetadata,
@@ -776,6 +922,10 @@ func (s *containerSchema) stdout(ctx context.Context, parent *core.Container, _ 
 
 func (s *containerSchema) stderr(ctx context.Context, parent *core.Container, _ struct{}) (string, error) {
 	return parent.Stderr(ctx)
+}
+
+func (s *containerSchema) exitCode(ctx context.Context, parent *core.Container, _ struct{}) (int, error) {
+	return parent.ExitCode(ctx)
 }
 
 func (s *containerSchema) stdoutLegacy(ctx context.Context, parent *core.Container, _ struct{}) (string, error) {
@@ -916,12 +1066,18 @@ func (s *containerSchema) user(ctx context.Context, parent *core.Container, args
 }
 
 type containerWithWorkdirArgs struct {
-	Path string
+	Path   string
+	Expand bool `default:"false"`
 }
 
 func (s *containerSchema) withWorkdir(ctx context.Context, parent *core.Container, args containerWithWorkdirArgs) (*core.Container, error) {
+	path, err := expandEnvVar(ctx, parent, args.Path, args.Expand)
+	if err != nil {
+		return nil, err
+	}
+
 	return parent.UpdateImageConfig(ctx, func(cfg specs.ImageConfig) specs.ImageConfig {
-		cfg.WorkingDir = absPath(cfg.WorkingDir, args.Path)
+		cfg.WorkingDir = absPath(cfg.WorkingDir, path)
 		return cfg
 	})
 }
@@ -1109,6 +1265,7 @@ type containerWithMountedDirectoryArgs struct {
 	Path   string
 	Source core.DirectoryID
 	Owner  string `default:""`
+	Expand bool   `default:"false"`
 }
 
 func (s *containerSchema) withMountedDirectory(ctx context.Context, parent *core.Container, args containerWithMountedDirectoryArgs) (*core.Container, error) {
@@ -1116,7 +1273,13 @@ func (s *containerSchema) withMountedDirectory(ctx context.Context, parent *core
 	if err != nil {
 		return nil, err
 	}
-	return parent.WithMountedDirectory(ctx, args.Path, dir.Self, args.Owner, false)
+
+	path, err := expandEnvVar(ctx, parent, args.Path, args.Expand)
+	if err != nil {
+		return nil, err
+	}
+
+	return parent.WithMountedDirectory(ctx, path, dir.Self, args.Owner, false)
 }
 
 type containerWithAnnotationArgs struct {
@@ -1165,6 +1328,7 @@ type containerWithMountedFileArgs struct {
 	Path   string
 	Source core.FileID
 	Owner  string `default:""`
+	Expand bool   `default:"false"`
 }
 
 func (s *containerSchema) withMountedFile(ctx context.Context, parent *core.Container, args containerWithMountedFileArgs) (*core.Container, error) {
@@ -1172,7 +1336,13 @@ func (s *containerSchema) withMountedFile(ctx context.Context, parent *core.Cont
 	if err != nil {
 		return nil, err
 	}
-	return parent.WithMountedFile(ctx, args.Path, file.Self, args.Owner, false)
+
+	path, err := expandEnvVar(ctx, parent, args.Path, args.Expand)
+	if err != nil {
+		return nil, err
+	}
+
+	return parent.WithMountedFile(ctx, path, file.Self, args.Owner, false)
 }
 
 type containerWithMountedCacheArgs struct {
@@ -1181,6 +1351,7 @@ type containerWithMountedCacheArgs struct {
 	Source  dagql.Optional[core.DirectoryID]
 	Sharing core.CacheSharingMode `default:"SHARED"`
 	Owner   string                `default:""`
+	Expand  bool                  `default:"false"`
 }
 
 func (s *containerSchema) withMountedCache(ctx context.Context, parent *core.Container, args containerWithMountedCacheArgs) (*core.Container, error) {
@@ -1198,9 +1369,14 @@ func (s *containerSchema) withMountedCache(ctx context.Context, parent *core.Con
 		return nil, err
 	}
 
+	path, err := expandEnvVar(ctx, parent, args.Path, args.Expand)
+	if err != nil {
+		return nil, err
+	}
+
 	return parent.WithMountedCache(
 		ctx,
-		args.Path,
+		path,
 		cache.Self,
 		dir,
 		args.Sharing,
@@ -1209,19 +1385,32 @@ func (s *containerSchema) withMountedCache(ctx context.Context, parent *core.Con
 }
 
 type containerWithMountedTempArgs struct {
-	Path string
+	Path   string
+	Size   dagql.Optional[dagql.Int]
+	Expand bool `default:"false"`
 }
 
 func (s *containerSchema) withMountedTemp(ctx context.Context, parent *core.Container, args containerWithMountedTempArgs) (*core.Container, error) {
-	return parent.WithMountedTemp(ctx, args.Path)
+	path, err := expandEnvVar(ctx, parent, args.Path, args.Expand)
+	if err != nil {
+		return nil, err
+	}
+
+	return parent.WithMountedTemp(ctx, path, args.Size.Value.Int())
 }
 
 type containerWithoutMountArgs struct {
-	Path string
+	Path   string
+	Expand bool `default:"false"`
 }
 
 func (s *containerSchema) withoutMount(ctx context.Context, parent *core.Container, args containerWithoutMountArgs) (*core.Container, error) {
-	return parent.WithoutMount(ctx, args.Path)
+	path, err := expandEnvVar(ctx, parent, args.Path, args.Expand)
+	if err != nil {
+		return nil, err
+	}
+
+	return parent.WithoutMount(ctx, path)
 }
 
 func (s *containerSchema) mounts(ctx context.Context, parent *core.Container, _ struct{}) (dagql.Array[dagql.String], error) {
@@ -1259,19 +1448,31 @@ func (s *containerSchema) withoutLabel(ctx context.Context, parent *core.Contain
 }
 
 type containerDirectoryArgs struct {
-	Path string
+	Path   string
+	Expand bool `default:"false"`
 }
 
 func (s *containerSchema) directory(ctx context.Context, parent *core.Container, args containerDirectoryArgs) (*core.Directory, error) {
-	return parent.Directory(ctx, args.Path)
+	path, err := expandEnvVar(ctx, parent, args.Path, args.Expand)
+	if err != nil {
+		return nil, err
+	}
+
+	return parent.Directory(ctx, path)
 }
 
 type containerFileArgs struct {
-	Path string
+	Path   string
+	Expand bool `default:"false"`
 }
 
 func (s *containerSchema) file(ctx context.Context, parent *core.Container, args containerFileArgs) (*core.File, error) {
-	return parent.File(ctx, args.Path)
+	path, err := expandEnvVar(ctx, parent, args.Path, args.Expand)
+	if err != nil {
+		return nil, err
+	}
+
+	return parent.File(ctx, path)
 }
 
 func absPath(workDir string, containerPath string) string {
@@ -1284,6 +1485,40 @@ func absPath(workDir string, containerPath string) string {
 	}
 
 	return path.Join(workDir, containerPath)
+}
+
+func expandEnvVar(ctx context.Context, parent *core.Container, input string, expand bool) (string, error) {
+	if !expand {
+		return input, nil
+	}
+
+	cfg, err := parent.ImageConfig(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	secretEnvs := []string{}
+	for _, secret := range parent.Secrets {
+		secretEnvs = append(secretEnvs, secret.EnvName)
+	}
+
+	var secretEnvFoundError error
+	expanded := os.Expand(input, func(k string) string {
+		// set error if its a secret env variable
+		if slices.Contains(secretEnvs, k) {
+			secretEnvFoundError = fmt.Errorf("expand cannot be used with secret env variable %q", k)
+			return ""
+		}
+
+		v, _ := core.LookupEnv(cfg.Env, k)
+		return v
+	})
+
+	if secretEnvFoundError != nil {
+		return "", secretEnvFoundError
+	}
+
+	return expanded, nil
 }
 
 type containerWithSecretVariableArgs struct {
@@ -1312,6 +1547,7 @@ type containerWithMountedSecretArgs struct {
 	Source core.SecretID
 	Owner  string `default:""`
 	Mode   int    `default:"0400"` // FIXME(vito): verify octal
+	Expand bool   `default:"false"`
 }
 
 func (s *containerSchema) withMountedSecret(ctx context.Context, parent *core.Container, args containerWithMountedSecretArgs) (*core.Container, error) {
@@ -1319,12 +1555,19 @@ func (s *containerSchema) withMountedSecret(ctx context.Context, parent *core.Co
 	if err != nil {
 		return nil, err
 	}
-	return parent.WithMountedSecret(ctx, args.Path, secret.Self, args.Owner, fs.FileMode(args.Mode))
+
+	path, err := expandEnvVar(ctx, parent, args.Path, args.Expand)
+	if err != nil {
+		return nil, err
+	}
+
+	return parent.WithMountedSecret(ctx, path, secret.Self, args.Owner, fs.FileMode(args.Mode))
 }
 
 type containerWithDirectoryArgs struct {
 	WithDirectoryArgs
-	Owner string `default:""`
+	Owner  string `default:""`
+	Expand bool   `default:"false"`
 }
 
 func (s *containerSchema) withDirectory(ctx context.Context, parent *core.Container, args containerWithDirectoryArgs) (*core.Container, error) {
@@ -1332,12 +1575,19 @@ func (s *containerSchema) withDirectory(ctx context.Context, parent *core.Contai
 	if err != nil {
 		return nil, err
 	}
-	return parent.WithDirectory(ctx, args.Path, dir.Self, args.CopyFilter, args.Owner)
+
+	path, err := expandEnvVar(ctx, parent, args.Path, args.Expand)
+	if err != nil {
+		return nil, err
+	}
+
+	return parent.WithDirectory(ctx, path, dir.Self, args.CopyFilter, args.Owner)
 }
 
 type containerWithFileArgs struct {
 	WithFileArgs
-	Owner string `default:""`
+	Owner  string `default:""`
+	Expand bool   `default:"false"`
 }
 
 func (s *containerSchema) withFile(ctx context.Context, parent *core.Container, args containerWithFileArgs) (*core.Container, error) {
@@ -1345,12 +1595,19 @@ func (s *containerSchema) withFile(ctx context.Context, parent *core.Container, 
 	if err != nil {
 		return nil, err
 	}
-	return parent.WithFile(ctx, args.Path, file.Self, args.Permissions, args.Owner)
+
+	path, err := expandEnvVar(ctx, parent, args.Path, args.Expand)
+	if err != nil {
+		return nil, err
+	}
+
+	return parent.WithFile(ctx, path, file.Self, args.Permissions, args.Owner)
 }
 
 type containerWithFilesArgs struct {
 	WithFilesArgs
-	Owner string `default:""`
+	Owner  string `default:""`
+	Expand bool   `default:"false"`
 }
 
 func (s *containerSchema) withFiles(ctx context.Context, parent *core.Container, args containerWithFilesArgs) (*core.Container, error) {
@@ -1363,31 +1620,58 @@ func (s *containerSchema) withFiles(ctx context.Context, parent *core.Container,
 		files = append(files, file.Self)
 	}
 
-	return parent.WithFiles(ctx, args.Path, files, args.Permissions, args.Owner)
+	path, err := expandEnvVar(ctx, parent, args.Path, args.Expand)
+	if err != nil {
+		return nil, err
+	}
+
+	return parent.WithFiles(ctx, path, files, args.Permissions, args.Owner)
 }
 
 type containerWithoutDirectoryArgs struct {
-	Path string
+	Path   string
+	Expand bool `default:"false"`
 }
 
 func (s *containerSchema) withoutDirectory(ctx context.Context, parent *core.Container, args containerWithoutDirectoryArgs) (*core.Container, error) {
-	return parent.WithoutPaths(ctx, args.Path)
+	path, err := expandEnvVar(ctx, parent, args.Path, args.Expand)
+	if err != nil {
+		return nil, err
+	}
+
+	return parent.WithoutPaths(ctx, path)
 }
 
 type containerWithoutFileArgs struct {
-	Path string
+	Path   string
+	Expand bool `default:"false"`
 }
 
 func (s *containerSchema) withoutFile(ctx context.Context, parent *core.Container, args containerWithoutFileArgs) (*core.Container, error) {
-	return parent.WithoutPaths(ctx, args.Path)
+	path, err := expandEnvVar(ctx, parent, args.Path, args.Expand)
+	if err != nil {
+		return nil, err
+	}
+
+	return parent.WithoutPaths(ctx, path)
 }
 
 type containerWithoutFilesArgs struct {
-	Paths []string
+	Paths  []string
+	Expand bool `default:"false"`
 }
 
 func (s *containerSchema) withoutFiles(ctx context.Context, parent *core.Container, args containerWithoutFilesArgs) (*core.Container, error) {
-	return parent.WithoutPaths(ctx, args.Paths...)
+	paths := args.Paths
+	var err error
+	for i, p := range args.Paths {
+		paths[i], err = expandEnvVar(ctx, parent, p, args.Expand)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return parent.WithoutPaths(ctx, paths...)
 }
 
 type containerWithNewFileArgs struct {
@@ -1395,10 +1679,16 @@ type containerWithNewFileArgs struct {
 	Contents    string
 	Permissions int    `default:"0644"`
 	Owner       string `default:""`
+	Expand      bool   `default:"false"`
 }
 
 func (s *containerSchema) withNewFile(ctx context.Context, parent *core.Container, args containerWithNewFileArgs) (*core.Container, error) {
-	return parent.WithNewFile(ctx, args.Path, []byte(args.Contents), fs.FileMode(args.Permissions), args.Owner)
+	path, err := expandEnvVar(ctx, parent, args.Path, args.Expand)
+	if err != nil {
+		return nil, err
+	}
+
+	return parent.WithNewFile(ctx, path, []byte(args.Contents), fs.FileMode(args.Permissions), args.Owner)
 }
 
 type containerWithNewFileArgsLegacy struct {
@@ -1416,6 +1706,7 @@ type containerWithUnixSocketArgs struct {
 	Path   string
 	Source core.SocketID
 	Owner  string `default:""`
+	Expand bool   `default:"false"`
 }
 
 func (s *containerSchema) withUnixSocket(ctx context.Context, parent *core.Container, args containerWithUnixSocketArgs) (*core.Container, error) {
@@ -1423,15 +1714,27 @@ func (s *containerSchema) withUnixSocket(ctx context.Context, parent *core.Conta
 	if err != nil {
 		return nil, err
 	}
-	return parent.WithUnixSocket(ctx, args.Path, socket.Self, args.Owner)
+
+	path, err := expandEnvVar(ctx, parent, args.Path, args.Expand)
+	if err != nil {
+		return nil, err
+	}
+
+	return parent.WithUnixSocket(ctx, path, socket.Self, args.Owner)
 }
 
 type containerWithoutUnixSocketArgs struct {
-	Path string
+	Path   string
+	Expand bool `default:"false"`
 }
 
 func (s *containerSchema) withoutUnixSocket(ctx context.Context, parent *core.Container, args containerWithoutUnixSocketArgs) (*core.Container, error) {
-	return parent.WithoutUnixSocket(ctx, args.Path)
+	path, err := expandEnvVar(ctx, parent, args.Path, args.Expand)
+	if err != nil {
+		return nil, err
+	}
+
+	return parent.WithoutUnixSocket(ctx, path)
 }
 
 func (s *containerSchema) platform(ctx context.Context, parent *core.Container, args struct{}) (core.Platform, error) {
@@ -1443,6 +1746,7 @@ type containerExportArgs struct {
 	PlatformVariants  []core.ContainerID `default:"[]"`
 	ForcedCompression dagql.Optional[core.ImageLayerCompression]
 	MediaTypes        core.ImageMediaTypes `default:"OCIMediaTypes"`
+	Expand            bool                 `default:"false"`
 }
 
 func (s *containerSchema) export(ctx context.Context, parent *core.Container, args containerExportArgs) (dagql.String, error) {
@@ -1450,9 +1754,15 @@ func (s *containerSchema) export(ctx context.Context, parent *core.Container, ar
 	if err != nil {
 		return "", err
 	}
+
+	path, err := expandEnvVar(ctx, parent, args.Path, args.Expand)
+	if err != nil {
+		return "", err
+	}
+
 	err = parent.Export(
 		ctx,
-		args.Path,
+		path,
 		variants,
 		args.ForcedCompression.Value,
 		args.MediaTypes,
@@ -1464,7 +1774,7 @@ func (s *containerSchema) export(ctx context.Context, parent *core.Container, ar
 	if err != nil {
 		return "", fmt.Errorf("failed to get buildkit: %w", err)
 	}
-	stat, err := bk.StatCallerHostPath(ctx, args.Path, true)
+	stat, err := bk.StatCallerHostPath(ctx, path, true)
 	if err != nil {
 		return "", err
 	}
@@ -1644,15 +1954,11 @@ func (s *containerSchema) exposedPorts(ctx context.Context, parent *core.Contain
 }
 
 func (s *containerSchema) withFocus(ctx context.Context, parent *core.Container, args struct{}) (*core.Container, error) {
-	child := parent.Clone()
-	child.Focused = true
-	return child, nil
+	return parent, nil
 }
 
 func (s *containerSchema) withoutFocus(ctx context.Context, parent *core.Container, args struct{}) (*core.Container, error) {
-	child := parent.Clone()
-	child.Focused = false
-	return child, nil
+	return parent, nil
 }
 
 type containerWithDefaultTerminalCmdArgs struct {

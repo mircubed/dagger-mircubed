@@ -859,7 +859,6 @@ func (m *Test) ToStatus(status string) Status {
 	testOnMultipleVCS(t, func(ctx context.Context, t *testctx.T, tc vcsTestCase) {
 		t.Run("module args", func(ctx context.Context, t *testctx.T) {
 			c := connect(ctx, t)
-
 			mountedSocket, cleanup := mountedPrivateRepoSocket(c, t)
 			defer cleanup()
 
@@ -1748,6 +1747,10 @@ func (t *Test) Files() []*dagger.File {
     }
 }
 
+func (*Test) Deploy() string {
+    return "here be dragons!"
+}
+
 type Foo struct {
     Ctr *dagger.Container
 }
@@ -1757,8 +1760,8 @@ type Foo struct {
 	t.Run("main object", func(ctx context.Context, t *testctx.T) {
 		out, err := modGen.With(daggerCall()).Stdout(ctx)
 		require.NoError(t, err)
-		require.Equal(t, "Test", gjson.Get(out, "_type").String())
-		require.Equal(t, alpineImage, gjson.Get(out, "baseImage").String())
+		// Deploy function should not be included
+		require.JSONEq(t, fmt.Sprintf(`{"_type": "Test", "baseImage": "%s"}`, alpineImage), out)
 	})
 
 	t.Run("no scalars", func(ctx context.Context, t *testctx.T) {
@@ -1921,7 +1924,7 @@ func (CallSuite) TestByName(ctx context.Context, t *testctx.T) {
 			`,
 			).
 			WithWorkdir("/work").
-			With(daggerExec("init")).
+			With(daggerExec("init", "--source=.")).
 			With(daggerExec("install", "--name", "foo", "./mod-a")).
 			With(daggerExec("install", "--name", "bar", "./mod-b"))
 
@@ -1966,7 +1969,7 @@ func (CallSuite) TestByName(ctx context.Context, t *testctx.T) {
 			`,
 			).
 			WithWorkdir("/work").
-			With(daggerExec("init")).
+			With(daggerExec("init", "--source=.")).
 			With(daggerExec("install", "--name", "foo", "/work/mod-a")).
 			With(daggerExec("install", "--name", "bar", "/work/mod-b"))
 
@@ -2029,7 +2032,7 @@ func (CallSuite) TestByName(ctx context.Context, t *testctx.T) {
 			`,
 			).
 			WithWorkdir("/work").
-			With(daggerExec("init")).
+			With(daggerExec("init", "--source=.")).
 			With(daggerExec("install", "--name", "foo", "/outside/mod-a"))
 
 		// call main module at /work path
@@ -2056,7 +2059,7 @@ func (CallSuite) TestByName(ctx context.Context, t *testctx.T) {
 			}
 			`,
 			).
-			With(daggerExec("init")).
+			With(daggerExec("init", "--source=.")).
 			With(daggerExec("install", "--name", "foo", "/work/test@test"))
 
 		// call main module at /work path
@@ -2068,7 +2071,6 @@ func (CallSuite) TestByName(ctx context.Context, t *testctx.T) {
 	testOnMultipleVCS(t, func(ctx context.Context, t *testctx.T, tc vcsTestCase) {
 		t.Run("git", func(ctx context.Context, t *testctx.T) {
 			c := connect(ctx, t)
-
 			mountedSocket, cleanup := mountedPrivateRepoSocket(c, t)
 			defer cleanup()
 
@@ -2076,7 +2078,7 @@ func (CallSuite) TestByName(ctx context.Context, t *testctx.T) {
 				WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
 				WithWorkdir("/work").
 				With(mountedSocket).
-				With(daggerExec("init")).
+				With(daggerExec("init", "--source=.")).
 				With(daggerExec("install", "--name", "foo", testGitModuleRef(tc, ""))).
 				With(daggerExec("install", "--name", "bar", testGitModuleRef(tc, "subdir/dep2")))
 
@@ -2093,9 +2095,8 @@ func (CallSuite) TestByName(ctx context.Context, t *testctx.T) {
 
 func (CallSuite) TestGitMod(ctx context.Context, t *testctx.T) {
 	testOnMultipleVCS(t, func(ctx context.Context, t *testctx.T, tc vcsTestCase) {
-		c := connect(ctx, t)
-
 		t.Run("go", func(ctx context.Context, t *testctx.T) {
+			c := connect(ctx, t)
 			mountedSocket, cleanup := mountedPrivateRepoSocket(c, t)
 			defer cleanup()
 
@@ -2109,6 +2110,7 @@ func (CallSuite) TestGitMod(ctx context.Context, t *testctx.T) {
 		})
 
 		t.Run("typescript", func(ctx context.Context, t *testctx.T) {
+			c := connect(ctx, t)
 			mountedSocket, cleanup := mountedPrivateRepoSocket(c, t)
 			defer cleanup()
 
@@ -2122,6 +2124,7 @@ func (CallSuite) TestGitMod(ctx context.Context, t *testctx.T) {
 		})
 
 		t.Run("python", func(ctx context.Context, t *testctx.T) {
+			c := connect(ctx, t)
 			mountedSocket, cleanup := mountedPrivateRepoSocket(c, t)
 			defer cleanup()
 
@@ -2432,7 +2435,7 @@ class Test:
 			source: `import { dag, enumType, func, object } from "@dagger.io/dagger"
 
 @enumType()
-class Language {
+export class Language {
   static readonly Go: string = "GO"
   static readonly Python: string = "PYTHON"
   static readonly TypeScript: string = "TYPESCRIPT"

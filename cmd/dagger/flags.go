@@ -315,26 +315,10 @@ func (v *directoryValue) Get(ctx context.Context, dag *dagger.Client, modSrc *da
 	}
 
 	// Try parsing as a Git URL
-	parsedGit, err := parseGit(v.String())
+	gitURL, err := parseGitURL(v.String())
 	if err == nil {
-		gitOpts := dagger.GitOpts{
-			KeepGitDir: true,
-		}
-		if authSock, ok := os.LookupEnv("SSH_AUTH_SOCK"); ok {
-			gitOpts.SSHAuthSocket = dag.Host().UnixSocket(authSock)
-		}
-		git := dag.Git(parsedGit.Remote, gitOpts)
-		var gitRef *dagger.GitRef
-		if parsedGit.Fragment.Ref == "" {
-			gitRef = git.Head()
-		} else {
-			gitRef = git.Branch(parsedGit.Fragment.Ref)
-		}
-		gitDir := gitRef.Tree()
-		if subdir := parsedGit.Fragment.Subdir; subdir != "" {
-			gitDir = gitDir.Directory(subdir)
-		}
-		return gitDir, nil
+		// TODO: use modArg.Ignore if not empty
+		return makeGitDirectory(gitURL, dag), nil
 	}
 
 	// Otherwise it's a local dir path. Allow `file://` scheme or no scheme.
@@ -343,6 +327,7 @@ func (v *directoryValue) Get(ctx context.Context, dag *dagger.Client, modSrc *da
 
 	// The core module doesn't have a ModuleSource.
 	if modSrc == nil {
+		// TODO: use modArg.Ignore if not empty
 		return dag.Host().Directory(path), nil
 	}
 
@@ -368,12 +353,35 @@ func (v *directoryValue) Get(ctx context.Context, dag *dagger.Client, modSrc *da
 	}).Sync(ctx)
 }
 
-func parseGit(urlStr string) (*gitutil.GitURL, error) {
+// makeGitDirectory creates a dagger.Directory object from a parsed gitutil.GitURL
+func makeGitDirectory(gitURL *gitutil.GitURL, dag *dagger.Client) *dagger.Directory {
+	gitOpts := dagger.GitOpts{
+		KeepGitDir: true,
+	}
+	if authSock, ok := os.LookupEnv("SSH_AUTH_SOCK"); ok {
+		gitOpts.SSHAuthSocket = dag.Host().UnixSocket(authSock)
+	}
+	git := dag.Git(gitURL.Remote, gitOpts)
+	var gitRef *dagger.GitRef
+	if gitURL.Fragment.Ref == "" {
+		gitRef = git.Head()
+	} else {
+		gitRef = git.Ref(gitURL.Fragment.Ref)
+	}
+	gitDir := gitRef.Tree()
+	if subdir := gitURL.Fragment.Subdir; subdir != "" {
+		gitDir = gitDir.Directory(subdir)
+	}
+	return gitDir
+}
+
+func parseGitURL(url string) (*gitutil.GitURL, error) {
 	// FIXME: handle tarball-over-http (where http(s):// is scheme but not a git repo)
-	u, err := gitutil.ParseURL(urlStr)
+	u, err := gitutil.ParseURL(url)
 	if err != nil {
 		return nil, err
 	}
+	// TODO: default scheme?
 	if u.Fragment == nil {
 		u.Fragment = &gitutil.GitURLFragment{}
 	}
@@ -408,7 +416,7 @@ func (v *fileValue) Get(_ context.Context, dag *dagger.Client, _ *dagger.ModuleS
 	}
 
 	// Try parsing as a Git URL
-	parsedGit, err := parseGit(v.String())
+	parsedGit, err := parseGitURL(v.String())
 	if err == nil {
 		gitOpts := dagger.GitOpts{
 			KeepGitDir: true,
@@ -586,7 +594,7 @@ func (v *serviceValue) Set(s string) error {
 		v.ports = append(v.ports, dagger.PortForward{
 			Backend:  nPort,
 			Frontend: nPort,
-			Protocol: dagger.Tcp,
+			Protocol: dagger.NetworkProtocolTcp,
 		})
 	case "udp":
 		host, port, err := net.SplitHostPort(u.Host)
@@ -601,7 +609,7 @@ func (v *serviceValue) Set(s string) error {
 		v.ports = append(v.ports, dagger.PortForward{
 			Backend:  nPort,
 			Frontend: nPort,
-			Protocol: dagger.Udp,
+			Protocol: dagger.NetworkProtocolUdp,
 		})
 	default:
 		return fmt.Errorf("unsupported service address. Must be a valid tcp:// or udp:// URL")
@@ -823,22 +831,22 @@ func (r *modFunctionArg) AddFlag(flags *pflag.FlagSet) error {
 	}
 
 	switch r.TypeDef.Kind {
-	case dagger.StringKind:
+	case dagger.TypeDefKindStringKind:
 		val, _ := getDefaultValue[string](r)
 		flags.String(name, val, usage)
 		return nil
 
-	case dagger.IntegerKind:
+	case dagger.TypeDefKindIntegerKind:
 		val, _ := getDefaultValue[int](r)
 		flags.Int(name, val, usage)
 		return nil
 
-	case dagger.BooleanKind:
+	case dagger.TypeDefKindBooleanKind:
 		val, _ := getDefaultValue[bool](r)
 		flags.Bool(name, val, usage)
 		return nil
 
-	case dagger.ScalarKind:
+	case dagger.TypeDefKindScalarKind:
 		scalarName := r.TypeDef.AsScalar.Name
 		defVal, _ := getDefaultValue[string](r)
 
@@ -853,7 +861,7 @@ func (r *modFunctionArg) AddFlag(flags *pflag.FlagSet) error {
 		flags.String(name, defVal, usage)
 		return nil
 
-	case dagger.EnumKind:
+	case dagger.TypeDefKindEnumKind:
 		enumName := r.TypeDef.AsEnum.Name
 		defVal, _ := getDefaultValue[string](r)
 
@@ -870,7 +878,7 @@ func (r *modFunctionArg) AddFlag(flags *pflag.FlagSet) error {
 
 		return nil
 
-	case dagger.ObjectKind:
+	case dagger.TypeDefKindObjectKind:
 		objName := r.TypeDef.AsObject.Name
 
 		if name == "id" && r.TypeDef.AsObject.IsCore() {
@@ -894,7 +902,7 @@ func (r *modFunctionArg) AddFlag(flags *pflag.FlagSet) error {
 			Type: fmt.Sprintf("%q object", objName),
 		}
 
-	case dagger.InputKind:
+	case dagger.TypeDefKindInputKind:
 		inputName := r.TypeDef.AsInput.Name
 
 		if val := GetCustomFlagValue(inputName); val != nil {
@@ -908,26 +916,26 @@ func (r *modFunctionArg) AddFlag(flags *pflag.FlagSet) error {
 			Type: fmt.Sprintf("%q input", inputName),
 		}
 
-	case dagger.ListKind:
+	case dagger.TypeDefKindListKind:
 		elementType := r.TypeDef.AsList.ElementTypeDef
 
 		switch elementType.Kind {
-		case dagger.StringKind:
+		case dagger.TypeDefKindStringKind:
 			val, _ := getDefaultValue[[]string](r)
 			flags.StringSlice(name, val, usage)
 			return nil
 
-		case dagger.IntegerKind:
+		case dagger.TypeDefKindIntegerKind:
 			val, _ := getDefaultValue[[]int](r)
 			flags.IntSlice(name, val, usage)
 			return nil
 
-		case dagger.BooleanKind:
+		case dagger.TypeDefKindBooleanKind:
 			val, _ := getDefaultValue[[]bool](r)
 			flags.BoolSlice(name, val, usage)
 			return nil
 
-		case dagger.ScalarKind:
+		case dagger.TypeDefKindScalarKind:
 			scalarName := elementType.AsScalar.Name
 			defVal, _ := getDefaultValue[[]string](r)
 
@@ -943,7 +951,7 @@ func (r *modFunctionArg) AddFlag(flags *pflag.FlagSet) error {
 			flags.StringSlice(name, defVal, usage)
 			return nil
 
-		case dagger.EnumKind:
+		case dagger.TypeDefKindEnumKind:
 			enumName := elementType.AsEnum.Name
 			defVal, _ := getDefaultValue[[]string](r)
 
@@ -961,7 +969,7 @@ func (r *modFunctionArg) AddFlag(flags *pflag.FlagSet) error {
 
 			return nil
 
-		case dagger.ObjectKind:
+		case dagger.TypeDefKindObjectKind:
 			objName := elementType.AsObject.Name
 
 			val, err := GetCustomFlagValueSlice(objName, nil)
@@ -979,7 +987,7 @@ func (r *modFunctionArg) AddFlag(flags *pflag.FlagSet) error {
 				Type: fmt.Sprintf("list of %q objects", objName),
 			}
 
-		case dagger.InputKind:
+		case dagger.TypeDefKindInputKind:
 			inputName := elementType.AsInput.Name
 
 			val, err := GetCustomFlagValueSlice(inputName, nil)
@@ -997,7 +1005,7 @@ func (r *modFunctionArg) AddFlag(flags *pflag.FlagSet) error {
 				Type: fmt.Sprintf("list of %q inputs", inputName),
 			}
 
-		case dagger.ListKind:
+		case dagger.TypeDefKindListKind:
 			return &UnsupportedFlagError{
 				Name: name,
 				Type: "list of lists",
@@ -1006,6 +1014,34 @@ func (r *modFunctionArg) AddFlag(flags *pflag.FlagSet) error {
 	}
 
 	return &UnsupportedFlagError{Name: name}
+}
+
+func (r *modFunctionArg) GetFlag(flags *pflag.FlagSet) (*pflag.Flag, error) {
+	flag := flags.Lookup(r.FlagName())
+	if flag == nil {
+		return nil, fmt.Errorf("no flag for %q", r.FlagName())
+	}
+	return flag, nil
+}
+
+func (r *modFunctionArg) GetFlagValue(ctx context.Context, flag *pflag.Flag, dag *dagger.Client, md *moduleDef) (any, error) {
+	v := flag.Value
+
+	switch val := v.(type) {
+	case DaggerValue:
+		obj, err := val.Get(ctx, dag, md.Source, r)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get value for argument %q: %w", r.FlagName(), err)
+		}
+		if obj == nil {
+			return nil, fmt.Errorf("no value for argument: %s", r.FlagName())
+		}
+		return obj, nil
+	case pflag.SliceValue:
+		return val.GetSlice(), nil
+	default:
+		return v, nil
+	}
 }
 
 func readAsCSV(val string) ([]string, error) {

@@ -55,9 +55,36 @@ var (
 
 const (
 	moduleURLDefault = "."
-
-	defaultModuleSourceDirName = "."
 )
+
+// if the source root path already has some files
+// then use `srcRootPath/.dagger` for source
+func inferSourcePathDir(srcRootPath string) (string, error) {
+	list, err := os.ReadDir(srcRootPath)
+	if err != nil {
+		return "", err
+	}
+
+	for _, l := range list {
+		if l.Name() == "dagger.json" {
+			continue
+		}
+
+		// .dagger already exist, return that
+		if l.Name() == ".dagger" {
+			return ".dagger", nil
+		}
+
+		// ignore hidden files
+		if strings.HasPrefix(l.Name(), ".") {
+			continue
+		}
+
+		return ".dagger", nil
+	}
+
+	return ".", nil
+}
 
 func init() {
 	moduleFlags.StringVarP(&moduleURL, "mod", "m", "", "Path to the module directory. Either local path or a remote git repo")
@@ -71,6 +98,7 @@ func init() {
 	funcListCmd.PersistentFlags().AddFlagSet(moduleFlags)
 	listenCmd.PersistentFlags().AddFlagSet(moduleFlags)
 	queryCmd.PersistentFlags().AddFlagSet(moduleFlags)
+	shellCmd.PersistentFlags().AddFlagSet(moduleFlags)
 	configCmd.PersistentFlags().AddFlagSet(moduleFlags)
 
 	moduleInitCmd.Flags().StringVar(&sdk, "sdk", "", "Optionally install a Dagger SDK")
@@ -135,7 +163,7 @@ If --sdk is specified, the given SDK is installed in the module. You can do this
 				return fmt.Errorf("failed to get configured module: %w", err)
 			}
 
-			if modConf.SourceKind != dagger.LocalSource {
+			if modConf.SourceKind != dagger.ModuleSourceKindLocalSource {
 				return fmt.Errorf("module must be local")
 			}
 			if modConf.ModuleSourceConfigExists {
@@ -149,17 +177,29 @@ If --sdk is specified, the given SDK is installed in the module. You can do this
 
 			// only bother setting source path if there's an sdk at this time
 			if sdk != "" {
+				// if user didn't specified moduleSourcePath explicitly,
+				// check if current dir is non-empty and infer the source
+				// path accordingly.
 				if moduleSourcePath == "" {
-					moduleSourcePath = filepath.Join(modConf.LocalRootSourcePath, defaultModuleSourceDirName)
+					inferredSourcePath, err := inferSourcePathDir(modConf.LocalRootSourcePath)
+					if err != nil {
+						return err
+					}
+
+					moduleSourcePath = filepath.Join(modConf.LocalRootSourcePath, inferredSourcePath)
 				}
-				// ensure source path is relative to the source root
-				sourceAbsPath, err := filepath.Abs(moduleSourcePath)
-				if err != nil {
-					return fmt.Errorf("failed to get absolute source path for %s: %w", moduleSourcePath, err)
-				}
-				moduleSourcePath, err = filepath.Rel(modConf.LocalRootSourcePath, sourceAbsPath)
-				if err != nil {
-					return fmt.Errorf("failed to get relative source path: %w", err)
+
+				if moduleSourcePath != "" {
+					// ensure source path is relative to the source root
+					sourceAbsPath, err := filepath.Abs(moduleSourcePath)
+					if err != nil {
+						return fmt.Errorf("failed to get absolute source path for %s: %w", moduleSourcePath, err)
+					}
+
+					moduleSourcePath, err = filepath.Rel(modConf.LocalRootSourcePath, sourceAbsPath)
+					if err != nil {
+						return fmt.Errorf("failed to get relative source path: %w", err)
+					}
 				}
 			}
 
@@ -208,7 +248,7 @@ var moduleInstallCmd = &cobra.Command{
 			if err != nil {
 				return fmt.Errorf("failed to get configured module: %w", err)
 			}
-			if modConf.SourceKind != dagger.LocalSource {
+			if modConf.SourceKind != dagger.ModuleSourceKindLocalSource {
 				return fmt.Errorf("module must be local")
 			}
 			if !modConf.FullyInitialized() {
@@ -221,7 +261,7 @@ var moduleInstallCmd = &cobra.Command{
 			if err != nil {
 				return fmt.Errorf("failed to get module ref kind: %w", err)
 			}
-			if depSrcKind == dagger.LocalSource {
+			if depSrcKind == dagger.ModuleSourceKindLocalSource {
 				// need to ensure that local dep paths are relative to the parent root source
 				depAbsPath, err := filepath.Abs(depRefStr)
 				if err != nil {
@@ -265,7 +305,7 @@ var moduleInstallCmd = &cobra.Command{
 				return err
 			}
 
-			if depSrcKind == dagger.GitSource {
+			if depSrcKind == dagger.ModuleSourceKindGitSource {
 				git := depSrc.AsGitSource()
 				gitURL, err := git.CloneRef(ctx)
 				if err != nil {
@@ -291,7 +331,7 @@ var moduleInstallCmd = &cobra.Command{
 					"git_version":   gitVersion,
 					"git_commit":    gitCommit,
 				})
-			} else if depSrcKind == dagger.LocalSource {
+			} else if depSrcKind == dagger.ModuleSourceKindLocalSource {
 				analytics.Ctx(ctx).Capture(ctx, "module_install", map[string]string{
 					"module_name":   name,
 					"install_name":  installName,
@@ -335,7 +375,7 @@ This command is idempotent: you can run it at any time, any number of times. It 
 			if err != nil {
 				return fmt.Errorf("failed to get configured module: %w", err)
 			}
-			if modConf.SourceKind != dagger.LocalSource {
+			if modConf.SourceKind != dagger.ModuleSourceKindLocalSource {
 				return fmt.Errorf("module must be local")
 			}
 
@@ -368,8 +408,14 @@ This command is idempotent: you can run it at any time, any number of times. It 
 			}
 			// if SDK is set but source path isn't and the user didn't provide --source, we'll use the default source path
 			if modSDK != "" && modSourcePath == "" && developSourcePath == "" {
-				developSourcePath = filepath.Join(modConf.LocalRootSourcePath, defaultModuleSourceDirName)
+				inferredSourcePath, err := inferSourcePathDir(modConf.LocalRootSourcePath)
+				if err != nil {
+					return err
+				}
+
+				developSourcePath = filepath.Join(modConf.LocalRootSourcePath, inferredSourcePath)
 			}
+
 			// if there's no SDK and the user isn't changing the source path, there's nothing to do.
 			// error out rather than silently doing nothing.
 			if modSDK == "" && developSourcePath == "" {
@@ -440,7 +486,7 @@ forced), to avoid mistakenly depending on uncommitted files.
 			if err != nil {
 				return fmt.Errorf("failed to get configured module: %w", err)
 			}
-			if modConf.SourceKind != dagger.LocalSource {
+			if modConf.SourceKind != dagger.ModuleSourceKindLocalSource {
 				return fmt.Errorf("module must be local")
 			}
 			if !modConf.FullyInitialized() {
@@ -615,7 +661,7 @@ func getModuleConfigurationForSourceRef(
 		return nil, fmt.Errorf("failed to get module ref kind: %w", err)
 	}
 
-	if conf.SourceKind == dagger.GitSource {
+	if conf.SourceKind == dagger.ModuleSourceKindGitSource {
 		conf.ModuleSourceConfigExists, err = conf.Source.ConfigExists(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to check if module config exists: %w", err)
@@ -648,7 +694,7 @@ func getModuleConfigurationForSourceRef(
 					return nil, err
 				}
 				depSrcRef := namedDep.Source
-				if depKind == dagger.LocalSource {
+				if depKind == dagger.ModuleSourceKindLocalSource {
 					depSrcRef = filepath.Join(defaultFindupConfigDir, namedDep.Source)
 				}
 				return getModuleConfigurationForSourceRef(ctx, dag, depSrcRef, false, resolveFromCaller)
@@ -815,7 +861,7 @@ func (m *moduleDef) loadTypeDefs(ctx context.Context, dag *dagger.Client) error 
 
 	for _, typeDef := range res.TypeDefs {
 		switch typeDef.Kind {
-		case dagger.ObjectKind:
+		case dagger.TypeDefKindObjectKind:
 			obj := typeDef.AsObject
 			// FIXME: we could get the real constructor's name through the field
 			// in Query which would avoid the need to convert the module name,
@@ -837,11 +883,11 @@ func (m *moduleDef) loadTypeDefs(ctx context.Context, dag *dagger.Client) error 
 				}
 			}
 			m.Objects = append(m.Objects, typeDef)
-		case dagger.InterfaceKind:
+		case dagger.TypeDefKindInterfaceKind:
 			m.Interfaces = append(m.Interfaces, typeDef)
-		case dagger.EnumKind:
+		case dagger.TypeDefKindEnumKind:
 			m.Enums = append(m.Enums, typeDef)
-		case dagger.InputKind:
+		case dagger.TypeDefKindInputKind:
 			m.Inputs = append(m.Inputs, typeDef)
 		}
 	}
@@ -912,6 +958,24 @@ func (m *moduleDef) GetObject(name string) *modObject {
 	return nil
 }
 
+func (m *moduleDef) GetObjectFunction(objectName, functionName string) (*modFunction, error) {
+	fp := m.GetFunctionProvider(objectName)
+	if fp == nil {
+		return nil, fmt.Errorf("module %q does not have a %q object or interface", m.Name, objectName)
+	}
+	fn, err := GetFunction(fp, functionName)
+	if err != nil {
+		return nil, err
+	}
+	// We need to load references to types with their type definitions because
+	// the introspection doesn't recursively add them, just their names.
+	m.LoadTypeDef(fn.ReturnType)
+	for _, arg := range fn.Args {
+		m.LoadTypeDef(arg.TypeDef)
+	}
+	return fn, nil
+}
+
 // GetInterface retrieves a saved interface type definition from the module.
 func (m *moduleDef) GetInterface(name string) *modInterface {
 	for _, iface := range m.AsInterfaces() {
@@ -954,6 +1018,20 @@ func (m *moduleDef) GetInput(name string) *modInput {
 		}
 	}
 	return nil
+}
+
+// HasCoreFunction checks if there's a core function (under Query) with the given name.
+func (m *moduleDef) HasCoreFunction(name string) bool {
+	o := m.GetFunctionProvider("Query")
+	if o == nil || !o.IsCore() {
+		return false
+	}
+	return HasFunction(o, name)
+}
+
+// HasFunction checks if the module has a top level function with the given name.
+func (m *moduleDef) HasFunction(name string) bool {
+	return HasFunction(m.MainObject.AsFunctionProvider(), name)
 }
 
 // LoadTypeDef attempts to replace a function's return object type or argument's
@@ -1019,6 +1097,15 @@ func HasAvailableFunctions(o functionProvider) bool {
 	return false
 }
 
+// HasFunction checks if an object has a function with the given name.
+func HasFunction(o functionProvider, name string) bool {
+	if o == nil {
+		return false
+	}
+	fn, _ := GetFunction(o, name)
+	return fn != nil
+}
+
 // skipLeaves is a map of provider names to function names that should be skipped
 // when looking for leaf functions.
 var skipLeaves = map[string][]string{
@@ -1029,6 +1116,8 @@ var skipLeaves = map[string][]string{
 		// stdout and stderr may be arbitrarily large and jarring to see (e.g. test suites)
 		"stdout",
 		"stderr",
+		// avoid potential error if no previous execution
+		"exitCode",
 	},
 	"File": {
 		// This could be a binary file, so until we can tell which type of
@@ -1041,24 +1130,34 @@ var skipLeaves = map[string][]string{
 	},
 }
 
-// GetLeafFunctions returns the leaf functions of a function provider, which are
-// functions that have no arguments and return a scalar or list of scalars.
+// GetLeafFunctions returns the leaf functions of an object or interface
+//
+// Leaf functions return simple values like a scalar or a list of scalars.
+// If from a module, they are limited to fields. But if from a core type,
+// any function without arguments is considered, excluding a few hardcoded
+// ones.
 //
 // Functions that return an ID are excluded since the CLI can't handle them
 // as input arguments yet, so they'd add noise when listing an object's leaves.
 func GetLeafFunctions(fp functionProvider) []*modFunction {
-	fns := fp.GetFunctions()
+	var fns []*modFunction
+	// not including interfaces from modules because interfaces don't have fields
+	if fp.IsCore() {
+		fns = fp.GetFunctions()
+	} else if obj, ok := fp.(*modObject); ok {
+		fns = obj.GetFieldFunctions()
+	}
 	r := make([]*modFunction, 0, len(fns))
 
 	for _, fn := range fns {
 		kind := fn.ReturnType.Kind
-		if kind == dagger.ListKind {
+		if kind == dagger.TypeDefKindListKind {
 			kind = fn.ReturnType.AsList.ElementTypeDef.Kind
 		}
 		switch kind {
-		case dagger.ObjectKind, dagger.InterfaceKind, dagger.VoidKind:
+		case dagger.TypeDefKindObjectKind, dagger.TypeDefKindInterfaceKind, dagger.TypeDefKindVoidKind:
 			continue
-		case dagger.ScalarKind:
+		case dagger.TypeDefKindScalarKind:
 			// FIXME: ID types are coming from TypeDef with the wrong case ("Id")
 			if fn.ReturnType.AsScalar.Name == fmt.Sprintf("%sId", fp.ProviderName()) {
 				continue
@@ -1085,16 +1184,16 @@ func GetFunction(o functionProvider, name string) (*modFunction, error) {
 }
 
 func (t *modTypeDef) Name() string {
-	if t.AsObject != nil {
-		return t.AsObject.Name
-	}
-	if t.AsInterface != nil {
-		return t.AsInterface.Name
+	if fp := t.AsFunctionProvider(); fp != nil {
+		return fp.ProviderName()
 	}
 	return ""
 }
 
 func (t *modTypeDef) AsFunctionProvider() functionProvider {
+	if t.AsList != nil {
+		t = t.AsList.ElementTypeDef
+	}
 	if t.AsObject != nil {
 		return t.AsObject
 	}
@@ -1154,17 +1253,19 @@ func skipFunction(obj, field string) bool {
 // which are treated as functions with no arguments.
 func (o *modObject) GetFunctions() []*modFunction {
 	fns := make([]*modFunction, 0, len(o.Fields)+len(o.Functions))
-	for _, f := range o.Fields {
-		fns = append(fns, &modFunction{
-			Name:        f.Name,
-			Description: f.Description,
-			ReturnType:  f.TypeDef,
-		})
-	}
+	fns = append(fns, o.GetFieldFunctions()...)
 	for _, f := range o.Functions {
 		if !skipFunction(o.Name, f.Name) {
 			fns = append(fns, f)
 		}
+	}
+	return fns
+}
+
+func (o *modObject) GetFieldFunctions() []*modFunction {
+	fns := make([]*modFunction, 0, len(o.Fields))
+	for _, f := range o.Fields {
+		fns = append(fns, f.AsFunction())
 	}
 	return fns
 }
@@ -1225,6 +1326,14 @@ type modField struct {
 	TypeDef     *modTypeDef
 }
 
+func (f *modField) AsFunction() *modFunction {
+	return &modFunction{
+		Name:        f.Name,
+		Description: f.Description,
+		ReturnType:  f.TypeDef,
+	}
+}
+
 // modFunction is a representation of dagger.Function.
 type modFunction struct {
 	Name        string
@@ -1241,6 +1350,16 @@ func (f *modFunction) CmdName() string {
 	return f.cmdName
 }
 
+// GetArg returns the argument definition corresponding to the given name.
+func (f *modFunction) GetArg(name string) (*modFunctionArg, error) {
+	for _, a := range f.Args {
+		if a.FlagName() == name {
+			return a, nil
+		}
+	}
+	return nil, fmt.Errorf("no argument %q in function %q", name, f.CmdName())
+}
+
 func (f *modFunction) HasRequiredArgs() bool {
 	for _, arg := range f.Args {
 		if arg.IsRequired() {
@@ -1248,6 +1367,16 @@ func (f *modFunction) HasRequiredArgs() bool {
 		}
 	}
 	return false
+}
+
+func (f *modFunction) RequiredArgs() []*modFunctionArg {
+	args := make([]*modFunctionArg, 0, len(f.Args))
+	for _, arg := range f.Args {
+		if arg.IsRequired() {
+			args = append(args, arg)
+		}
+	}
+	return args
 }
 
 func (f *modFunction) SupportedArgs() []*modFunctionArg {
@@ -1270,12 +1399,7 @@ func (f *modFunction) IsUnsupported() bool {
 }
 
 func (f *modFunction) ReturnsCoreObject() bool {
-	t := f.ReturnType
-	if t.AsList != nil {
-		t = t.AsList.ElementTypeDef
-	}
-	fp := t.AsFunctionProvider()
-	if fp != nil {
+	if fp := f.ReturnType.AsFunctionProvider(); fp != nil {
 		return fp.IsCore()
 	}
 	return false

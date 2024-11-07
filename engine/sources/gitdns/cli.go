@@ -106,6 +106,7 @@ func (cli *gitCLI) run(ctx context.Context, args ...string) (_ *bytes.Buffer, er
 			"GIT_TERMINAL_PROMPT=0",
 			"GIT_SSH_COMMAND=" + GetGitSSHCommand(cli.knownHosts),
 			//	"GIT_TRACE=1",
+			"GIT_ASKPASS=echo",      // ensure git does not ask for a password (avoids cryptic error message)
 			"GIT_CONFIG_NOSYSTEM=1", // Disable reading from system gitconfig.
 			"HOME=/dev/null",        // Disable reading from user gitconfig.
 			"LC_ALL=C",              // Ensure consistent output.
@@ -128,6 +129,14 @@ func (cli *gitCLI) run(ctx context.Context, args ...string) (_ *bytes.Buffer, er
 		if err != nil {
 			if strings.Contains(errbuf.String(), "--depth") || strings.Contains(errbuf.String(), "shallow") {
 				if newArgs := argsNoDepth(args); len(args) > len(newArgs) {
+					args = newArgs
+					continue
+				}
+			}
+			if strings.Contains(errbuf.String(), "not our ref") || strings.Contains(errbuf.String(), "unadvertised object") {
+				// server-side error: https://github.com/git/git/blob/34b6ce9b30747131b6e781ff718a45328aa887d0/upload-pack.c#L811-L812
+				// client-side error: https://github.com/git/git/blob/34b6ce9b30747131b6e781ff718a45328aa887d0/fetch-pack.c#L2250-L2253
+				if newArgs := argsNoCommitRefspec(args); len(args) > len(newArgs) {
 					args = newArgs
 					continue
 				}
@@ -156,4 +165,20 @@ func argsNoDepth(args []string) []string {
 		}
 	}
 	return out
+}
+
+func argsNoCommitRefspec(args []string) []string {
+	if len(args) <= 2 {
+		return args
+	}
+	if args[0] != "fetch" {
+		return args
+	}
+
+	// assume the refspec is the last arg
+	if isCommitSHA(args[len(args)-1]) {
+		return args[:len(args)-1]
+	}
+
+	return args
 }

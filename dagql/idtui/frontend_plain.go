@@ -17,6 +17,8 @@ import (
 	"github.com/pkg/browser"
 	"go.opentelemetry.io/otel/codes"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -198,7 +200,14 @@ func (fe *frontendPlain) Run(ctx context.Context, opts dagui.FrontendOpts, run f
 
 	runErr := run(ctx)
 	fe.finalRender()
+
+	fe.db.WriteDot(opts.DotOutputFilePath, opts.DotFocusField, opts.DotShowInternal)
+
 	return runErr
+}
+
+func (fe *frontendPlain) Opts() *dagui.FrontendOpts {
+	return &fe.FrontendOpts
 }
 
 func (fe *frontendPlain) SetPrimary(spanID trace.SpanID) {
@@ -213,7 +222,7 @@ func (fe *frontendPlain) SetRevealAllSpans(val bool) {
 	fe.mu.Unlock()
 }
 
-func (fe *frontendPlain) Background(cmd tea.ExecCommand) error {
+func (fe *frontendPlain) Background(cmd tea.ExecCommand, raw bool) error {
 	return fmt.Errorf("not implemented")
 }
 
@@ -328,6 +337,33 @@ func (fe *frontendPlain) ForceFlush(context.Context) error {
 	return nil
 }
 
+func (fe *frontendPlain) MetricExporter() sdkmetric.Exporter {
+	return PlainFrontendMetricExporter{fe}
+}
+
+type PlainFrontendMetricExporter struct {
+	*frontendPlain
+}
+
+func (fe PlainFrontendMetricExporter) Export(ctx context.Context, resourceMetrics *metricdata.ResourceMetrics) error {
+	fe.mu.Lock()
+	defer fe.mu.Unlock()
+
+	return fe.db.MetricExporter().Export(ctx, resourceMetrics)
+}
+
+func (fe PlainFrontendMetricExporter) Temporality(ik sdkmetric.InstrumentKind) metricdata.Temporality {
+	return fe.db.Temporality(ik)
+}
+
+func (fe PlainFrontendMetricExporter) Aggregation(ik sdkmetric.InstrumentKind) sdkmetric.Aggregation {
+	return fe.db.Aggregation(ik)
+}
+
+func (fe PlainFrontendMetricExporter) ForceFlush(context.Context) error {
+	return nil
+}
+
 // wake up all spans up to the root span
 func (fe *frontendPlain) wakeUpSpan(spanID trace.SpanID) {
 	for sleeper := fe.data[spanID]; sleeper != nil; sleeper = fe.data[sleeper.parentID] {
@@ -361,11 +397,12 @@ func (fe *frontendPlain) finalRender() {
 }
 
 func (fe *frontendPlain) renderProgress() {
-	scope := fe.db.PrimarySpan
+	var rowsView *dagui.RowsView
 	if fe.RevealAllSpans {
-		scope = trace.SpanID{}
+		rowsView = fe.db.RowsViewAll()
+	} else {
+		rowsView = fe.db.RowsView(fe.db.PrimarySpan)
 	}
-	rowsView := fe.db.RowsView(scope)
 
 	// quickly sanity check the context - if a span from it has gone missing
 	// from the db, or has been marked as passthrough, it will no longer appear
@@ -489,6 +526,7 @@ func (fe *frontendPlain) renderStep(span *dagui.Span, depth int, done bool) {
 		}
 		duration := dagui.FormatDuration(span.EndTime().Sub(span.StartTime()))
 		fmt.Fprint(fe.output, fe.output.String(fmt.Sprintf(" [%s]", duration)).Foreground(termenv.ANSIBrightBlack))
+		r.renderMetrics(fe.output, span)
 
 		if span.Status().Code == codes.Error && span.Status().Description != "" {
 			fmt.Fprintln(fe.output)

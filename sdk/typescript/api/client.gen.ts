@@ -132,6 +132,13 @@ export type ContainerBuildOpts = {
   secrets?: Secret[]
 }
 
+export type ContainerDirectoryOpts = {
+  /**
+   * Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
+   */
+  expand?: boolean
+}
+
 export type ContainerExportOpts = {
   /**
    * Identifiers for other platform specific containers.
@@ -153,6 +160,18 @@ export type ContainerExportOpts = {
    * Defaults to OCI, which is largely compatible with most recent container runtimes, but Docker may be needed for older runtimes without OCI support.
    */
   mediaTypes?: ImageMediaTypes
+
+  /**
+   * Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
+   */
+  expand?: boolean
+}
+
+export type ContainerFileOpts = {
+  /**
+   * Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo.txt").
+   */
+  expand?: boolean
 }
 
 export type ContainerImportOpts = {
@@ -251,6 +270,11 @@ export type ContainerWithDirectoryOpts = {
    * If the group is omitted, it defaults to the same as the user.
    */
   owner?: string
+
+  /**
+   * Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
+   */
+  expand?: boolean
 }
 
 export type ContainerWithEntrypointOpts = {
@@ -262,7 +286,7 @@ export type ContainerWithEntrypointOpts = {
 
 export type ContainerWithEnvVariableOpts = {
   /**
-   * Replace `${VAR}` or `$VAR` in the value according to the current environment variables defined in the container (e.g., "/opt/bin:$PATH").
+   * Replace "${VAR}" or "$VAR" in the value according to the current environment variables defined in the container (e.g. "/opt/bin:$PATH").
    */
   expand?: boolean
 }
@@ -289,6 +313,11 @@ export type ContainerWithExecOpts = {
   redirectStderr?: string
 
   /**
+   * Exit codes this command is allowed to exit with without error
+   */
+  expect?: ReturnType
+
+  /**
    * Provides Dagger access to the executed command.
    *
    * Do not use this option unless you trust the command being executed; the command being executed WILL BE GRANTED FULL ACCESS TO YOUR HOST FILESYSTEM.
@@ -299,6 +328,18 @@ export type ContainerWithExecOpts = {
    * Execute the command with all root capabilities. This is similar to running a command with "sudo" or executing "docker run" with the "--privileged" flag. Containerization does not provide any security guarantees when using this option. It should only be used when absolutely necessary and only with trusted commands.
    */
   insecureRootCapabilities?: boolean
+
+  /**
+   * Replace "${VAR}" or "$VAR" in the args according to the current environment variables defined in the container (e.g. "/$VAR/foo").
+   */
+  expand?: boolean
+
+  /**
+   * If set, skip the automatic init process injected into containers by default.
+   *
+   * This should only be used if the user requires that their exec process be the pid 1 process in the container. Otherwise it may result in unexpected behavior.
+   */
+  noInit?: boolean
 }
 
 export type ContainerWithExposedPortOpts = {
@@ -332,6 +373,11 @@ export type ContainerWithFileOpts = {
    * If the group is omitted, it defaults to the same as the user.
    */
   owner?: string
+
+  /**
+   * Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo.txt").
+   */
+  expand?: boolean
 }
 
 export type ContainerWithFilesOpts = {
@@ -348,6 +394,11 @@ export type ContainerWithFilesOpts = {
    * If the group is omitted, it defaults to the same as the user.
    */
   owner?: string
+
+  /**
+   * Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo.txt").
+   */
+  expand?: boolean
 }
 
 export type ContainerWithMountedCacheOpts = {
@@ -371,6 +422,11 @@ export type ContainerWithMountedCacheOpts = {
    * If the group is omitted, it defaults to the same as the user.
    */
   owner?: string
+
+  /**
+   * Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
+   */
+  expand?: boolean
 }
 
 export type ContainerWithMountedDirectoryOpts = {
@@ -382,6 +438,11 @@ export type ContainerWithMountedDirectoryOpts = {
    * If the group is omitted, it defaults to the same as the user.
    */
   owner?: string
+
+  /**
+   * Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
+   */
+  expand?: boolean
 }
 
 export type ContainerWithMountedFileOpts = {
@@ -393,6 +454,11 @@ export type ContainerWithMountedFileOpts = {
    * If the group is omitted, it defaults to the same as the user.
    */
   owner?: string
+
+  /**
+   * Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo.txt").
+   */
+  expand?: boolean
 }
 
 export type ContainerWithMountedSecretOpts = {
@@ -411,6 +477,23 @@ export type ContainerWithMountedSecretOpts = {
    * This option requires an owner to be set to be active.
    */
   mode?: number
+
+  /**
+   * Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
+   */
+  expand?: boolean
+}
+
+export type ContainerWithMountedTempOpts = {
+  /**
+   * Size of the temporary directory in bytes.
+   */
+  size?: number
+
+  /**
+   * Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
+   */
+  expand?: boolean
 }
 
 export type ContainerWithNewFileOpts = {
@@ -427,6 +510,11 @@ export type ContainerWithNewFileOpts = {
    * If the group is omitted, it defaults to the same as the user.
    */
   owner?: string
+
+  /**
+   * Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo.txt").
+   */
+  expand?: boolean
 }
 
 export type ContainerWithUnixSocketOpts = {
@@ -438,6 +526,25 @@ export type ContainerWithUnixSocketOpts = {
    * If the group is omitted, it defaults to the same as the user.
    */
   owner?: string
+
+  /**
+   * Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
+   */
+  expand?: boolean
+}
+
+export type ContainerWithWorkdirOpts = {
+  /**
+   * Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
+   */
+  expand?: boolean
+}
+
+export type ContainerWithoutDirectoryOpts = {
+  /**
+   * Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
+   */
+  expand?: boolean
 }
 
 export type ContainerWithoutEntrypointOpts = {
@@ -452,6 +559,34 @@ export type ContainerWithoutExposedPortOpts = {
    * Port protocol to unexpose
    */
   protocol?: NetworkProtocol
+}
+
+export type ContainerWithoutFileOpts = {
+  /**
+   * Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo.txt").
+   */
+  expand?: boolean
+}
+
+export type ContainerWithoutFilesOpts = {
+  /**
+   * Replace "${VAR}" or "$VAR" in the value of paths according to the current environment variables defined in the container (e.g. "/$VAR/foo.txt").
+   */
+  expand?: boolean
+}
+
+export type ContainerWithoutMountOpts = {
+  /**
+   * Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
+   */
+  expand?: boolean
+}
+
+export type ContainerWithoutUnixSocketOpts = {
+  /**
+   * Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
+   */
+  expand?: boolean
 }
 
 /**
@@ -687,6 +822,7 @@ export type FunctionWithArgOpts = {
    * Patterns to ignore when loading the contextual argument value.
    */
   ignore?: string[]
+  sourceMap?: SourceMap
 }
 
 /**
@@ -1002,6 +1138,11 @@ export type ClientModuleDependencyOpts = {
 
 export type ClientModuleSourceOpts = {
   /**
+   * The pinned version of the module source
+   */
+  refPin?: string
+
+  /**
    * If true, enforce that the source is a stable version for source kinds that support versioning.
    */
   stable?: boolean
@@ -1016,6 +1157,25 @@ export type ClientSecretOpts = {
   accessor?: string
 }
 
+/**
+ * Expected return type of an execution
+ */
+export enum ReturnType {
+  /**
+   * Any execution (exit codes 0-127)
+   */
+  Any = "ANY",
+
+  /**
+   * A failed execution (exit codes 1-127)
+   */
+  Failure = "FAILURE",
+
+  /**
+   * A successful execution (exit code 0)
+   */
+  Success = "SUCCESS",
+}
 /**
  * The `ScalarTypeDefID` scalar type represents an identifier for an object of type ScalarTypeDef.
  */
@@ -1070,6 +1230,11 @@ export type ServiceID = string & { __ServiceID: never }
 export type SocketID = string & { __SocketID: never }
 
 /**
+ * The `SourceMapID` scalar type represents an identifier for an object of type SourceMap.
+ */
+export type SourceMapID = string & { __SourceMapID: never }
+
+/**
  * The `TerminalID` scalar type represents an identifier for an object of type Terminal.
  */
 export type TerminalID = string & { __TerminalID: never }
@@ -1079,6 +1244,11 @@ export type TypeDefWithEnumOpts = {
    * A doc string for the enum, if any
    */
   description?: string
+
+  /**
+   * The source map for the enum definition.
+   */
+  sourceMap?: SourceMap
 }
 
 export type TypeDefWithEnumValueOpts = {
@@ -1086,6 +1256,11 @@ export type TypeDefWithEnumValueOpts = {
    * A doc string for the value, if any
    */
   description?: string
+
+  /**
+   * The source map for the enum value definition.
+   */
+  sourceMap?: SourceMap
 }
 
 export type TypeDefWithFieldOpts = {
@@ -1093,14 +1268,21 @@ export type TypeDefWithFieldOpts = {
    * A doc string for the field, if any
    */
   description?: string
+
+  /**
+   * The source map for the field definition.
+   */
+  sourceMap?: SourceMap
 }
 
 export type TypeDefWithInterfaceOpts = {
   description?: string
+  sourceMap?: SourceMap
 }
 
 export type TypeDefWithObjectOpts = {
   description?: string
+  sourceMap?: SourceMap
 }
 
 export type TypeDefWithScalarOpts = {
@@ -1237,6 +1419,7 @@ export class CacheVolume extends BaseClient {
 export class Container extends BaseClient {
   private readonly _id?: ContainerID = undefined
   private readonly _envVariable?: string = undefined
+  private readonly _exitCode?: number = undefined
   private readonly _export?: string = undefined
   private readonly _imageRef?: string = undefined
   private readonly _label?: string = undefined
@@ -1256,6 +1439,7 @@ export class Container extends BaseClient {
     parent?: { queryTree?: QueryTree[]; ctx: Context },
     _id?: ContainerID,
     _envVariable?: string,
+    _exitCode?: number,
     _export?: string,
     _imageRef?: string,
     _label?: string,
@@ -1272,6 +1456,7 @@ export class Container extends BaseClient {
 
     this._id = _id
     this._envVariable = _envVariable
+    this._exitCode = _exitCode
     this._export = _export
     this._imageRef = _imageRef
     this._label = _label
@@ -1400,14 +1585,15 @@ export class Container extends BaseClient {
    *
    * Mounts are included.
    * @param path The path of the directory to retrieve (e.g., "./src").
+   * @param opts.expand Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
    */
-  directory = (path: string): Directory => {
+  directory = (path: string, opts?: ContainerDirectoryOpts): Directory => {
     return new Directory({
       queryTree: [
         ...this._queryTree,
         {
           operation: "directory",
-          args: { path },
+          args: { path, ...opts },
         },
       ],
       ctx: this._ctx,
@@ -1493,6 +1679,29 @@ export class Container extends BaseClient {
   }
 
   /**
+   * The exit code of the last executed command.
+   *
+   * Returns an error if no command was set.
+   */
+  exitCode = async (): Promise<number> => {
+    if (this._exitCode) {
+      return this._exitCode
+    }
+
+    const response: Awaited<number> = await computeQuery(
+      [
+        ...this._queryTree,
+        {
+          operation: "exitCode",
+        },
+      ],
+      await this._ctx.connection(),
+    )
+
+    return response
+  }
+
+  /**
    * EXPERIMENTAL API! Subject to change/removal at any time.
    *
    * Configures all available GPUs on the host to be accessible to this container.
@@ -1548,6 +1757,7 @@ export class Container extends BaseClient {
    * @param opts.mediaTypes Use the specified media types for the exported image's layers.
    *
    * Defaults to OCI, which is largely compatible with most recent container runtimes, but Docker may be needed for older runtimes without OCI support.
+   * @param opts.expand Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
    */
   export = async (
     path: string,
@@ -1621,14 +1831,15 @@ export class Container extends BaseClient {
    *
    * Mounts are included.
    * @param path The path of the file to retrieve (e.g., "./README.md").
+   * @param opts.expand Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo.txt").
    */
-  file = (path: string): File => {
+  file = (path: string, opts?: ContainerFileOpts): File => {
     return new File({
       queryTree: [
         ...this._queryTree,
         {
           operation: "file",
-          args: { path },
+          args: { path, ...opts },
         },
       ],
       ctx: this._ctx,
@@ -1856,7 +2067,7 @@ export class Container extends BaseClient {
   /**
    * The error stream of the last executed command.
    *
-   * Will execute default command if none is set, or error if there's no default.
+   * Returns an error if no command was set.
    */
   stderr = async (): Promise<string> => {
     if (this._stderr) {
@@ -1879,7 +2090,7 @@ export class Container extends BaseClient {
   /**
    * The output stream of the last executed command.
    *
-   * Will execute default command if none is set, or error if there's no default.
+   * Returns an error if no command was set.
    */
   stdout = async (): Promise<string> => {
     if (this._stdout) {
@@ -2064,6 +2275,7 @@ export class Container extends BaseClient {
    * The user and group can either be an ID (1000:1000) or a name (foo:bar).
    *
    * If the group is omitted, it defaults to the same as the user.
+   * @param opts.expand Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
    */
   withDirectory = (
     path: string,
@@ -2107,7 +2319,7 @@ export class Container extends BaseClient {
    * Retrieves this container plus the given environment variable.
    * @param name The name of the environment variable (e.g., "HOST").
    * @param value The value of the environment variable. (e.g., "localhost").
-   * @param opts.expand Replace `${VAR}` or `$VAR` in the value according to the current environment variables defined in the container (e.g., "/opt/bin:$PATH").
+   * @param opts.expand Replace "${VAR}" or "$VAR" in the value according to the current environment variables defined in the container (e.g. "/opt/bin:$PATH").
    */
   withEnvVariable = (
     name: string,
@@ -2135,18 +2347,27 @@ export class Container extends BaseClient {
    * @param opts.stdin Content to write to the command's standard input before closing (e.g., "Hello world").
    * @param opts.redirectStdout Redirect the command's standard output to a file in the container (e.g., "/tmp/stdout").
    * @param opts.redirectStderr Redirect the command's standard error to a file in the container (e.g., "/tmp/stderr").
+   * @param opts.expect Exit codes this command is allowed to exit with without error
    * @param opts.experimentalPrivilegedNesting Provides Dagger access to the executed command.
    *
    * Do not use this option unless you trust the command being executed; the command being executed WILL BE GRANTED FULL ACCESS TO YOUR HOST FILESYSTEM.
    * @param opts.insecureRootCapabilities Execute the command with all root capabilities. This is similar to running a command with "sudo" or executing "docker run" with the "--privileged" flag. Containerization does not provide any security guarantees when using this option. It should only be used when absolutely necessary and only with trusted commands.
+   * @param opts.expand Replace "${VAR}" or "$VAR" in the args according to the current environment variables defined in the container (e.g. "/$VAR/foo").
+   * @param opts.noInit If set, skip the automatic init process injected into containers by default.
+   *
+   * This should only be used if the user requires that their exec process be the pid 1 process in the container. Otherwise it may result in unexpected behavior.
    */
   withExec = (args: string[], opts?: ContainerWithExecOpts): Container => {
+    const metadata: Metadata = {
+      expect: { is_enum: true },
+    }
+
     return new Container({
       queryTree: [
         ...this._queryTree,
         {
           operation: "withExec",
-          args: { args, ...opts },
+          args: { args, ...opts, __metadata: metadata },
         },
       ],
       ctx: this._ctx,
@@ -2196,6 +2417,7 @@ export class Container extends BaseClient {
    * The user and group can either be an ID (1000:1000) or a name (foo:bar).
    *
    * If the group is omitted, it defaults to the same as the user.
+   * @param opts.expand Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo.txt").
    */
   withFile = (
     path: string,
@@ -2224,6 +2446,7 @@ export class Container extends BaseClient {
    * The user and group can either be an ID (1000:1000) or a name (foo:bar).
    *
    * If the group is omitted, it defaults to the same as the user.
+   * @param opts.expand Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo.txt").
    */
   withFiles = (
     path: string,
@@ -2236,21 +2459,6 @@ export class Container extends BaseClient {
         {
           operation: "withFiles",
           args: { path, sources, ...opts },
-        },
-      ],
-      ctx: this._ctx,
-    })
-  }
-
-  /**
-   * Indicate that subsequent operations should be featured more prominently in the UI.
-   */
-  withFocus = (): Container => {
-    return new Container({
-      queryTree: [
-        ...this._queryTree,
-        {
-          operation: "withFocus",
         },
       ],
       ctx: this._ctx,
@@ -2288,6 +2496,7 @@ export class Container extends BaseClient {
    * The user and group can either be an ID (1000:1000) or a name (foo:bar).
    *
    * If the group is omitted, it defaults to the same as the user.
+   * @param opts.expand Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
    */
   withMountedCache = (
     path: string,
@@ -2319,6 +2528,7 @@ export class Container extends BaseClient {
    * The user and group can either be an ID (1000:1000) or a name (foo:bar).
    *
    * If the group is omitted, it defaults to the same as the user.
+   * @param opts.expand Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
    */
   withMountedDirectory = (
     path: string,
@@ -2346,6 +2556,7 @@ export class Container extends BaseClient {
    * The user and group can either be an ID (1000:1000) or a name (foo:bar).
    *
    * If the group is omitted, it defaults to the same as the user.
+   * @param opts.expand Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo.txt").
    */
   withMountedFile = (
     path: string,
@@ -2376,6 +2587,7 @@ export class Container extends BaseClient {
    * @param opts.mode Permission given to the mounted secret (e.g., 0600).
    *
    * This option requires an owner to be set to be active.
+   * @param opts.expand Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
    */
   withMountedSecret = (
     path: string,
@@ -2397,14 +2609,19 @@ export class Container extends BaseClient {
   /**
    * Retrieves this container plus a temporary directory mounted at the given path. Any writes will be ephemeral to a single withExec call; they will not be persisted to subsequent withExecs.
    * @param path Location of the temporary directory (e.g., "/tmp/temp_dir").
+   * @param opts.size Size of the temporary directory in bytes.
+   * @param opts.expand Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
    */
-  withMountedTemp = (path: string): Container => {
+  withMountedTemp = (
+    path: string,
+    opts?: ContainerWithMountedTempOpts,
+  ): Container => {
     return new Container({
       queryTree: [
         ...this._queryTree,
         {
           operation: "withMountedTemp",
-          args: { path },
+          args: { path, ...opts },
         },
       ],
       ctx: this._ctx,
@@ -2421,6 +2638,7 @@ export class Container extends BaseClient {
    * The user and group can either be an ID (1000:1000) or a name (foo:bar).
    *
    * If the group is omitted, it defaults to the same as the user.
+   * @param opts.expand Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo.txt").
    */
   withNewFile = (
     path: string,
@@ -2532,6 +2750,7 @@ export class Container extends BaseClient {
    * The user and group can either be an ID (1000:1000) or a name (foo:bar).
    *
    * If the group is omitted, it defaults to the same as the user.
+   * @param opts.expand Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
    */
   withUnixSocket = (
     path: string,
@@ -2570,14 +2789,15 @@ export class Container extends BaseClient {
   /**
    * Retrieves this container with a different working directory.
    * @param path The path to set as the working directory (e.g., "/app").
+   * @param opts.expand Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
    */
-  withWorkdir = (path: string): Container => {
+  withWorkdir = (path: string, opts?: ContainerWithWorkdirOpts): Container => {
     return new Container({
       queryTree: [
         ...this._queryTree,
         {
           operation: "withWorkdir",
-          args: { path },
+          args: { path, ...opts },
         },
       ],
       ctx: this._ctx,
@@ -2619,14 +2839,18 @@ export class Container extends BaseClient {
   /**
    * Retrieves this container with the directory at the given path removed.
    * @param path Location of the directory to remove (e.g., ".github/").
+   * @param opts.expand Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
    */
-  withoutDirectory = (path: string): Container => {
+  withoutDirectory = (
+    path: string,
+    opts?: ContainerWithoutDirectoryOpts,
+  ): Container => {
     return new Container({
       queryTree: [
         ...this._queryTree,
         {
           operation: "withoutDirectory",
-          args: { path },
+          args: { path, ...opts },
         },
       ],
       ctx: this._ctx,
@@ -2695,14 +2919,15 @@ export class Container extends BaseClient {
   /**
    * Retrieves this container with the file at the given path removed.
    * @param path Location of the file to remove (e.g., "/file.txt").
+   * @param opts.expand Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo.txt").
    */
-  withoutFile = (path: string): Container => {
+  withoutFile = (path: string, opts?: ContainerWithoutFileOpts): Container => {
     return new Container({
       queryTree: [
         ...this._queryTree,
         {
           operation: "withoutFile",
-          args: { path },
+          args: { path, ...opts },
         },
       ],
       ctx: this._ctx,
@@ -2712,31 +2937,18 @@ export class Container extends BaseClient {
   /**
    * Retrieves this container with the files at the given paths removed.
    * @param paths Location of the files to remove (e.g., ["/file.txt"]).
+   * @param opts.expand Replace "${VAR}" or "$VAR" in the value of paths according to the current environment variables defined in the container (e.g. "/$VAR/foo.txt").
    */
-  withoutFiles = (paths: string[]): Container => {
+  withoutFiles = (
+    paths: string[],
+    opts?: ContainerWithoutFilesOpts,
+  ): Container => {
     return new Container({
       queryTree: [
         ...this._queryTree,
         {
           operation: "withoutFiles",
-          args: { paths },
-        },
-      ],
-      ctx: this._ctx,
-    })
-  }
-
-  /**
-   * Indicate that subsequent operations should not be featured more prominently in the UI.
-   *
-   * This is the initial state of all containers.
-   */
-  withoutFocus = (): Container => {
-    return new Container({
-      queryTree: [
-        ...this._queryTree,
-        {
-          operation: "withoutFocus",
+          args: { paths, ...opts },
         },
       ],
       ctx: this._ctx,
@@ -2763,14 +2975,18 @@ export class Container extends BaseClient {
   /**
    * Retrieves this container after unmounting everything at the given path.
    * @param path Location of the cache directory (e.g., "/cache/node_modules").
+   * @param opts.expand Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
    */
-  withoutMount = (path: string): Container => {
+  withoutMount = (
+    path: string,
+    opts?: ContainerWithoutMountOpts,
+  ): Container => {
     return new Container({
       queryTree: [
         ...this._queryTree,
         {
           operation: "withoutMount",
-          args: { path },
+          args: { path, ...opts },
         },
       ],
       ctx: this._ctx,
@@ -2816,14 +3032,18 @@ export class Container extends BaseClient {
   /**
    * Retrieves this container with a previously added Unix socket removed.
    * @param path Location of the socket to remove (e.g., "/tmp/socket").
+   * @param opts.expand Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/foo").
    */
-  withoutUnixSocket = (path: string): Container => {
+  withoutUnixSocket = (
+    path: string,
+    opts?: ContainerWithoutUnixSocketOpts,
+  ): Container => {
     return new Container({
       queryTree: [
         ...this._queryTree,
         {
           operation: "withoutUnixSocket",
-          args: { path },
+          args: { path, ...opts },
         },
       ],
       ctx: this._ctx,
@@ -3071,7 +3291,10 @@ export class DaggerEngine extends BaseClient {
 export class DaggerEngineCache extends BaseClient {
   private readonly _id?: DaggerEngineCacheID = undefined
   private readonly _keepBytes?: number = undefined
+  private readonly _maxUsedSpace?: number = undefined
+  private readonly _minFreeSpace?: number = undefined
   private readonly _prune?: Void = undefined
+  private readonly _reservedSpace?: number = undefined
 
   /**
    * Constructor is used for internal usage only, do not create object from it.
@@ -3080,13 +3303,19 @@ export class DaggerEngineCache extends BaseClient {
     parent?: { queryTree?: QueryTree[]; ctx: Context },
     _id?: DaggerEngineCacheID,
     _keepBytes?: number,
+    _maxUsedSpace?: number,
+    _minFreeSpace?: number,
     _prune?: Void,
+    _reservedSpace?: number,
   ) {
     super(parent)
 
     this._id = _id
     this._keepBytes = _keepBytes
+    this._maxUsedSpace = _maxUsedSpace
+    this._minFreeSpace = _minFreeSpace
     this._prune = _prune
+    this._reservedSpace = _reservedSpace
   }
 
   /**
@@ -3127,6 +3356,7 @@ export class DaggerEngineCache extends BaseClient {
 
   /**
    * The maximum bytes to keep in the cache without pruning, after which automatic pruning may kick in.
+   * @deprecated Use minFreeSpace instead.
    */
   keepBytes = async (): Promise<number> => {
     if (this._keepBytes) {
@@ -3138,6 +3368,48 @@ export class DaggerEngineCache extends BaseClient {
         ...this._queryTree,
         {
           operation: "keepBytes",
+        },
+      ],
+      await this._ctx.connection(),
+    )
+
+    return response
+  }
+
+  /**
+   * The maximum bytes to keep in the cache without pruning.
+   */
+  maxUsedSpace = async (): Promise<number> => {
+    if (this._maxUsedSpace) {
+      return this._maxUsedSpace
+    }
+
+    const response: Awaited<number> = await computeQuery(
+      [
+        ...this._queryTree,
+        {
+          operation: "maxUsedSpace",
+        },
+      ],
+      await this._ctx.connection(),
+    )
+
+    return response
+  }
+
+  /**
+   * The target amount of free disk space the garbage collector will attempt to leave.
+   */
+  minFreeSpace = async (): Promise<number> => {
+    if (this._minFreeSpace) {
+      return this._minFreeSpace
+    }
+
+    const response: Awaited<number> = await computeQuery(
+      [
+        ...this._queryTree,
+        {
+          operation: "minFreeSpace",
         },
       ],
       await this._ctx.connection(),
@@ -3163,6 +3435,23 @@ export class DaggerEngineCache extends BaseClient {
       ],
       await this._ctx.connection(),
     )
+  }
+  reservedSpace = async (): Promise<number> => {
+    if (this._reservedSpace) {
+      return this._reservedSpace
+    }
+
+    const response: Awaited<number> = await computeQuery(
+      [
+        ...this._queryTree,
+        {
+          operation: "reservedSpace",
+        },
+      ],
+      await this._ctx.connection(),
+    )
+
+    return response
   }
 }
 
@@ -4014,6 +4303,21 @@ export class EnumTypeDef extends BaseClient {
   }
 
   /**
+   * The location of this enum declaration.
+   */
+  sourceMap = (): SourceMap => {
+    return new SourceMap({
+      queryTree: [
+        ...this._queryTree,
+        {
+          operation: "sourceMap",
+        },
+      ],
+      ctx: this._ctx,
+    })
+  }
+
+  /**
    * If this EnumTypeDef is associated with a Module, the name of the module. Unset otherwise.
    */
   sourceModuleName = async (): Promise<string> => {
@@ -4158,6 +4462,21 @@ export class EnumValueTypeDef extends BaseClient {
     )
 
     return response
+  }
+
+  /**
+   * The location of this enum value declaration.
+   */
+  sourceMap = (): SourceMap => {
+    return new SourceMap({
+      queryTree: [
+        ...this._queryTree,
+        {
+          operation: "sourceMap",
+        },
+      ],
+      ctx: this._ctx,
+    })
   }
 }
 
@@ -4336,6 +4655,21 @@ export class FieldTypeDef extends BaseClient {
     )
 
     return response
+  }
+
+  /**
+   * The location of this field declaration.
+   */
+  sourceMap = (): SourceMap => {
+    return new SourceMap({
+      queryTree: [
+        ...this._queryTree,
+        {
+          operation: "sourceMap",
+        },
+      ],
+      ctx: this._ctx,
+    })
   }
 
   /**
@@ -4735,6 +5069,21 @@ export class Function_ extends BaseClient {
   }
 
   /**
+   * The location of this function declaration.
+   */
+  sourceMap = (): SourceMap => {
+    return new SourceMap({
+      queryTree: [
+        ...this._queryTree,
+        {
+          operation: "sourceMap",
+        },
+      ],
+      ctx: this._ctx,
+    })
+  }
+
+  /**
    * Returns the function with the provided argument
    * @param name The name of the argument
    * @param typeDef The type of the argument
@@ -4771,6 +5120,23 @@ export class Function_ extends BaseClient {
         {
           operation: "withDescription",
           args: { description },
+        },
+      ],
+      ctx: this._ctx,
+    })
+  }
+
+  /**
+   * Returns the function with the given source map.
+   * @param sourceMap The source map for the function definition.
+   */
+  withSourceMap = (sourceMap: SourceMap): Function_ => {
+    return new Function_({
+      queryTree: [
+        ...this._queryTree,
+        {
+          operation: "withSourceMap",
+          args: { sourceMap },
         },
       ],
       ctx: this._ctx,
@@ -4939,6 +5305,21 @@ export class FunctionArg extends BaseClient {
     )
 
     return response
+  }
+
+  /**
+   * The location of this arg declaration.
+   */
+  sourceMap = (): SourceMap => {
+    return new SourceMap({
+      queryTree: [
+        ...this._queryTree,
+        {
+          operation: "sourceMap",
+        },
+      ],
+      ctx: this._ctx,
+    })
   }
 
   /**
@@ -6231,6 +6612,21 @@ export class InterfaceTypeDef extends BaseClient {
     )
 
     return response
+  }
+
+  /**
+   * The location of this interface declaration.
+   */
+  sourceMap = (): SourceMap => {
+    return new SourceMap({
+      queryTree: [
+        ...this._queryTree,
+        {
+          operation: "sourceMap",
+        },
+      ],
+      ctx: this._ctx,
+    })
   }
 
   /**
@@ -7949,6 +8345,21 @@ export class ObjectTypeDef extends BaseClient {
   }
 
   /**
+   * The location of this object declaration.
+   */
+  sourceMap = (): SourceMap => {
+    return new SourceMap({
+      queryTree: [
+        ...this._queryTree,
+        {
+          operation: "sourceMap",
+        },
+      ],
+      ctx: this._ctx,
+    })
+  }
+
+  /**
    * If this ObjectTypeDef is associated with a Module, the name of the module. Unset otherwise.
    */
   sourceModuleName = async (): Promise<string> => {
@@ -9024,6 +9435,22 @@ export class Client extends BaseClient {
   }
 
   /**
+   * Load a SourceMap from its ID.
+   */
+  loadSourceMapFromID = (id: SourceMapID): SourceMap => {
+    return new SourceMap({
+      queryTree: [
+        ...this._queryTree,
+        {
+          operation: "loadSourceMapFromID",
+          args: { id },
+        },
+      ],
+      ctx: this._ctx,
+    })
+  }
+
+  /**
    * Load a Terminal from its ID.
    */
   loadTerminalFromID = (id: TerminalID): Terminal => {
@@ -9094,6 +9521,7 @@ export class Client extends BaseClient {
   /**
    * Create a new module source instance from a source ref string.
    * @param refString The string ref representation of the module source
+   * @param opts.refPin The pinned version of the module source
    * @param opts.stable If true, enforce that the source is a stable version for source kinds that support versioning.
    * @param opts.relHostPath The relative path to the module root from the host directory
    */
@@ -9143,6 +9571,25 @@ export class Client extends BaseClient {
         {
           operation: "setSecret",
           args: { name, plaintext },
+        },
+      ],
+      ctx: this._ctx,
+    })
+  }
+
+  /**
+   * Creates source map metadata.
+   * @param filename The filename from the module source.
+   * @param line The line number within the filename.
+   * @param column The column number within the line.
+   */
+  sourceMap = (filename: string, line: number, column: number): SourceMap => {
+    return new SourceMap({
+      queryTree: [
+        ...this._queryTree,
+        {
+          operation: "sourceMap",
+          args: { filename, line, column },
         },
       ],
       ctx: this._ctx,
@@ -9600,6 +10047,32 @@ export class Service extends BaseClient {
       await this._ctx.connection(),
     )
   }
+
+  /**
+   * Configures a hostname which can be used by clients within the session to reach this container.
+   * @param hostname The hostname to use.
+   */
+  withHostname = (hostname: string): Service => {
+    return new Service({
+      queryTree: [
+        ...this._queryTree,
+        {
+          operation: "withHostname",
+          args: { hostname },
+        },
+      ],
+      ctx: this._ctx,
+    })
+  }
+
+  /**
+   * Call the provided function with current Service.
+   *
+   * This is useful for reusability and readability by not breaking the calling chain.
+   */
+  with = (arg: (param: Service) => Service) => {
+    return arg(this)
+  }
 }
 
 /**
@@ -9633,6 +10106,142 @@ export class Socket extends BaseClient {
         ...this._queryTree,
         {
           operation: "id",
+        },
+      ],
+      await this._ctx.connection(),
+    )
+
+    return response
+  }
+}
+
+/**
+ * Source location information.
+ */
+export class SourceMap extends BaseClient {
+  private readonly _id?: SourceMapID = undefined
+  private readonly _column?: number = undefined
+  private readonly _filename?: string = undefined
+  private readonly _line?: number = undefined
+  private readonly _module?: string = undefined
+
+  /**
+   * Constructor is used for internal usage only, do not create object from it.
+   */
+  constructor(
+    parent?: { queryTree?: QueryTree[]; ctx: Context },
+    _id?: SourceMapID,
+    _column?: number,
+    _filename?: string,
+    _line?: number,
+    _module?: string,
+  ) {
+    super(parent)
+
+    this._id = _id
+    this._column = _column
+    this._filename = _filename
+    this._line = _line
+    this._module = _module
+  }
+
+  /**
+   * A unique identifier for this SourceMap.
+   */
+  id = async (): Promise<SourceMapID> => {
+    if (this._id) {
+      return this._id
+    }
+
+    const response: Awaited<SourceMapID> = await computeQuery(
+      [
+        ...this._queryTree,
+        {
+          operation: "id",
+        },
+      ],
+      await this._ctx.connection(),
+    )
+
+    return response
+  }
+
+  /**
+   * The column number within the line.
+   */
+  column = async (): Promise<number> => {
+    if (this._column) {
+      return this._column
+    }
+
+    const response: Awaited<number> = await computeQuery(
+      [
+        ...this._queryTree,
+        {
+          operation: "column",
+        },
+      ],
+      await this._ctx.connection(),
+    )
+
+    return response
+  }
+
+  /**
+   * The filename from the module source.
+   */
+  filename = async (): Promise<string> => {
+    if (this._filename) {
+      return this._filename
+    }
+
+    const response: Awaited<string> = await computeQuery(
+      [
+        ...this._queryTree,
+        {
+          operation: "filename",
+        },
+      ],
+      await this._ctx.connection(),
+    )
+
+    return response
+  }
+
+  /**
+   * The line number within the filename.
+   */
+  line = async (): Promise<number> => {
+    if (this._line) {
+      return this._line
+    }
+
+    const response: Awaited<number> = await computeQuery(
+      [
+        ...this._queryTree,
+        {
+          operation: "line",
+        },
+      ],
+      await this._ctx.connection(),
+    )
+
+    return response
+  }
+
+  /**
+   * The module dependency this was declared in.
+   */
+  module_ = async (): Promise<string> => {
+    if (this._module) {
+      return this._module
+    }
+
+    const response: Awaited<string> = await computeQuery(
+      [
+        ...this._queryTree,
+        {
+          operation: "module",
         },
       ],
       await this._ctx.connection(),
@@ -9913,6 +10522,7 @@ export class TypeDef extends BaseClient {
    * Note that an enum's values may be omitted if the intent is only to refer to an enum. This is how functions are able to return their own, or any other circular reference.
    * @param name The name of the enum
    * @param opts.description A doc string for the enum, if any
+   * @param opts.sourceMap The source map for the enum definition.
    */
   withEnum = (name: string, opts?: TypeDefWithEnumOpts): TypeDef => {
     return new TypeDef({
@@ -9931,6 +10541,7 @@ export class TypeDef extends BaseClient {
    * Adds a static value for an Enum TypeDef, failing if the type is not an enum.
    * @param value The name of the value in the enum
    * @param opts.description A doc string for the value, if any
+   * @param opts.sourceMap The source map for the enum value definition.
    */
   withEnumValue = (value: string, opts?: TypeDefWithEnumValueOpts): TypeDef => {
     return new TypeDef({
@@ -9950,6 +10561,7 @@ export class TypeDef extends BaseClient {
    * @param name The name of the field in the object
    * @param typeDef The type of the field
    * @param opts.description A doc string for the field, if any
+   * @param opts.sourceMap The source map for the field definition.
    */
   withField = (
     name: string,

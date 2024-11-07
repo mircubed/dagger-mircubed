@@ -562,7 +562,7 @@ func (m *Test) Greet(ctx context.Context) (string, error) {
 		).
 		WithWorkdir("/work/dep").
 		With(daggerExec("init", "--name=dep", "--sdk=python")).
-		With(sdkSource("python", `import dagger
+		With(fileContents("src/dep/__init__.py", `import dagger
 
 @dagger.object_type
 class Dep:
@@ -586,6 +586,43 @@ func (LegacySuite) TestGitWithKeepDir(ctx context.Context, t *testctx.T) {
 	// Changed in dagger/dagger#8318
 	//
 	// Ensure that the old schemas default to keeping KeepGitDir.
+	//
+	// v0.9.9 is a very old version that ensures we call treeLegacy+gitLegacy
+	// v0.12.6 is a more recent version that ensures we call gitLegacy
+
+	c := connect(ctx, t)
+
+	for _, version := range []string{"v0.9.9", "0.12.6"} {
+		ctr := daggerCliBase(t, c).
+			With(daggerExec("init", "--name=test", "--sdk=go", "--source=.")).
+			WithWorkdir("/work").
+			WithNewFile("dagger.json", fmt.Sprintf(`{"name": "test", "sdk": "go", "source": ".", "engineVersion": "%s"}`, version)).
+			WithNewFile("main.go", `package main
+
+import (
+	"context"
+	"dagger/test/internal/dagger"
+)
+
+type Test struct {}
+
+func (m *Test) GetCommit(ctx context.Context, cmtID string) (string, error) {
+	return dag.Git("github.com/dagger/dagger", dagger.GitOpts{KeepGitDir: true}).Commit(cmtID).Commit(ctx)
+}
+
+func (m *Test) GetContents(ctx context.Context, cmtID string) (string, error) {
+	return dag.Git("github.com/dagger/dagger", dagger.GitOpts{KeepGitDir: true}).Commit(cmtID).Tree().File(".git/HEAD").Contents(ctx)
+}
+`)
+
+		out, err := ctr.With(daggerCall("get-commit", "--cmtID=c80ac2c13df7d573a069938e01ca13f7a81f0345")).Stdout(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "c80ac2c13df7d573a069938e01ca13f7a81f0345", out)
+
+		out, err = ctr.With(daggerCall("get-contents", "--cmtID=c80ac2c13df7d573a069938e01ca13f7a81f0345")).Stdout(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "c80ac2c13df7d573a069938e01ca13f7a81f0345\n", out)
+	}
 
 	type result struct {
 		Commit string
@@ -604,25 +641,6 @@ func (LegacySuite) TestGitWithKeepDir(ctx context.Context, t *testctx.T) {
 
 	err := testutil.Query(t,
 		`{
-			git(url: "github.com/dagger/dagger", keepGitDir: true) {
-				commit(id: "c80ac2c13df7d573a069938e01ca13f7a81f0345") {
-					commit
-					tree {
-						file(path: ".git/HEAD") {
-							contents
-						}
-					}
-				}
-			}
-		}`, &res, &testutil.QueryOptions{
-			Version: "v0.12.6",
-		})
-	require.NoError(t, err)
-	require.Equal(t, "c80ac2c13df7d573a069938e01ca13f7a81f0345", res.Git.Commit.Commit)
-	require.Equal(t, "c80ac2c13df7d573a069938e01ca13f7a81f0345\n", res.Git.Commit.Tree.File.Contents)
-
-	err = testutil.Query(t,
-		`{
 			git(url: "github.com/dagger/dagger") {
 				commit(id: "c80ac2c13df7d573a069938e01ca13f7a81f0345") {
 					commit
@@ -637,4 +655,82 @@ func (LegacySuite) TestGitWithKeepDir(ctx context.Context, t *testctx.T) {
 			Version: "v0.12.6",
 		})
 	require.ErrorContains(t, err, ".git/HEAD: no such file or directory")
+}
+
+func (LegacySuite) TestGoUnscopedEnumValues(ctx context.Context, t *testctx.T) {
+	// Changed in dagger/dagger#8669
+	//
+	// Ensure that old dagger unscoped enum values are preserved.
+
+	c := connect(ctx, t)
+
+	mod := daggerCliBase(t, c).
+		With(daggerExec("init", "--name=test", "--sdk=go", "--source=.")).
+		WithNewFile("dagger.json", `{"name": "test", "sdk": "go", "source": ".", "engineVersion": "v0.13.4"}`).
+		WithNewFile("main.go", `package main
+
+import "dagger/test/internal/dagger"
+
+type Test struct {}
+
+func (m *Test) OldProto(proto dagger.NetworkProtocol) dagger.NetworkProtocol {
+	switch proto {
+	case dagger.Tcp:
+		return dagger.Udp
+	case dagger.Udp:
+		return dagger.Tcp
+	default:
+		panic("nope")
+	}
+}
+
+func (m *Test) NewProto(proto dagger.NetworkProtocol) dagger.NetworkProtocol {
+	switch proto {
+	case dagger.NetworkProtocolTcp:
+		return dagger.NetworkProtocolUdp
+	case dagger.NetworkProtocolUdp:
+		return dagger.NetworkProtocolTcp
+	default:
+		panic("nope")
+	}
+}
+`,
+		)
+
+	out, err := mod.
+		With(daggerCall("old-proto", "--proto=TCP")).
+		Stdout(ctx)
+	require.NoError(t, err)
+	require.Contains(t, out, "UDP")
+
+	out, err = mod.
+		With(daggerCall("new-proto", "--proto=TCP")).
+		Stdout(ctx)
+	require.NoError(t, err)
+	require.Contains(t, out, "UDP")
+}
+
+func (LegacySuite) TestContainerWithFocus(ctx context.Context, t *testctx.T) {
+	// Changed in dagger/dagger#8647
+	//
+	// Ensure that the old schemas still have withFocus/withoutFocus.
+
+	var res any
+	err := testutil.Query(t,
+		`{
+			container {
+				from(address: "alpine") {
+					withFocus {
+						withoutFocus {
+							withExec(args: ["echo", "hello world"]) {
+								sync
+							}
+						}
+					}
+				}
+			}
+		}`, &res, &testutil.QueryOptions{
+			Version: "v0.13.3",
+		})
+	require.NoError(t, err)
 }

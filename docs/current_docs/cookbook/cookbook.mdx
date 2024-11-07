@@ -11,7 +11,11 @@ import TabItem from "@theme/TabItem";
 
 ### Copy a directory or remote repository to a container
 
-The following Dagger Function accepts a `Directory` argument, which could reference either a directory from the local filesystem or from a remote Git repository. It copies the specified directory to the `/src` path in a container and returns the modified container.
+The following Dagger Function accepts a `Directory` argument, which could reference either a directory from the local filesystem or from a [remote Git repository](../api/arguments.mdx#remote-repositories). It copies the specified directory to the `/src` path in a container and returns the modified container.
+
+:::note
+When working with private Git repositories, ensure that [SSH authentication is properly configured](../api/remote-modules.mdx#configuring-ssh-authentication) on your Dagger host.
+:::
 
 <Tabs groupId="language">
 <TabItem value="Go">
@@ -42,27 +46,34 @@ The following Dagger Function accepts a `Directory` argument, which could refere
     dagger call copy-directory --source=./myapp/
     ```
 
-- Copy the `dagger/dagger` GitHub repository to `/src` in the container and return the modified container:
+- Copy the public `dagger/dagger` GitHub repository to `/src` in the container and return the modified container:
 
     ```shell
     dagger call copy-directory --source=github.com/dagger/dagger#main
     ```
 
-- Copy the `dagger/dagger` GitHub repository to `/src` in the container and list the contents of the directory:
+- Copy the private `user/foo` GitHub repository to `/src` in the container and return the modified container:
 
     ```shell
-    dagger call \
-      copy-directory --source=https://github.com/dagger/dagger#main \
-      directory --path=/src \
-      entries
+    dagger call copy-directory --source=ssh://git@github.com/user/foo#main
+    ```
+
+- Copy the public `dagger/dagger` GitHub repository to `/src` in the container and list the contents of the directory:
+
+    ```shell
+    dagger call copy-directory --source=https://github.com/dagger/dagger#main  directory --path=/src entries
     ```
 
 ### Modify a copied directory or remote repository in a container
 
-The following Dagger Function accepts a `Directory` argument, which could reference either a directory from the local filesystem or from a remote Git repository. It copies the specified directory to the `/src` path in a container, adds a file to it, and returns the modified container.
+The following Dagger Function accepts a `Directory` argument, which could reference either a directory from the local filesystem or from a [remote Git repository](../api/arguments.mdx#remote-repositories). It copies the specified directory to the `/src` path in a container, adds a file to it, and returns the modified container.
 
 :::note
 Modifications made to a directory's contents after it is written to a container filesystem do not appear on the source. Data flows only one way between Dagger operations, because they are connected in a DAG. To transfer modifications back to the local host, you must explicitly export the directory back to the host filesystem.
+:::
+
+:::note
+When working with private Git repositories, ensure that [SSH authentication is properly configured](../api/remote-modules.mdx#configuring-ssh-authentication) on your Dagger host.
 :::
 
 <Tabs groupId="language">
@@ -94,19 +105,22 @@ Modifications made to a directory's contents after it is written to a container 
     dagger call copy-and-modify-directory --source=./myapp/
     ```
 
-- Copy the `dagger/dagger` GitHub repository to `/src` in the container, add a file to it, and return the modified container:
+- Copy the public `dagger/dagger` GitHub repository to `/src` in the container, add a file to it, and return the modified container:
 
     ```shell
     dagger call copy-and-modify-directory --source=github.com/dagger/dagger#main
     ```
 
-- Copy the `dagger/dagger` GitHub repository to `/src` in the container, add a file to it, and list the contents of the directory:
+- Copy the private `user/foo` GitHub repository to `/src` in the container, add a file to it, and return the modified container:
 
     ```shell
-    dagger call \
-      copy-and-modify-directory --source=https://github.com/dagger/dagger#main \
-      directory --path=/src \
-      entries
+    dagger call copy-and-modify-directory --source=ssh://git@github.com/user/foo#main
+    ```
+
+- Copy the public `dagger/dagger` GitHub repository to `/src` in the container, add a file to it, and list the contents of the directory:
+
+    ```shell
+    dagger call copy-and-modify-directory --source=https://github.com/dagger/dagger#main directory --path=/src entries
     ```
 
 ### Copy a file to a container
@@ -145,15 +159,16 @@ The following Dagger Function accepts a `File` argument representing the host fi
 -  Copy the `/home/admin/archives.zip` file on the host to the `/src` directory in the container and list the contents of the directory:
 
     ```shell
-    dagger call \
-      copy-file --f=/home/admin/archives.zip \
-      directory --path=/src \
-      entries
+    dagger call copy-file --f=/home/admin/archives.zip directory --path=/src entries
     ```
 
 ### Copy a subset of a directory or remote repository to a container
 
-The following Dagger Function accepts a `Directory` argument, which could reference either a directory from the local filesystem or from a remote Git repository. It copies the specified directory to the `/src` path in a container, using wildcard patterns to exclude specified sub-directories and files, and returns the modified container.
+The following Dagger Function accepts a `Directory` argument, which could reference either a directory from the local filesystem or from a [remote Git repository](../api/arguments.mdx#remote-repositories). It copies the specified directory to the `/src` path in a container, using wildcard patterns to exclude specified sub-directories and files, and returns the modified container.
+
+:::note
+When working with private Git repositories, ensure that [SSH authentication is properly configured](../api/remote-modules.mdx#configuring-ssh-authentication) on your Dagger host.
+:::
 
 <Tabs groupId="language">
 <TabItem value="Go">
@@ -184,13 +199,16 @@ The following Dagger Function accepts a `Directory` argument, which could refere
     dagger call copy-directory-with-exclusions --source=. --exclude-directory=dagger --exclude-file=dagger.json
     ```
 
-- Copy the `dagger/dagger` GitHub repository to `/src` in the container, excluding all `*.md` files, and list the contents of the directory:
+- Copy the public `dagger/dagger` GitHub repository to `/src` in the container, excluding all Markdown files, and list the contents of the directory:
 
     ```shell
-    dagger call \
-      copy-directory-with-exclusions --source=https://github.com/dagger/dagger#main --exclude-file=*.md \
-      directory --path=/src \
-      entries
+    dagger call copy-directory-with-exclusions --source=https://github.com/dagger/dagger#main --exclude-file='*.md' directory --path=/src entries
+    ```
+
+- Copy the private `user/foo` GitHub repository to `/src` in the container, excluding all Markdown files, and list the contents of the directory:
+
+    ```shell
+    dagger call copy-directory-with-exclusions --source=ssh://git@github.com/user/foo#main --exclude-file='*.md' directory --path=/src entries
     ```
 
 ## Builds
@@ -453,13 +471,11 @@ dagger call build
 
 ### Invalidate cache
 
-The following function demonstrates how to invalidate the Dagger pipeline
-operations cache and force execution of subsequent pipeline steps, by
-introducing a volatile time variable at a specific point in the Dagger pipeline.
+The following function demonstrates how to invalidate the Dagger layer cache and force execution of subsequent pipeline steps, by introducing a volatile time variable at a specific point in the Dagger pipeline.
 
 :::note
 * This is a temporary workaround until cache invalidation support is officially added to Dagger.
-* Changes in mounted cache volumes or secrets do not invalidate the Dagger pipeline operations cache.
+* Changes in mounted cache volumes or secrets do not invalidate the Dagger layer cache.
 :::
 
 <Tabs groupId="language">
@@ -485,7 +501,7 @@ introducing a volatile time variable at a specific point in the Dagger pipeline.
 
 #### Example
 
-Execute a build, invalidating the cache on each run:
+Print the date and time, invalidating the cache on each run. However, if the `CACHEBUSTER` environment variable is removed, the same value (the date and time on the first run) is printed on every run.
 
 ```shell
 dagger call build
@@ -625,19 +641,19 @@ The first Dagger Function below creates and returns an HTTP service. This servic
 <Tabs groupId="language">
 <TabItem value="Go">
 
-```go file=../manuals/developer/snippets/services/bind-services/go/main.go
+```go file=../api/snippets/services/bind-services/go/main.go
 ```
 
 </TabItem>
 <TabItem value="Python">
 
-```python file=../manuals/developer/snippets/services/bind-services/python/main.py
+```python file=../api/snippets/services/bind-services/python/main.py
 ```
 
 </TabItem>
 <TabItem value="TypeScript">
 
-```typescript file=../manuals/developer/snippets/services/bind-services/typescript/index.ts
+```typescript file=../api/snippets/services/bind-services/typescript/index.ts
 ```
 
 </TabItem>
@@ -658,19 +674,19 @@ The Dagger Function below creates and returns an HTTP service. This service can 
 <Tabs groupId="language">
 <TabItem value="Go">
 
-```go file=../manuals/developer/snippets/services/expose-dagger-services-to-host/go/main.go
+```go file=../api/snippets/services/expose-dagger-services-to-host/go/main.go
 ```
 
 </TabItem>
 <TabItem value="Python">
 
-```python file=../manuals/developer/snippets/services/expose-dagger-services-to-host/python/main.py
+```python file=../api/snippets/services/expose-dagger-services-to-host/python/main.py
 ```
 
 </TabItem>
 <TabItem value="TypeScript">
 
-```typescript file=../manuals/developer/snippets/services/expose-dagger-services-to-host/typescript/index.ts
+```typescript file=../api/snippets/services/expose-dagger-services-to-host/typescript/index.ts
 ```
 
 </TabItem>
@@ -690,9 +706,7 @@ The Dagger Function below creates and returns an HTTP service. This service can 
 - Expose the HTTP service instantiated by a Dagger Function to the host on a different host port:
 
     ```shell
-    dagger call \
-      http-service \
-      up --ports 9000:8080
+    dagger call  http-service up --ports 9000:8080
 
     # access the service from the host
     curl localhost:9000
@@ -709,19 +723,19 @@ This implies that a service is already listening on a port on the host, out-of-b
 <Tabs groupId="language">
 <TabItem value="Go">
 
-```go file=../manuals/developer/snippets/services/expose-host-services-to-dagger/go/main.go
+```go file=../api/snippets/services/expose-host-services-to-dagger/go/main.go
 ```
 
 </TabItem>
 <TabItem value="Python">
 
-```python file=../manuals/developer/snippets/services/expose-host-services-to-dagger/python/main.py
+```python file=../api/snippets/services/expose-host-services-to-dagger/python/main.py
 ```
 
 </TabItem>
 <TabItem value="TypeScript">
 
-```typescript file=../manuals/developer/snippets/services/expose-host-services-to-dagger/typescript/index.ts
+```typescript file=../api/snippets/services/expose-host-services-to-dagger/typescript/index.ts
 ```
 
 </TabItem>
@@ -743,19 +757,19 @@ The following Dagger Function creates a service and binds it to an application c
 <Tabs groupId="language">
 <TabItem value="Go">
 
-```go file=../manuals/developer/snippets/services/test-against-db-service/go/main.go
+```go file=../api/snippets/services/test-against-db-service/go/main.go
 ```
 
 </TabItem>
 <TabItem value="Python">
 
-```python file=../manuals/developer/snippets/services/test-against-db-service/python/main.py
+```python file=../api/snippets/services/test-against-db-service/python/main.py
 ```
 
 </TabItem>
 <TabItem value="TypeScript">
 
-```typescript file=../manuals/developer/snippets/services/test-against-db-service/typescript/index.ts
+```typescript file=../api/snippets/services/test-against-db-service/typescript/index.ts
 ```
 
 </TabItem>
@@ -776,19 +790,19 @@ The following Dagger Function demonstrates how to control a service's lifecycle 
 <Tabs groupId="language">
 <TabItem value="Go">
 
-```go file=../manuals/developer/snippets/services/start-stop-services/go/main.go
+```go file=../api/snippets/services/start-stop-services/go/main.go
 ```
 
 </TabItem>
 <TabItem value="Python">
 
-```python file=../manuals/developer/snippets/services/start-stop-services/python/main.py
+```python file=../api/snippets/services/start-stop-services/python/main.py
 ```
 
 </TabItem>
 <TabItem value="TypeScript">
 
-```typescript file=../manuals/developer/snippets/services/start-stop-services/typescript/index.ts
+```typescript file=../api/snippets/services/start-stop-services/typescript/index.ts
 ```
 
 </TabItem>
@@ -912,17 +926,13 @@ The following Dagger Functions return a just-in-time directory and file. These o
 - Export the directory returned by the Dagger Function to the `/home/admin/export` path on the host:
 
     ```shell
-    dagger call \
-      get-dir \
-      export --path=/home/admin/export
+    dagger call get-dir export --path=/home/admin/export
     ```
 
 - Export the file returned by the Dagger Function to the `/home/admin/myfile` path on the host:
 
     ```shell
-    dagger call \
-      get-file \
-      export --path=/home/admin/myfile
+    dagger call get-file export --path=/home/admin/myfile
     ```
 
 ### Export a container image to the host
@@ -955,9 +965,7 @@ The following Dagger Function returns a just-in-time container. This can be expo
 Export the container image returned by the Dagger Function as an OCI tarball to the `/home/admin/mycontainer.tgz` path on the host. This OCI tarball can then be loaded into Docker with `docker load ...`.
 
 ```shell
-dagger call \
-  base \
-  export --path=/home/admin/mycontainer.tgz
+dagger call base export --path=/home/admin/mycontainer.tgz
 ```
 
 ## Optimizations
@@ -997,6 +1005,29 @@ dagger call build --source=.
 
 ### Set environment variables in a container
 
+The following Dagger Function demonstrates how to set a single environment variable in a container.
+
+<Tabs groupId="language">
+<TabItem value="Go">
+
+```go file=./snippets/set-env-var/go/main.go
+```
+
+</TabItem>
+<TabItem value="Python">
+
+```python file=./snippets/set-env-var/python/main.py
+```
+
+</TabItem>
+<TabItem value="TypeScript">
+
+```typescript file=./snippets/set-env-var/typescript/index.ts
+```
+
+</TabItem>
+</Tabs>
+
 The following Dagger Function demonstrates how to set multiple environment variables in a container.
 
 <Tabs groupId="language">
@@ -1022,10 +1053,16 @@ The following Dagger Function demonstrates how to set multiple environment varia
 
 #### Example
 
-Set environment variables in a container:
+Set a single environment variable in a container:
 
 ```shell
-dagger call set-env
+dagger call set-env-var
+```
+
+Set multiple environment variables in a container:
+
+```shell
+dagger call set-env-vars
 ```
 
 ### Persist service state across runs
@@ -1036,19 +1073,19 @@ The following Dagger Function uses a cache volume to persist a Redis service's d
 <Tabs groupId="language">
 <TabItem value="Go">
 
-```go file=../manuals/developer/snippets/services/persist-service-state/go/main.go
+```go file=../api/snippets/services/persist-service-state/go/main.go
 ```
 
 </TabItem>
 <TabItem value="Python">
 
-```python file=../manuals/developer/snippets/services/persist-service-state/python/main.py
+```python file=../api/snippets/services/persist-service-state/python/main.py
 ```
 
 </TabItem>
 <TabItem value="TypeScript">
 
-```typescript file=../manuals/developer/snippets/services/persist-service-state/typescript/index.ts
+```typescript file=../api/snippets/services/persist-service-state/typescript/index.ts
 ```
 
 </TabItem>
@@ -1128,7 +1165,7 @@ The caveat with this approach is that forcing a zero exit code on a failure cach
 </TabItem>
 <TabItem value="TypeScript">
 
-```typescript file=./snippets/continue-after-errors/typescript/index.ts
+```typescript file=./snippets/continue-after-errors/typescript/src/index.ts
 ```
 
 </TabItem>
@@ -1157,18 +1194,18 @@ The following Dagger Function opens an interactive terminal session at different
 <Tabs groupId="language">
 <TabItem value="Go">
 
-```go file=../manuals/developer/snippets/debugging/go/terminal-container/main.go
+```go file=../api/snippets/debugging/go/terminal-container/main.go
 ```
 
 </TabItem>
 <TabItem value="Python">
-```python file=../manuals/developer/snippets/debugging/python/terminal-container/main.py
+```python file=../api/snippets/debugging/python/terminal-container/main.py
 ```
 
 </TabItem>
 <TabItem value="TypeScript">
 
-```typescript file=../manuals/developer/snippets/debugging/typescript/terminal-container/index.ts
+```typescript file=../api/snippets/debugging/typescript/terminal-container/index.ts
 ```
 
 </TabItem>
@@ -1190,18 +1227,18 @@ The following Dagger Function clones Dagger's GitHub repository and opens an int
 <Tabs groupId="language">
 <TabItem value="Go">
 
-```go file=../manuals/developer/snippets/debugging/go/terminal-directory-1/main.go
+```go file=../api/snippets/debugging/go/terminal-directory-1/main.go
 ```
 
 </TabItem>
 <TabItem value="Python">
-```python file=../manuals/developer/snippets/debugging/python/terminal-directory-1/main.py
+```python file=../api/snippets/debugging/python/terminal-directory-1/main.py
 ```
 
 </TabItem>
 <TabItem value="TypeScript">
 
-```typescript file=../manuals/developer/snippets/debugging/typescript/terminal-directory-1/index.ts
+```typescript file=../api/snippets/debugging/typescript/terminal-directory-1/index.ts
 ```
 
 </TabItem>
@@ -1212,18 +1249,18 @@ The container created to mount the directory can be customized using additional 
 <Tabs groupId="language">
 <TabItem value="Go">
 
-```go file=../manuals/developer/snippets/debugging/go/terminal-directory-2/main.go
+```go file=../api/snippets/debugging/go/terminal-directory-2/main.go
 ```
 
 </TabItem>
 <TabItem value="Python">
-```python file=../manuals/developer/snippets/debugging/python/terminal-directory-2/main.py
+```python file=../api/snippets/debugging/python/terminal-directory-2/main.py
 ```
 
 </TabItem>
 <TabItem value="TypeScript">
 
-```typescript file=../manuals/developer/snippets/debugging/typescript/terminal-directory-2/index.ts
+```typescript file=../api/snippets/debugging/typescript/terminal-directory-2/index.ts
 ```
 
 </TabItem>

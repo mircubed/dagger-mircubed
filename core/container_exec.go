@@ -6,12 +6,14 @@ import (
 	"os"
 	"path"
 	"slices"
+	"strconv"
 	"strings"
 
 	"dagger.io/dagger/telemetry"
 	"github.com/dagger/dagger/dagql"
 	"github.com/dagger/dagger/engine"
 	"github.com/dagger/dagger/engine/buildkit"
+	"github.com/dagger/dagger/network"
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/identity"
 	"github.com/pkg/errors"
@@ -36,6 +38,9 @@ type ContainerExecOpts struct {
 	// Redirect the command's standard error to a file in the container
 	RedirectStderr string `default:""`
 
+	// Exit codes this exec is allowed to exit with
+	Expect ReturnTypes `default:"SUCCESS"`
+
 	// Provide the executed command access back to the Dagger API
 	ExperimentalPrivilegedNesting bool `default:"false"`
 
@@ -44,6 +49,13 @@ type ContainerExecOpts struct {
 
 	// (Internal-only) If this is a nested exec, exec metadata to use for it
 	NestedExecMetadata *buildkit.ExecutionMetadata `name:"-"`
+
+	// Expand the environment variables in args
+	Expand bool `default:"false"`
+
+	// Skip the init process injected into containers by default so that the
+	// user's process is PID 1
+	NoInit bool `default:"false"`
 }
 
 func (container *Container) WithExec(ctx context.Context, opts ContainerExecOpts) (*Container, error) { //nolint:gocyclo
@@ -88,6 +100,21 @@ func (container *Container) WithExec(ctx context.Context, opts ContainerExecOpts
 	execMD.SystemEnvNames = container.SystemEnvNames
 	execMD.EnabledGPUs = container.EnabledGPUs
 
+	if opts.NoInit {
+		execMD.NoInit = true
+		// include an env var (which will be removed before the exec actually runs) so that execs with
+		// inits disabled will be cached differently than those with them enabled by buildkit
+		runOpts = append(runOpts, llb.AddEnv(buildkit.DaggerNoInitEnv, "true"))
+	}
+
+	mod, err := container.Query.CurrentModule(ctx)
+	if err == nil {
+		// allow the exec to reach services scoped to the module that
+		// installed it
+		execMD.ExtraSearchDomains = append(execMD.ExtraSearchDomains,
+			network.ModuleDomain(mod.InstanceID, clientMetadata.SessionID))
+	}
+
 	// if GPU parameters are set for this container pass them over:
 	if len(execMD.EnabledGPUs) > 0 {
 		if gpuSupportEnabled := os.Getenv("_EXPERIMENTAL_DAGGER_GPU_SUPPORT"); gpuSupportEnabled == "" {
@@ -120,14 +147,17 @@ func (container *Container) WithExec(ctx context.Context, opts ContainerExecOpts
 
 		// include the engine version so that these execs get invalidated if the engine/API change
 		runOpts = append(runOpts, llb.AddEnv(buildkit.DaggerEngineVersionEnv, engine.Version))
+	}
 
-		// include a digest of the current call so that we scope of the cache of the ExecOp to this call
+	if execMD.CachePerSession {
+		// include the SessionID here so that we bust cache once-per-session
+		runOpts = append(runOpts, llb.AddEnv(buildkit.DaggerSessionIDEnv, clientMetadata.SessionID))
+	}
+
+	if execMD.CacheByCall {
+		// include a digest of the current call so that we scope of the cache of the ExecOp to this call's args
+		// and receiver values. Currently only used for module function calls.
 		runOpts = append(runOpts, llb.AddEnv(buildkit.DaggerCallDigestEnv, string(dagql.CurrentID(ctx).Digest())))
-
-		if execMD.CachePerSession {
-			// include the SessionID here so that we bust cache once-per-session
-			runOpts = append(runOpts, llb.AddEnv(buildkit.DaggerSessionIDEnv, clientMetadata.SessionID))
-		}
 	}
 
 	runOpts = append(runOpts, llb.WithCustomName(spanName))
@@ -259,7 +289,7 @@ func (container *Container) WithExec(ctx context.Context, opts ContainerExecOpts
 		}
 
 		if mnt.Tmpfs {
-			mountOpts = append(mountOpts, llb.Tmpfs())
+			mountOpts = append(mountOpts, llb.Tmpfs(llb.TmpfsSize(int64(mnt.Size))))
 		}
 
 		if mnt.Readonly {
@@ -268,6 +298,8 @@ func (container *Container) WithExec(ctx context.Context, opts ContainerExecOpts
 
 		runOpts = append(runOpts, llb.AddMount(mnt.Target, srcSt, mountOpts...))
 	}
+
+	runOpts = append(runOpts, llb.ValidExitCodes(opts.Expect.ReturnCodes()...))
 
 	if opts.InsecureRootCapabilities {
 		runOpts = append(runOpts, llb.Security(llb.SecurityModeInsecure))
@@ -333,6 +365,21 @@ func (container *Container) Stdout(ctx context.Context) (string, error) {
 
 func (container *Container) Stderr(ctx context.Context) (string, error) {
 	return container.metaFileContents(ctx, buildkit.MetaMountStderrPath)
+}
+
+func (container *Container) ExitCode(ctx context.Context) (int, error) {
+	contents, err := container.metaFileContents(ctx, buildkit.MetaMountExitCodePath)
+	if err != nil {
+		return 0, err
+	}
+	contents = strings.TrimSpace(contents)
+
+	code, err := strconv.ParseInt(contents, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("could not parse exit code %q: %w", contents, err)
+	}
+
+	return int(code), nil
 }
 
 func (container *Container) usedClientID(ctx context.Context) (string, error) {

@@ -3,10 +3,14 @@ package core
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"crypto/rand"
 	_ "embed"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path"
@@ -1708,31 +1712,34 @@ func (ContainerSuite) TestWithMountedCacheFromDirectory(ctx context.Context, t *
 }
 
 func (ContainerSuite) TestWithMountedTemp(ctx context.Context, t *testctx.T) {
-	execRes := struct {
-		Container struct {
-			From struct {
-				WithMountedTemp struct {
-					WithExec struct {
-						Stdout string
-					}
-				}
-			}
-		}
-	}{}
+	c := connect(ctx, t)
 
-	err := testutil.Query(t, `{
-			container {
-				from(address: "`+alpineImage+`") {
-					withMountedTemp(path: "/mnt/tmp") {
-						withExec(args: ["grep", "/mnt/tmp", "/proc/mounts"]) {
-							stdout
-						}
-					}
-				}
-			}
-		}`, &execRes, nil)
-	require.NoError(t, err)
-	require.Contains(t, execRes.Container.From.WithMountedTemp.WithExec.Stdout, "tmpfs /mnt/tmp tmpfs")
+	output := func(opts []dagger.ContainerWithMountedTempOpts) (string, error) {
+		o, err := c.Container().
+			From(alpineImage).
+			WithMountedTemp("/mnt/tmp", opts...).
+			WithExec([]string{"grep", "/mnt/tmp", "/proc/mounts"}).
+			Stdout(ctx)
+
+		return o, err
+	}
+
+	t.Run("default", func(ctx context.Context, t *testctx.T) {
+		output, err := output([]dagger.ContainerWithMountedTempOpts{})
+
+		require.NoError(t, err)
+		require.Contains(t, output, "tmpfs /mnt/tmp tmpfs")
+		require.NotContains(t, output, "size")
+	})
+
+	t.Run("sized", func(ctx context.Context, t *testctx.T) {
+		output, err := output([]dagger.ContainerWithMountedTempOpts{
+			{Size: 4000},
+		})
+
+		require.NoError(t, err)
+		require.Contains(t, output, "size=4k")
+	})
 }
 
 func (ContainerSuite) TestWithDirectory(ctx context.Context, t *testctx.T) {
@@ -3212,7 +3219,7 @@ func (ContainerSuite) TestImport(ctx context.Context, t *testctx.T) {
 	t.Run("Docker", func(ctx context.Context, t *testctx.T) {
 		out, err := c.Container().
 			Import(c.Container().From(alpineImage).WithEnvVariable("FOO", "bar").AsTarball(dagger.ContainerAsTarballOpts{
-				MediaTypes: dagger.Dockermediatypes,
+				MediaTypes: dagger.ImageMediaTypesDockerMediaTypes,
 			})).
 			WithExec([]string{"sh", "-c", "echo $FOO"}).Stdout(ctx)
 		require.NoError(t, err)
@@ -3982,19 +3989,19 @@ func (ContainerSuite) TestForceCompression(ctx context.Context, t *testctx.T) {
 		expectedOCIMediaType string
 	}{
 		{
-			dagger.Gzip,
+			dagger.ImageLayerCompressionGzip,
 			"application/vnd.oci.image.layer.v1.tar+gzip",
 		},
 		{
-			dagger.Zstd,
+			dagger.ImageLayerCompressionZstd,
 			"application/vnd.oci.image.layer.v1.tar+zstd",
 		},
 		{
-			dagger.Uncompressed,
+			dagger.ImageLayerCompressionUncompressed,
 			"application/vnd.oci.image.layer.v1.tar",
 		},
 		{
-			dagger.Estargz,
+			dagger.ImageLayerCompressionEstarGz,
 			"application/vnd.oci.image.layer.v1.tar+gzip",
 		},
 	} {
@@ -4062,11 +4069,11 @@ func (ContainerSuite) TestMediaTypes(ctx context.Context, t *testctx.T) {
 			"application/vnd.oci.image.layer.v1.tar+gzip",
 		},
 		{
-			dagger.Ocimediatypes,
+			dagger.ImageMediaTypesOcimediaTypes,
 			"application/vnd.oci.image.layer.v1.tar+gzip",
 		},
 		{
-			dagger.Dockermediatypes,
+			dagger.ImageMediaTypesDockerMediaTypes,
 			"application/vnd.docker.image.rootfs.diff.tar.gzip",
 		},
 	} {
@@ -4289,9 +4296,9 @@ func (ContainerSuite) TestImageLoadCompatibility(ctx context.Context, t *testctx
 		})
 		require.NoError(t, err)
 
-		for _, mediaType := range []dagger.ImageMediaTypes{dagger.Ocimediatypes, dagger.Dockermediatypes} {
+		for _, mediaType := range []dagger.ImageMediaTypes{dagger.ImageMediaTypesOcimediaTypes, dagger.ImageMediaTypesDockerMediaTypes} {
 			mediaType := mediaType
-			for _, compression := range []dagger.ImageLayerCompression{dagger.Gzip, dagger.Zstd, dagger.Uncompressed} {
+			for _, compression := range []dagger.ImageLayerCompression{dagger.ImageLayerCompressionGzip, dagger.ImageLayerCompressionZstd, dagger.ImageLayerCompressionUncompressed} {
 				compression := compression
 				t.Run(fmt.Sprintf("%s-%s-%s-%s", t.Name(), dockerVersion, mediaType, compression), func(ctx context.Context, t *testctx.T) {
 					tmpdir := t.TempDir()
@@ -4314,7 +4321,7 @@ func (ContainerSuite) TestImageLoadCompatibility(ctx context.Context, t *testctx
 						WithExec([]string{"docker", "load", "-i", "/" + path.Base(tmpfile)})
 
 					output, err := ctr.Stdout(ctx)
-					if dockerVersion == "20.10" && compression == dagger.Zstd {
+					if dockerVersion == "20.10" && compression == dagger.ImageLayerCompressionZstd {
 						// zstd support in docker wasn't added until 23, so sanity check that it fails
 						require.Error(t, err)
 					} else {
@@ -4356,16 +4363,70 @@ func (ContainerSuite) TestWithMountedSecretMode(ctx context.Context, t *testctx.
 }
 
 func (ContainerSuite) TestNestedExec(ctx context.Context, t *testctx.T) {
-	c := connect(ctx, t)
+	t.Run("basic", func(ctx context.Context, t *testctx.T) {
+		c := connect(ctx, t)
 
-	_, err := c.Container().From(alpineImage).
-		WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
-		WithNewFile("/query.graphql", `{ defaultPlatform }`). // arbitrary valid query
-		WithExec([]string{"dagger", "query", "--debug", "--doc", "/query.graphql"}, dagger.ContainerWithExecOpts{
-			ExperimentalPrivilegedNesting: true,
-		}).
-		Sync(ctx)
-	require.NoError(t, err)
+		_, err := c.Container().From(alpineImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithNewFile("/query.graphql", `{ defaultPlatform }`). // arbitrary valid query
+			WithExec([]string{"dagger", "query", "--debug", "--doc", "/query.graphql"}, dagger.ContainerWithExecOpts{
+				ExperimentalPrivilegedNesting: true,
+			}).
+			Sync(ctx)
+		require.NoError(t, err)
+	})
+
+	t.Run("caching", func(ctx context.Context, t *testctx.T) {
+		// This is regression test for a bug where nested exec cache keys were scoped to the dagql call ID digest
+		// of the exec, which subtly resulted in content-based caching not working for nested execs.
+		c1 := connect(ctx, t)
+		c2 := connect(ctx, t)
+
+		// write /tmpdir/a/f and /tmpdir/b/f
+		tmpDir := t.TempDir()
+		const subdirA = "a"
+		const subdirB = "b"
+		const subfileName = "f"
+		require.NoError(t, os.Mkdir(filepath.Join(tmpDir, subdirA), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, subdirA, subfileName), []byte("1"), 0o644))
+		require.NoError(t, os.Mkdir(filepath.Join(tmpDir, subdirB), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, subdirB, subfileName), []byte("1"), 0o644))
+
+		runCtrs := func(c *dagger.Client, dir *dagger.Directory, subdir string) string {
+			t.Helper()
+			out, err := c.Container().From(alpineImage).
+				WithDirectory("/mnt", dir.Directory(subdir)).
+				WithExec([]string{"sh", "-c", "head -c 128 /dev/random | sha256sum"}).
+				Stdout(ctx)
+			require.NoError(t, err)
+			return out
+		}
+
+		hostDir1 := c1.Host().Directory(tmpDir)
+		// run an exec that has /tmpdir/a/f included
+		output1a := runCtrs(c1, hostDir1, subdirA)
+		// run an exec that has /tmpdir/b/f included
+		output1b := runCtrs(c1, hostDir1, subdirB)
+		// sanity check: those should be different execs, *not* cached
+		require.NotEqual(t, output1a, output1b)
+
+		// change /tmpdir/b/f
+		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, subdirB, subfileName), []byte("2"), 0o644))
+
+		hostDir2 := c2.Host().Directory(tmpDir)
+		// run an exec that has /tmpdir/a/f included
+		output2a := runCtrs(c2, hostDir2, subdirA)
+		// run an exec that has /tmpdir/b/f included
+		output2b := runCtrs(c2, hostDir2, subdirB)
+		// sanity check: those should be different execs, *not* cached
+		require.NotEqual(t, output2a, output2b)
+
+		// we only changed /tmpdir/b/f, so the execs that included /tmpdir/a/f should be cached across clients
+		// this is the assertion that failed before the fix this test was added for
+		require.Equal(t, output1a, output2a)
+		// and the execs that included /tmpdir/b/f should not be cached across clients since we modified that file
+		require.NotEqual(t, output1b, output2b)
+	})
 }
 
 func (ContainerSuite) TestEmptyExecDiff(ctx context.Context, t *testctx.T) {
@@ -4378,6 +4439,120 @@ func (ContainerSuite) TestEmptyExecDiff(ctx context.Context, t *testctx.T) {
 	ents, err := base.Rootfs().Diff(base.WithExec([]string{"true"}).Rootfs()).Entries(ctx)
 	require.NoError(t, err)
 	require.Len(t, ents, 0)
+}
+
+func (ContainerSuite) TestExecExpect(ctx context.Context, t *testctx.T) {
+	t.Run("any", func(ctx context.Context, t *testctx.T) {
+		res := struct {
+			Container struct {
+				From struct {
+					WithExec struct {
+						ExitCode int
+					}
+				}
+			}
+		}{}
+
+		err := testutil.Query(t,
+			`{
+			container {
+				from(address: "`+alpineImage+`") {
+					withExec(args: ["sh", "-c", "exit 0"], expect: ANY) {
+						exitCode
+					}
+				}
+			}
+		}`, &res, nil)
+		require.NoError(t, err)
+		require.Equal(t, 0, res.Container.From.WithExec.ExitCode)
+
+		err = testutil.Query(t,
+			`{
+			container {
+				from(address: "`+alpineImage+`") {
+					withExec(args: ["sh", "-c", "exit 1"], expect: ANY) {
+						exitCode
+					}
+				}
+			}
+		}`, &res, nil)
+		require.NoError(t, err)
+		require.Equal(t, 1, res.Container.From.WithExec.ExitCode)
+	})
+
+	t.Run("success", func(ctx context.Context, t *testctx.T) {
+		res := struct {
+			Container struct {
+				From struct {
+					WithExec struct {
+						ExitCode int
+					}
+				}
+			}
+		}{}
+
+		err := testutil.Query(t,
+			`{
+			container {
+				from(address: "`+alpineImage+`") {
+					withExec(args: ["sh", "-c", "exit 0"], expect: SUCCESS) {
+						exitCode
+					}
+				}
+			}
+		}`, &res, nil)
+		require.NoError(t, err)
+		require.Equal(t, 0, res.Container.From.WithExec.ExitCode)
+
+		err = testutil.Query(t,
+			`{
+			container {
+				from(address: "`+alpineImage+`") {
+					withExec(args: ["sh", "-c", "exit 1"], expect: SUCCESS) {
+						exitCode
+					}
+				}
+			}
+		}`, &res, nil)
+		require.ErrorContains(t, err, "exit code: 1")
+	})
+
+	t.Run("failure", func(ctx context.Context, t *testctx.T) {
+		res := struct {
+			Container struct {
+				From struct {
+					WithExec struct {
+						ExitCode int
+					}
+				}
+			}
+		}{}
+
+		err := testutil.Query(t,
+			`{
+			container {
+				from(address: "`+alpineImage+`") {
+					withExec(args: ["sh", "-c", "exit 0"], expect: FAILURE) {
+						exitCode
+					}
+				}
+			}
+		}`, &res, nil)
+		require.ErrorContains(t, err, "exit code: 0")
+
+		err = testutil.Query(t,
+			`{
+			container {
+				from(address: "`+alpineImage+`") {
+					withExec(args: ["sh", "-c", "exit 1"], expect: FAILURE) {
+						exitCode
+					}
+				}
+			}
+		}`, &res, nil)
+		require.NoError(t, err)
+		require.Equal(t, 1, res.Container.From.WithExec.ExitCode)
+	})
 }
 
 // mountDockerConfig is a helper for mounting the host's docker config if it exists
@@ -4397,4 +4572,316 @@ func mountDockerConfig(dag *dagger.Client) dagger.WithContainerFunc {
 			dag.SetSecret("docker-config-"+identity.NewID(), string(content)),
 		)
 	}
+}
+
+func (ContainerSuite) TestEnvExpand(ctx context.Context, t *testctx.T) {
+	c := connect(ctx, t)
+
+	t.Run("env variable is expanded in WithNewFile", func(ctx context.Context, t *testctx.T) {
+		output, err := c.Container().
+			From("alpine:latest").
+			WithEnvVariable("foo", "bar").
+			WithNewFile("${foo}.txt", "contents in foo file", dagger.ContainerWithNewFileOpts{Expand: true}).
+			File("bar.txt").Contents(ctx)
+
+		require.NoError(t, err)
+		require.Equal(t, "contents in foo file", output)
+	})
+
+	t.Run("env variable is expanded in WithFile", func(ctx context.Context, t *testctx.T) {
+		output, err := c.Container().
+			From("alpine:latest").
+			WithEnvVariable("foo", "bar").
+			WithFile(
+				"${foo}.txt",
+				c.Directory().WithNewFile("/foo.txt", "contents in foo file").File("/foo.txt"),
+				dagger.ContainerWithFileOpts{Expand: true},
+			).
+			File("bar.txt").Contents(ctx)
+
+		require.NoError(t, err)
+		require.Equal(t, "contents in foo file", output)
+	})
+
+	t.Run("env variable is expanded in WithDirectory", func(ctx context.Context, t *testctx.T) {
+		output, err := c.Container().
+			From("alpine:latest").
+			WithEnvVariable("foo", "bar").
+			WithDirectory(
+				"/some-path/${foo}",
+				c.Directory().WithNewFile("/some-file.txt", "contents in foo file"),
+				dagger.ContainerWithDirectoryOpts{Expand: true},
+			).
+			Directory("/some-path/bar", dagger.ContainerDirectoryOpts{Expand: true}).
+			File("some-file.txt").
+			Contents(ctx)
+
+		require.NoError(t, err)
+		require.Equal(t, "contents in foo file", output)
+	})
+
+	t.Run("env variable is expanded in Directory", func(ctx context.Context, t *testctx.T) {
+		output, err := c.Container().
+			From("alpine:latest").
+			WithEnvVariable("foo", "bar").
+			WithDirectory(
+				"/some-path/bar",
+				c.Directory().WithNewFile("/some-file.txt", "contents in foo file"),
+			).
+			Directory("/some-path/${foo}", dagger.ContainerDirectoryOpts{Expand: true}).
+			File("some-file.txt").
+			Contents(ctx)
+
+		require.NoError(t, err)
+		require.Equal(t, "contents in foo file", output)
+	})
+
+	t.Run("env variable is expanded in File", func(ctx context.Context, t *testctx.T) {
+		output, err := c.Container().
+			From("alpine:latest").
+			WithEnvVariable("foo", "bar").
+			WithDirectory(
+				"/some-path/bar",
+				c.Directory().WithNewFile("/some-file.txt", "contents in foo file"),
+				dagger.ContainerWithDirectoryOpts{Expand: true},
+			).
+			File("/some-path/${foo}/some-file.txt", dagger.ContainerFileOpts{Expand: true}).
+			Contents(ctx)
+
+		require.NoError(t, err)
+		require.Equal(t, "contents in foo file", output)
+	})
+
+	t.Run("env variable is expanded in WithMountedDirectory", func(ctx context.Context, t *testctx.T) {
+		output, err := c.Container().
+			From("alpine:latest").
+			WithEnvVariable("foo", "bar").
+			WithMountedDirectory(
+				"/some-path/${foo}",
+				c.Directory().WithNewFile("/some-file.txt", "contents in foo file"),
+				dagger.ContainerWithMountedDirectoryOpts{Expand: true},
+			).
+			File("/some-path/bar/some-file.txt", dagger.ContainerFileOpts{Expand: true}).
+			Contents(ctx)
+
+		require.NoError(t, err)
+		require.Equal(t, "contents in foo file", output)
+	})
+
+	t.Run("env variable is expanded in WithMountedFile", func(ctx context.Context, t *testctx.T) {
+		output, err := c.Container().
+			From("alpine:latest").
+			WithEnvVariable("foo", "bar").
+			WithMountedFile(
+				"/some-path/${foo}/some-file.txt",
+				c.Directory().WithNewFile("/some-file.txt", "contents in foo file").File("/some-file.txt"),
+				dagger.ContainerWithMountedFileOpts{Expand: true},
+			).
+			File("/some-path/bar/some-file.txt").Contents(ctx)
+
+		require.NoError(t, err)
+		require.Equal(t, "contents in foo file", output)
+	})
+
+	t.Run("env variable is expanded in WithoutDirectory", func(ctx context.Context, t *testctx.T) {
+		_, err := c.Container().
+			From("alpine:latest").
+			WithEnvVariable("foo", "bar").
+			WithExec([]string{"mkdir", "-p", "/some-path/bar"}).
+			WithoutDirectory(
+				"/some-path/${foo}",
+				dagger.ContainerWithoutDirectoryOpts{Expand: true},
+			).
+			WithExec([]string{"ls", "/some-path/bar"}).Stdout(ctx)
+
+		require.ErrorContains(t, err, "ls: /some-path/bar: No such file or directory")
+	})
+
+	t.Run("env variable is expanded in WithoutFile", func(ctx context.Context, t *testctx.T) {
+		_, err := c.Container().
+			From("alpine:latest").
+			WithEnvVariable("foo", "bar").
+			WithFile(
+				"/some-path/bar/some-file.txt",
+				c.Directory().WithNewFile("/some-file.txt", "contents in foo file").File("/some-file.txt"),
+			).
+			WithoutFile("/some-path/${foo}/some-file.txt", dagger.ContainerWithoutFileOpts{Expand: true}).
+			WithExec([]string{"ls", "/some-path/bar/some-file.txt"}).Stdout(ctx)
+
+		require.ErrorContains(t, err, "ls: /some-path/bar/some-file.txt: No such file or directory")
+	})
+
+	t.Run("env variable is expanded in WithoutFiles", func(ctx context.Context, t *testctx.T) {
+		_, err := c.Container().
+			From("alpine:latest").
+			WithEnvVariable("foo", "bar").
+			WithFile(
+				"/some-path/bar/some-file.txt",
+				c.Directory().WithNewFile("/some-file.txt", "contents in foo file").File("/some-file.txt"),
+			).
+			WithoutFiles([]string{"/some-path/${foo}/some-file.txt"}, dagger.ContainerWithoutFilesOpts{Expand: true}).
+			WithExec([]string{"ls", "/some-path/bar/some-file.txt"}).Stdout(ctx)
+
+		require.ErrorContains(t, err, "ls: /some-path/bar/some-file.txt: No such file or directory")
+	})
+
+	t.Run("env variable is expanded in WithExec", func(ctx context.Context, t *testctx.T) {
+		output, err := c.Container().
+			From("alpine:latest").
+			WithEnvVariable("foo", "bar").
+			WithExec([]string{"echo", `/some-arg/${foo}`}, dagger.ContainerWithExecOpts{Expand: true}).
+			Stdout(ctx)
+
+		require.NoError(t, err)
+		require.Equal(t, "/some-arg/bar\n", output)
+	})
+
+	t.Run("env variable is expanded in WithoutMount", func(ctx context.Context, t *testctx.T) {
+		_, err := c.Container().
+			From("alpine:latest").
+			WithEnvVariable("foo", "bar").
+			WithMountedDirectory("/mnt/bar", c.Directory().WithNewDirectory("/foo")).
+			WithoutMount("/mnt/${foo}", dagger.ContainerWithoutMountOpts{Expand: true}).
+			WithExec([]string{"ls", `/mnt/bar`}).
+			Stdout(ctx)
+
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "ls: /mnt/bar: No such file or directory")
+	})
+
+	t.Run("env variable is expanded in WithUnixSocket", func(ctx context.Context, t *testctx.T) {
+		tmp := t.TempDir()
+		sock := filepath.Join(tmp, "test.sock")
+
+		l, err := net.Listen("unix", sock)
+		require.NoError(t, err)
+
+		defer l.Close()
+
+		output, err := c.Container().
+			From("alpine:latest").
+			WithEnvVariable("foo", "bar").
+			WithUnixSocket("/opt/${foo}.sock", c.Host().UnixSocket(sock), dagger.ContainerWithUnixSocketOpts{Expand: true}).
+			WithExec([]string{"ls", `/opt/bar.sock`}).
+			Stdout(ctx)
+
+		require.NoError(t, err)
+		require.Equal(t, "/opt/bar.sock\n", output)
+	})
+
+	t.Run("env variable is expanded in WithoutUnixSocket", func(ctx context.Context, t *testctx.T) {
+		tmp := t.TempDir()
+		sock := filepath.Join(tmp, "test.sock")
+
+		l, err := net.Listen("unix", sock)
+		require.NoError(t, err)
+
+		defer l.Close()
+
+		_, err = c.Container().
+			From("alpine:latest").
+			WithEnvVariable("foo", "bar").
+			WithUnixSocket("/opt/bar.sock", c.Host().UnixSocket(sock)).
+			WithoutUnixSocket("/opt/${foo}.sock", dagger.ContainerWithoutUnixSocketOpts{Expand: true}).
+			WithExec([]string{"ls", `/opt/bar.sock`}).
+			Stdout(ctx)
+
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "ls: /opt/bar.sock: No such file or directory")
+	})
+
+	t.Run("env variable is expanded in WithMountedSecret", func(ctx context.Context, t *testctx.T) {
+		// Generate 512000 random bytes (non UTF-8)
+		// This is our current limit: secrets break at 512001 bytes
+		data := make([]byte, 512000)
+		_, err := rand.Read(data)
+		if err != nil {
+			panic(err)
+		}
+
+		// Compute the MD5 hash of the data
+		hash := md5.Sum(data)
+		hashStr := hex.EncodeToString(hash[:])
+
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "some-file"), data, 0o600))
+
+		secret := c.Host().SetSecretFile("mysecret", filepath.Join(dir, "some-file"))
+		output, err := c.Container().
+			From("alpine:latest").
+			WithEnvVariable("foo", "bar").
+			WithEnvVariable("CACHEBUST", identity.NewID()).
+			WithMountedSecret(
+				"/${foo}.mysecret",
+				secret,
+				dagger.ContainerWithMountedSecretOpts{Expand: true},
+			).
+			WithExec([]string{"md5sum", "/bar.mysecret"}).
+			Stdout(ctx)
+
+		require.NoError(t, err)
+		// Extract the MD5 hash from the command output
+		hashStrCmd := strings.Split(output, " ")[0]
+		require.Equal(t, hashStr, hashStrCmd)
+	})
+
+	t.Run("using secret variable with expand returns error", func(ctx context.Context, t *testctx.T) {
+		secret := c.SetSecret("gitea-token", "password2")
+		_, err := c.Container().
+			From("alpine:latest").
+			WithEnvVariable("CACHEBUST", identity.NewID()).
+			WithSecretVariable("GITEA_TOKEN", secret).
+			WithExec([]string{"sh", "-c", "test ${GITEA_TOKEN} = \"password\""}, dagger.ContainerWithExecOpts{Expand: true}).
+			Sync(ctx)
+
+		require.ErrorContains(t, err, "expand cannot be used with secret env variable \"GITEA_TOKEN\"")
+	})
+
+	t.Run("env variable is expanded in Export", func(ctx context.Context, t *testctx.T) {
+		wd := t.TempDir()
+
+		c := connect(ctx, t, dagger.WithWorkdir(wd))
+
+		entrypoint := []string{"sh", "-c", "im-a-entrypoint"}
+		ctr := c.Container().From(alpineImage).
+			WithEntrypoint(entrypoint)
+
+		actual, err := ctr.
+			WithEnvVariable("foo", "bar").
+			Export(ctx, "./${foo}.tar", dagger.ContainerExportOpts{Expand: true})
+		require.NoError(t, err)
+		require.Equal(t, filepath.Join(wd, "./bar.tar"), actual)
+
+		stat, err := os.Stat(filepath.Join(wd, "./bar.tar"))
+		require.NoError(t, err)
+		require.NotZero(t, stat.Size())
+		require.EqualValues(t, 0o600, stat.Mode().Perm())
+
+		entries := tarEntries(t, filepath.Join(wd, "./bar.tar"))
+		require.Contains(t, entries, "oci-layout")
+		require.Contains(t, entries, "index.json")
+		require.Contains(t, entries, "manifest.json")
+	})
+}
+
+func (ContainerSuite) TestExecInit(ctx context.Context, t *testctx.T) {
+	t.Run("automatic init", func(ctx context.Context, t *testctx.T) {
+		c := connect(ctx, t)
+		out, err := c.Container().From(alpineImage).
+			WithExec([]string{"ps", "-o", "pid,comm"}).
+			Stdout(ctx)
+		require.NoError(t, err)
+		require.Contains(t, out, "1 .init")
+	})
+
+	t.Run("disable automatic init", func(ctx context.Context, t *testctx.T) {
+		c := connect(ctx, t)
+		out, err := c.Container().From(alpineImage).
+			WithExec([]string{"ps", "-o", "pid,comm"}, dagger.ContainerWithExecOpts{
+				NoInit: true,
+			}).
+			Stdout(ctx)
+		require.NoError(t, err)
+		require.Contains(t, out, "1 ps")
+	})
 }

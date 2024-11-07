@@ -39,11 +39,12 @@ func (GitSuite) TestGit(ctx context.Context, t *testctx.T) {
 
 	res := struct {
 		Git struct {
-			Head   result
-			Ref    result
-			Commit result
-			Branch result
-			Tag    result
+			Head         result
+			Ref          result
+			Commit       result
+			Branch       result
+			Tag          result
+			HiddenCommit result
 		}
 	}{}
 
@@ -90,6 +91,14 @@ func (GitSuite) TestGit(ctx context.Context, t *testctx.T) {
 						}
 					}
 				}
+				hiddenCommit: commit(id: "318970484f692d7a76cfa533c5d47458631c9654") {
+					commit
+					tree {
+						file(path: "README.md") {
+							contents
+						}
+					}
+				}
 			}
 		}`, &res, nil)
 	require.NoError(t, err)
@@ -114,6 +123,11 @@ func (GitSuite) TestGit(ctx context.Context, t *testctx.T) {
 	// v0.9.5
 	require.Equal(t, res.Git.Tag.Commit, "9ea5ea7c848fef2a2c47cce0716d5fcb8d6bedeb")
 	require.Contains(t, res.Git.Tag.Tree.File.Contents, "Dagger")
+
+	// $ git ls-remote https://github.com/dagger/dagger.git | grep pull/8735
+	// 318970484f692d7a76cfa533c5d47458631c9654	refs/pull/8735/head
+	require.Equal(t, res.Git.HiddenCommit.Commit, "318970484f692d7a76cfa533c5d47458631c9654")
+	require.Contains(t, res.Git.HiddenCommit.Tree.File.Contents, "Dagger")
 }
 
 func (GitSuite) TestDiscardGitDir(ctx context.Context, t *testctx.T) {
@@ -282,6 +296,86 @@ func (GitSuite) TestGitTagsSSH(ctx context.Context, t *testctx.T) {
 		_, err := c.Git(repoURL).Tags(ctx)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "Permission denied (publickey)")
+	})
+}
+
+func (GitSuite) TestAuthProviders(ctx context.Context, t *testctx.T) {
+	c := connect(ctx, t)
+
+	// Helper to decode base64-encoded PATs and trim whitespace
+	decodeAndTrimPAT := func(encoded string) (string, error) {
+		decodedPAT, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return "", fmt.Errorf("failed to decode PAT: %w", err)
+		}
+		return strings.TrimSpace(string(decodedPAT)), nil
+	}
+
+	// Test authentication for major Git providers using read-only PATs
+	t.Run("GitHub auth", func(ctx context.Context, t *testctx.T) {
+		// Base64-encoded read-only PAT for test repo
+		pat := "Z2l0aHViX3BhdF8xMUFIUlpENFEwMnVKQm5ESVBNZ0h5X2lHYUVPZTZaR2xOTjB4Y2o2WEdRWjNSalhwdHQ0c2lSMmw0aUJTellKUmFKUFdERlNUVU1hRXlDYXNQCg=="
+		token, err := decodeAndTrimPAT(pat)
+		require.NoError(t, err)
+
+		_, err = c.Git("https://github.com/grouville/daggerverse-private.git").
+			WithAuthToken(c.SetSecret("github_pat", token)).
+			Branch("main").
+			Tree().
+			File("LICENSE").
+			Contents(ctx)
+		require.NoError(t, err)
+	})
+
+	t.Run("BitBucket auth", func(ctx context.Context, t *testctx.T) {
+		// Base64-encoded read-only PAT for test repo
+		pat := "QVRDVFQzeEZmR04wTHhxdWRtNVpjNFFIOE0xc3V0WWxHS2dfcjVTdVJxN0gwOVRrT0ZuUUViUDN4OURodldFQ3V1N1dzaTU5NkdBR2pIWTlhbVMzTEo5VE9OaFVFYlotUW5ZXzFmNnN3alRYRXJhUEJrcnI1NlpMLTdCeG4xMjdPYXpJRlFOMUF3VndLaWJDeW8wMm50U0JtYVA5MlRyUkMtUFN5a2sxQk4weXg1LUhjVXRqNmNVPTIwOEY2RThFCg=="
+		token, err := decodeAndTrimPAT(pat)
+		require.NoError(t, err)
+
+		_, err = c.Git("https://bitbucket.org/dagger-modules/private-modules-test.git").
+			WithAuthToken(c.SetSecret("bitbucket_pat", token)).
+			Branch("main").
+			Tree().
+			File("README.md").
+			Contents(ctx)
+		require.NoError(t, err)
+	})
+
+	t.Run("GitLab auth", func(ctx context.Context, t *testctx.T) {
+		// Base64-encoded read-only PAT for test repo
+		pat := "Z2xwYXQtQXlHQU4zR0xOeEhfM3VSckNzck0K"
+		token, err := decodeAndTrimPAT(pat)
+		require.NoError(t, err)
+
+		_, err = c.Git("https://gitlab.com/dagger-modules/private/test/more/dagger-test-modules-private.git").
+			WithAuthToken(c.SetSecret("gitlab_pat", token)).
+			Branch("main").
+			Tree().
+			File("README.md").
+			Contents(ctx)
+		require.NoError(t, err)
+	})
+
+	// TODO: Implement Azure DevOps auth when PAT expiration is configurable
+	// t.Run("Azure auth", func(ctx context.Context, t *testctx.T) {
+	// 	_, err = c.Git("https://dev.azure.com/daggere2e/private/_git/dagger-test-modules").
+	// 		Branch("main").
+	// 		Tree().
+	// 		File("README.md").
+	// 		Contents(ctx)
+	// 	require.NoError(t, err)
+	// })
+
+	t.Run("authentication error", func(ctx context.Context, t *testctx.T) {
+		_, err := c.Git("https://github.com/grouville/daggerverse-private.git").
+			Branch("main").
+			Tree().
+			File("README.md").
+			Contents(ctx)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "git error")
+		require.ErrorContains(t, err, "Authentication failed for 'https://github.com/grouville/daggerverse-private.git/'")
 	})
 }
 

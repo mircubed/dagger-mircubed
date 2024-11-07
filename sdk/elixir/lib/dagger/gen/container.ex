@@ -96,10 +96,13 @@ defmodule Dagger.Container do
 
   Mounts are included.
   """
-  @spec directory(t(), String.t()) :: Dagger.Directory.t()
-  def directory(%__MODULE__{} = container, path) do
+  @spec directory(t(), String.t(), [{:expand, boolean() | nil}]) :: Dagger.Directory.t()
+  def directory(%__MODULE__{} = container, path, optional_args \\ []) do
     query_builder =
-      container.query_builder |> QB.select("directory") |> QB.put_arg("path", path)
+      container.query_builder
+      |> QB.select("directory")
+      |> QB.put_arg("path", path)
+      |> QB.maybe_put_arg("expand", optional_args[:expand])
 
     %Dagger.Directory{
       query_builder: query_builder,
@@ -143,6 +146,19 @@ defmodule Dagger.Container do
          }
        end}
     end
+  end
+
+  @doc """
+  The exit code of the last executed command.
+
+  Returns an error if no command was set.
+  """
+  @spec exit_code(t()) :: {:ok, integer()} | {:error, term()}
+  def exit_code(%__MODULE__{} = container) do
+    query_builder =
+      container.query_builder |> QB.select("exitCode")
+
+    Client.execute(container.client, query_builder)
   end
 
   @doc """
@@ -191,7 +207,8 @@ defmodule Dagger.Container do
   @spec export(t(), String.t(), [
           {:platform_variants, [Dagger.ContainerID.t()]},
           {:forced_compression, Dagger.ImageLayerCompression.t() | nil},
-          {:media_types, Dagger.ImageMediaTypes.t() | nil}
+          {:media_types, Dagger.ImageMediaTypes.t() | nil},
+          {:expand, boolean() | nil}
         ]) :: {:ok, String.t()} | {:error, term()}
   def export(%__MODULE__{} = container, path, optional_args \\ []) do
     query_builder =
@@ -207,6 +224,7 @@ defmodule Dagger.Container do
       )
       |> QB.maybe_put_arg("forcedCompression", optional_args[:forced_compression])
       |> QB.maybe_put_arg("mediaTypes", optional_args[:media_types])
+      |> QB.maybe_put_arg("expand", optional_args[:expand])
 
     Client.execute(container.client, query_builder)
   end
@@ -240,10 +258,13 @@ defmodule Dagger.Container do
 
   Mounts are included.
   """
-  @spec file(t(), String.t()) :: Dagger.File.t()
-  def file(%__MODULE__{} = container, path) do
+  @spec file(t(), String.t(), [{:expand, boolean() | nil}]) :: Dagger.File.t()
+  def file(%__MODULE__{} = container, path, optional_args \\ []) do
     query_builder =
-      container.query_builder |> QB.select("file") |> QB.put_arg("path", path)
+      container.query_builder
+      |> QB.select("file")
+      |> QB.put_arg("path", path)
+      |> QB.maybe_put_arg("expand", optional_args[:expand])
 
     %Dagger.File{
       query_builder: query_builder,
@@ -388,7 +409,7 @@ defmodule Dagger.Container do
   @doc """
   The error stream of the last executed command.
 
-  Will execute default command if none is set, or error if there's no default.
+  Returns an error if no command was set.
   """
   @spec stderr(t()) :: {:ok, String.t()} | {:error, term()}
   def stderr(%__MODULE__{} = container) do
@@ -401,7 +422,7 @@ defmodule Dagger.Container do
   @doc """
   The output stream of the last executed command.
 
-  Will execute default command if none is set, or error if there's no default.
+  Returns an error if no command was set.
   """
   @spec stdout(t()) :: {:ok, String.t()} | {:error, term()}
   def stdout(%__MODULE__{} = container) do
@@ -538,7 +559,8 @@ defmodule Dagger.Container do
   @spec with_directory(t(), String.t(), Dagger.Directory.t(), [
           {:exclude, [String.t()]},
           {:include, [String.t()]},
-          {:owner, String.t() | nil}
+          {:owner, String.t() | nil},
+          {:expand, boolean() | nil}
         ]) :: Dagger.Container.t()
   def with_directory(%__MODULE__{} = container, path, directory, optional_args \\ []) do
     query_builder =
@@ -549,6 +571,7 @@ defmodule Dagger.Container do
       |> QB.maybe_put_arg("exclude", optional_args[:exclude])
       |> QB.maybe_put_arg("include", optional_args[:include])
       |> QB.maybe_put_arg("owner", optional_args[:owner])
+      |> QB.maybe_put_arg("expand", optional_args[:expand])
 
     %Dagger.Container{
       query_builder: query_builder,
@@ -595,8 +618,11 @@ defmodule Dagger.Container do
           {:stdin, String.t() | nil},
           {:redirect_stdout, String.t() | nil},
           {:redirect_stderr, String.t() | nil},
+          {:expect, Dagger.ReturnType.t() | nil},
           {:experimental_privileged_nesting, boolean() | nil},
-          {:insecure_root_capabilities, boolean() | nil}
+          {:insecure_root_capabilities, boolean() | nil},
+          {:expand, boolean() | nil},
+          {:no_init, boolean() | nil}
         ]) :: Dagger.Container.t()
   def with_exec(%__MODULE__{} = container, args, optional_args \\ []) do
     query_builder =
@@ -607,11 +633,14 @@ defmodule Dagger.Container do
       |> QB.maybe_put_arg("stdin", optional_args[:stdin])
       |> QB.maybe_put_arg("redirectStdout", optional_args[:redirect_stdout])
       |> QB.maybe_put_arg("redirectStderr", optional_args[:redirect_stderr])
+      |> QB.maybe_put_arg("expect", optional_args[:expect])
       |> QB.maybe_put_arg(
         "experimentalPrivilegedNesting",
         optional_args[:experimental_privileged_nesting]
       )
       |> QB.maybe_put_arg("insecureRootCapabilities", optional_args[:insecure_root_capabilities])
+      |> QB.maybe_put_arg("expand", optional_args[:expand])
+      |> QB.maybe_put_arg("noInit", optional_args[:no_init])
 
     %Dagger.Container{
       query_builder: query_builder,
@@ -654,7 +683,8 @@ defmodule Dagger.Container do
   @doc "Retrieves this container plus the contents of the given file copied to the given path."
   @spec with_file(t(), String.t(), Dagger.File.t(), [
           {:permissions, integer() | nil},
-          {:owner, String.t() | nil}
+          {:owner, String.t() | nil},
+          {:expand, boolean() | nil}
         ]) :: Dagger.Container.t()
   def with_file(%__MODULE__{} = container, path, source, optional_args \\ []) do
     query_builder =
@@ -664,6 +694,7 @@ defmodule Dagger.Container do
       |> QB.put_arg("source", Dagger.ID.id!(source))
       |> QB.maybe_put_arg("permissions", optional_args[:permissions])
       |> QB.maybe_put_arg("owner", optional_args[:owner])
+      |> QB.maybe_put_arg("expand", optional_args[:expand])
 
     %Dagger.Container{
       query_builder: query_builder,
@@ -674,7 +705,8 @@ defmodule Dagger.Container do
   @doc "Retrieves this container plus the contents of the given files copied to the given path."
   @spec with_files(t(), String.t(), [Dagger.FileID.t()], [
           {:permissions, integer() | nil},
-          {:owner, String.t() | nil}
+          {:owner, String.t() | nil},
+          {:expand, boolean() | nil}
         ]) :: Dagger.Container.t()
   def with_files(%__MODULE__{} = container, path, sources, optional_args \\ []) do
     query_builder =
@@ -684,18 +716,7 @@ defmodule Dagger.Container do
       |> QB.put_arg("sources", sources)
       |> QB.maybe_put_arg("permissions", optional_args[:permissions])
       |> QB.maybe_put_arg("owner", optional_args[:owner])
-
-    %Dagger.Container{
-      query_builder: query_builder,
-      client: container.client
-    }
-  end
-
-  @doc "Indicate that subsequent operations should be featured more prominently in the UI."
-  @spec with_focus(t()) :: Dagger.Container.t()
-  def with_focus(%__MODULE__{} = container) do
-    query_builder =
-      container.query_builder |> QB.select("withFocus")
+      |> QB.maybe_put_arg("expand", optional_args[:expand])
 
     %Dagger.Container{
       query_builder: query_builder,
@@ -722,7 +743,8 @@ defmodule Dagger.Container do
   @spec with_mounted_cache(t(), String.t(), Dagger.CacheVolume.t(), [
           {:source, Dagger.DirectoryID.t() | nil},
           {:sharing, Dagger.CacheSharingMode.t() | nil},
-          {:owner, String.t() | nil}
+          {:owner, String.t() | nil},
+          {:expand, boolean() | nil}
         ]) :: Dagger.Container.t()
   def with_mounted_cache(%__MODULE__{} = container, path, cache, optional_args \\ []) do
     query_builder =
@@ -733,6 +755,7 @@ defmodule Dagger.Container do
       |> QB.maybe_put_arg("source", optional_args[:source])
       |> QB.maybe_put_arg("sharing", optional_args[:sharing])
       |> QB.maybe_put_arg("owner", optional_args[:owner])
+      |> QB.maybe_put_arg("expand", optional_args[:expand])
 
     %Dagger.Container{
       query_builder: query_builder,
@@ -741,8 +764,10 @@ defmodule Dagger.Container do
   end
 
   @doc "Retrieves this container plus a directory mounted at the given path."
-  @spec with_mounted_directory(t(), String.t(), Dagger.Directory.t(), [{:owner, String.t() | nil}]) ::
-          Dagger.Container.t()
+  @spec with_mounted_directory(t(), String.t(), Dagger.Directory.t(), [
+          {:owner, String.t() | nil},
+          {:expand, boolean() | nil}
+        ]) :: Dagger.Container.t()
   def with_mounted_directory(%__MODULE__{} = container, path, source, optional_args \\ []) do
     query_builder =
       container.query_builder
@@ -750,6 +775,7 @@ defmodule Dagger.Container do
       |> QB.put_arg("path", path)
       |> QB.put_arg("source", Dagger.ID.id!(source))
       |> QB.maybe_put_arg("owner", optional_args[:owner])
+      |> QB.maybe_put_arg("expand", optional_args[:expand])
 
     %Dagger.Container{
       query_builder: query_builder,
@@ -758,8 +784,10 @@ defmodule Dagger.Container do
   end
 
   @doc "Retrieves this container plus a file mounted at the given path."
-  @spec with_mounted_file(t(), String.t(), Dagger.File.t(), [{:owner, String.t() | nil}]) ::
-          Dagger.Container.t()
+  @spec with_mounted_file(t(), String.t(), Dagger.File.t(), [
+          {:owner, String.t() | nil},
+          {:expand, boolean() | nil}
+        ]) :: Dagger.Container.t()
   def with_mounted_file(%__MODULE__{} = container, path, source, optional_args \\ []) do
     query_builder =
       container.query_builder
@@ -767,6 +795,7 @@ defmodule Dagger.Container do
       |> QB.put_arg("path", path)
       |> QB.put_arg("source", Dagger.ID.id!(source))
       |> QB.maybe_put_arg("owner", optional_args[:owner])
+      |> QB.maybe_put_arg("expand", optional_args[:expand])
 
     %Dagger.Container{
       query_builder: query_builder,
@@ -777,7 +806,8 @@ defmodule Dagger.Container do
   @doc "Retrieves this container plus a secret mounted into a file at the given path."
   @spec with_mounted_secret(t(), String.t(), Dagger.Secret.t(), [
           {:owner, String.t() | nil},
-          {:mode, integer() | nil}
+          {:mode, integer() | nil},
+          {:expand, boolean() | nil}
         ]) :: Dagger.Container.t()
   def with_mounted_secret(%__MODULE__{} = container, path, source, optional_args \\ []) do
     query_builder =
@@ -787,6 +817,7 @@ defmodule Dagger.Container do
       |> QB.put_arg("source", Dagger.ID.id!(source))
       |> QB.maybe_put_arg("owner", optional_args[:owner])
       |> QB.maybe_put_arg("mode", optional_args[:mode])
+      |> QB.maybe_put_arg("expand", optional_args[:expand])
 
     %Dagger.Container{
       query_builder: query_builder,
@@ -795,10 +826,15 @@ defmodule Dagger.Container do
   end
 
   @doc "Retrieves this container plus a temporary directory mounted at the given path. Any writes will be ephemeral to a single withExec call; they will not be persisted to subsequent withExecs."
-  @spec with_mounted_temp(t(), String.t()) :: Dagger.Container.t()
-  def with_mounted_temp(%__MODULE__{} = container, path) do
+  @spec with_mounted_temp(t(), String.t(), [{:size, integer() | nil}, {:expand, boolean() | nil}]) ::
+          Dagger.Container.t()
+  def with_mounted_temp(%__MODULE__{} = container, path, optional_args \\ []) do
     query_builder =
-      container.query_builder |> QB.select("withMountedTemp") |> QB.put_arg("path", path)
+      container.query_builder
+      |> QB.select("withMountedTemp")
+      |> QB.put_arg("path", path)
+      |> QB.maybe_put_arg("size", optional_args[:size])
+      |> QB.maybe_put_arg("expand", optional_args[:expand])
 
     %Dagger.Container{
       query_builder: query_builder,
@@ -809,7 +845,8 @@ defmodule Dagger.Container do
   @doc "Retrieves this container plus a new file written at the given path."
   @spec with_new_file(t(), String.t(), String.t(), [
           {:permissions, integer() | nil},
-          {:owner, String.t() | nil}
+          {:owner, String.t() | nil},
+          {:expand, boolean() | nil}
         ]) :: Dagger.Container.t()
   def with_new_file(%__MODULE__{} = container, path, contents, optional_args \\ []) do
     query_builder =
@@ -819,6 +856,7 @@ defmodule Dagger.Container do
       |> QB.put_arg("contents", contents)
       |> QB.maybe_put_arg("permissions", optional_args[:permissions])
       |> QB.maybe_put_arg("owner", optional_args[:owner])
+      |> QB.maybe_put_arg("expand", optional_args[:expand])
 
     %Dagger.Container{
       query_builder: query_builder,
@@ -895,8 +933,10 @@ defmodule Dagger.Container do
   end
 
   @doc "Retrieves this container plus a socket forwarded to the given Unix socket path."
-  @spec with_unix_socket(t(), String.t(), Dagger.Socket.t(), [{:owner, String.t() | nil}]) ::
-          Dagger.Container.t()
+  @spec with_unix_socket(t(), String.t(), Dagger.Socket.t(), [
+          {:owner, String.t() | nil},
+          {:expand, boolean() | nil}
+        ]) :: Dagger.Container.t()
   def with_unix_socket(%__MODULE__{} = container, path, source, optional_args \\ []) do
     query_builder =
       container.query_builder
@@ -904,6 +944,7 @@ defmodule Dagger.Container do
       |> QB.put_arg("path", path)
       |> QB.put_arg("source", Dagger.ID.id!(source))
       |> QB.maybe_put_arg("owner", optional_args[:owner])
+      |> QB.maybe_put_arg("expand", optional_args[:expand])
 
     %Dagger.Container{
       query_builder: query_builder,
@@ -924,10 +965,13 @@ defmodule Dagger.Container do
   end
 
   @doc "Retrieves this container with a different working directory."
-  @spec with_workdir(t(), String.t()) :: Dagger.Container.t()
-  def with_workdir(%__MODULE__{} = container, path) do
+  @spec with_workdir(t(), String.t(), [{:expand, boolean() | nil}]) :: Dagger.Container.t()
+  def with_workdir(%__MODULE__{} = container, path, optional_args \\ []) do
     query_builder =
-      container.query_builder |> QB.select("withWorkdir") |> QB.put_arg("path", path)
+      container.query_builder
+      |> QB.select("withWorkdir")
+      |> QB.put_arg("path", path)
+      |> QB.maybe_put_arg("expand", optional_args[:expand])
 
     %Dagger.Container{
       query_builder: query_builder,
@@ -960,10 +1004,13 @@ defmodule Dagger.Container do
   end
 
   @doc "Retrieves this container with the directory at the given path removed."
-  @spec without_directory(t(), String.t()) :: Dagger.Container.t()
-  def without_directory(%__MODULE__{} = container, path) do
+  @spec without_directory(t(), String.t(), [{:expand, boolean() | nil}]) :: Dagger.Container.t()
+  def without_directory(%__MODULE__{} = container, path, optional_args \\ []) do
     query_builder =
-      container.query_builder |> QB.select("withoutDirectory") |> QB.put_arg("path", path)
+      container.query_builder
+      |> QB.select("withoutDirectory")
+      |> QB.put_arg("path", path)
+      |> QB.maybe_put_arg("expand", optional_args[:expand])
 
     %Dagger.Container{
       query_builder: query_builder,
@@ -1014,10 +1061,13 @@ defmodule Dagger.Container do
   end
 
   @doc "Retrieves this container with the file at the given path removed."
-  @spec without_file(t(), String.t()) :: Dagger.Container.t()
-  def without_file(%__MODULE__{} = container, path) do
+  @spec without_file(t(), String.t(), [{:expand, boolean() | nil}]) :: Dagger.Container.t()
+  def without_file(%__MODULE__{} = container, path, optional_args \\ []) do
     query_builder =
-      container.query_builder |> QB.select("withoutFile") |> QB.put_arg("path", path)
+      container.query_builder
+      |> QB.select("withoutFile")
+      |> QB.put_arg("path", path)
+      |> QB.maybe_put_arg("expand", optional_args[:expand])
 
     %Dagger.Container{
       query_builder: query_builder,
@@ -1026,26 +1076,13 @@ defmodule Dagger.Container do
   end
 
   @doc "Retrieves this container with the files at the given paths removed."
-  @spec without_files(t(), [String.t()]) :: Dagger.Container.t()
-  def without_files(%__MODULE__{} = container, paths) do
+  @spec without_files(t(), [String.t()], [{:expand, boolean() | nil}]) :: Dagger.Container.t()
+  def without_files(%__MODULE__{} = container, paths, optional_args \\ []) do
     query_builder =
-      container.query_builder |> QB.select("withoutFiles") |> QB.put_arg("paths", paths)
-
-    %Dagger.Container{
-      query_builder: query_builder,
-      client: container.client
-    }
-  end
-
-  @doc """
-  Indicate that subsequent operations should not be featured more prominently in the UI.
-
-  This is the initial state of all containers.
-  """
-  @spec without_focus(t()) :: Dagger.Container.t()
-  def without_focus(%__MODULE__{} = container) do
-    query_builder =
-      container.query_builder |> QB.select("withoutFocus")
+      container.query_builder
+      |> QB.select("withoutFiles")
+      |> QB.put_arg("paths", paths)
+      |> QB.maybe_put_arg("expand", optional_args[:expand])
 
     %Dagger.Container{
       query_builder: query_builder,
@@ -1066,10 +1103,13 @@ defmodule Dagger.Container do
   end
 
   @doc "Retrieves this container after unmounting everything at the given path."
-  @spec without_mount(t(), String.t()) :: Dagger.Container.t()
-  def without_mount(%__MODULE__{} = container, path) do
+  @spec without_mount(t(), String.t(), [{:expand, boolean() | nil}]) :: Dagger.Container.t()
+  def without_mount(%__MODULE__{} = container, path, optional_args \\ []) do
     query_builder =
-      container.query_builder |> QB.select("withoutMount") |> QB.put_arg("path", path)
+      container.query_builder
+      |> QB.select("withoutMount")
+      |> QB.put_arg("path", path)
+      |> QB.maybe_put_arg("expand", optional_args[:expand])
 
     %Dagger.Container{
       query_builder: query_builder,
@@ -1104,10 +1144,13 @@ defmodule Dagger.Container do
   end
 
   @doc "Retrieves this container with a previously added Unix socket removed."
-  @spec without_unix_socket(t(), String.t()) :: Dagger.Container.t()
-  def without_unix_socket(%__MODULE__{} = container, path) do
+  @spec without_unix_socket(t(), String.t(), [{:expand, boolean() | nil}]) :: Dagger.Container.t()
+  def without_unix_socket(%__MODULE__{} = container, path, optional_args \\ []) do
     query_builder =
-      container.query_builder |> QB.select("withoutUnixSocket") |> QB.put_arg("path", path)
+      container.query_builder
+      |> QB.select("withoutUnixSocket")
+      |> QB.put_arg("path", path)
+      |> QB.maybe_put_arg("expand", optional_args[:expand])
 
     %Dagger.Container{
       query_builder: query_builder,

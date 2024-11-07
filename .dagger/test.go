@@ -194,7 +194,7 @@ func (t *Test) testCmd(ctx context.Context) (*dagger.Container, error) {
 	devEngineSvc := devEngine.
 		WithServiceBinding("registry", registrySvc).
 		WithServiceBinding("privateregistry", privateRegistry()).
-		WithExposedPort(1234, dagger.ContainerWithExposedPortOpts{Protocol: dagger.Tcp}).
+		WithExposedPort(1234, dagger.ContainerWithExposedPortOpts{Protocol: dagger.NetworkProtocolTcp}).
 		WithMountedCache(distconsts.EngineDefaultStateDir, dag.CacheVolume("dagger-dev-engine-test-state"+identity.NewID())).
 		WithExec(nil, dagger.ContainerWithExecOpts{
 			UseEntrypoint:            true,
@@ -224,18 +224,15 @@ func (t *Test) testCmd(ctx context.Context) (*dagger.Container, error) {
 	tests = tests.
 		WithMountedFile(cliBinPath, devBinary).
 		WithEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", cliBinPath).
-		WithEnvVariable("_EXPERIMENTAL_DAGGER_RUNNER_HOST", endpoint)
-	if t.Dagger.DockerCfg != nil {
-		// this avoids rate limiting in our ci tests
-		tests = tests.WithMountedSecret("/root/.docker/config.json", t.Dagger.DockerCfg)
-	}
+		WithEnvVariable("_EXPERIMENTAL_DAGGER_RUNNER_HOST", endpoint).
+		With(t.Dagger.withDockerCfg) // this avoids rate limiting in our ci tests
 	return tests, nil
 }
 
 func registry() *dagger.Service {
 	return dag.Container().
 		From("registry:2").
-		WithExposedPort(5000, dagger.ContainerWithExposedPortOpts{Protocol: dagger.Tcp}).
+		WithExposedPort(5000, dagger.ContainerWithExposedPortOpts{Protocol: dagger.NetworkProtocolTcp}).
 		WithExec(nil, dagger.ContainerWithExecOpts{
 			UseEntrypoint: true,
 		}).
@@ -250,7 +247,7 @@ func privateRegistry() *dagger.Service {
 		WithEnvVariable("REGISTRY_AUTH", "htpasswd").
 		WithEnvVariable("REGISTRY_AUTH_HTPASSWD_REALM", "Registry Realm").
 		WithEnvVariable("REGISTRY_AUTH_HTPASSWD_PATH", "/auth/htpasswd").
-		WithExposedPort(5000, dagger.ContainerWithExposedPortOpts{Protocol: dagger.Tcp}).
+		WithExposedPort(5000, dagger.ContainerWithExposedPortOpts{Protocol: dagger.NetworkProtocolTcp}).
 		WithExec(nil, dagger.ContainerWithExecOpts{
 			UseEntrypoint: true,
 		}).

@@ -47,7 +47,7 @@ func (m *ModuleEnumType) ConvertFromSDKResult(ctx context.Context, value any) (d
 
 		val, err := decoder.DecodeInput(value)
 		if err != nil {
-			return nil, fmt.Errorf("%T.ConvertFromSDKResult: invalid enum value %q for %q", m, value, m.typeDef.Name)
+			return nil, fmt.Errorf("%T.ConvertFromSDKResult: invalid enum value %q for %q: %w", m, value, m.typeDef.Name, err)
 		}
 
 		return val, nil
@@ -114,21 +114,29 @@ func (e *ModuleEnum) TypeDescription() string {
 }
 
 func (e *ModuleEnum) TypeDefinition(views ...string) *ast.Definition {
-	return &ast.Definition{
+	def := &ast.Definition{
 		Kind:        ast.Enum,
 		Name:        e.TypeName(),
 		EnumValues:  e.PossibleValues(),
 		Description: e.TypeDescription(),
 	}
+	if e.TypeDef.SourceMap != nil {
+		def.Directives = append(def.Directives, e.TypeDef.SourceMap.TypeDirective())
+	}
+	return def
 }
 
 func (e *ModuleEnum) PossibleValues() ast.EnumValueList {
 	var values ast.EnumValueList
 	for _, val := range e.TypeDef.Values {
-		values = append(values, &ast.EnumValueDefinition{
+		def := &ast.EnumValueDefinition{
 			Name:        val.Name,
 			Description: val.Description,
-		})
+		}
+		if val.SourceMap != nil {
+			def.Directives = append(def.Directives, val.SourceMap.TypeDirective())
+		}
+		values = append(values, def)
 	}
 
 	return values
@@ -148,18 +156,11 @@ func (e *ModuleEnum) Decoder() dagql.InputDecoder {
 }
 
 func (e *ModuleEnum) DecodeInput(val any) (dagql.Input, error) {
-	switch x := val.(type) {
-	case nil:
-		return e.Lookup("")
-	case string:
-		return e.Lookup(x)
-	case dagql.Scalar[dagql.String]:
-		return e.Lookup(string(x.Value))
-	case *ModuleEnum:
-		return e.Lookup(x.Value)
-	default:
-		return nil, fmt.Errorf("cannot create dynamic Enum from %T", x)
+	v, err := (&dagql.EnumValueName{Enum: e.TypeName()}).DecodeInput(val)
+	if err != nil {
+		return nil, err
 	}
+	return e.Lookup(v.(*dagql.EnumValueName).Value)
 }
 
 func (e *ModuleEnum) Lookup(val string) (dagql.Input, error) {

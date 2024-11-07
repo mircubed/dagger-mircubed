@@ -80,26 +80,28 @@ const config: Config = {
       "docusaurus-plugin-typedoc",
       {
         id: "current-generation",
+        plugin: ["typedoc-plugin-markdown", "typedoc-plugin-frontmatter"],
         entryPoints: [
           "../sdk/typescript/connect.ts",
           "../sdk/typescript/api/client.gen.ts",
           "../sdk/typescript/common/errors/index.ts",
         ],
         tsconfig: "../sdk/typescript/tsconfig.json",
-        out: "../current_docs/reference/typescript/",
+        out: "current_docs/reference/typescript/",
         excludeProtected: true,
         exclude: "../sdk/typescript/node_modules/**",
         skipErrorChecking: true,
         disableSources: true,
-        sidebar: {
-          categoryLabel: "TypeScript SDK Reference",
-        },
-        frontmatter: {
+        sanitizeComments: true,
+        frontmatterGlobals: {
           displayed_sidebar: "current",
           sidebar_label: "TypeScript SDK Reference",
           title: "TypeScript SDK Reference",
         },
-        hideMembersSymbol: true,
+        textContentMappings: {
+          "title.indexPage": "TypeScript SDK Reference",
+          "footer.text": ""
+        },
         requiredToBeDocumented: ["Class"],
       },
     ],
@@ -111,14 +113,6 @@ const config: Config = {
     prism: {
       additionalLanguages: ["php", "rust", "elixir", "bash", "toml", "powershell"],
       theme: prismThemes.dracula,
-    },
-    announcementBar: {
-      id: "changed_docs",
-      content:
-        'We\'ve recently updated our documentation. For the previous documentation, visit <a target="_blank" rel="noopener noreferrer" href="https://archive.docs.dagger.io/0.9/">archive.docs.dagger.io/0.9/</a>.',
-      backgroundColor: "#3d66ff",
-      textColor: "#ffffff",
-      isCloseable: false,
     },
     navbar: {
       logo: {
@@ -168,7 +162,38 @@ const config: Config = {
           to: "https://dagger.io/resources",
           label: "Resources",
           className: "navbar-blog-link",
-          target: "_self",
+          items: [
+            {
+              label: "Blog",
+              href: "https://dagger.io/blog",
+              target: "_self",
+            },
+            {
+              label: "Daggerized Projects",
+              href: "https://dagger.io/daggerized-projects",
+              target: "_self",
+            },
+            {
+              label: "Videos",
+              href: "https://dagger.io/videos",
+              target: "_self",
+            },
+            {
+              label: "Adopting Dagger",
+              href: "https://dagger.io/adopting-dagger",
+              target: "_self",
+            },
+            {
+              label: "Case Studies",
+              href: "https://dagger.io/case-studies",
+              target: "_self",
+            },
+            {
+              label: "Community Content",
+              href: "https://dagger.io/community-content",
+              target: "_self",
+            },
+          ],
         },
         {
           position: "left",
@@ -177,13 +202,23 @@ const config: Config = {
           className: "navbar-blog-link",
           items: [
             {
-              label: "Get involved",
+              label: "Events",
+              href: "https://dagger.io/events",
+              target: "_self",
+            },
+            {
+              label: "Get Involved",
               href: "https://dagger.io/community",
               target: "_self",
             },
             {
               label: "Dagger Love",
               href: "https://dagger.io/dagger-love",
+              target: "_self",
+            },
+            {
+              label: "Dagger Commanders",
+              href: "https://dagger.io/commanders",
               target: "_self",
             },
           ],
@@ -193,13 +228,6 @@ const config: Config = {
           to: "/",
           label: "Docs",
           className: "navbar-blog-link",
-        },
-        {
-          position: "left",
-          to: "https://dagger.io/blog",
-          label: "Blog",
-          className: "navbar-blog-link",
-          target: "_self",
         },
         {
           type: "search",
@@ -232,19 +260,44 @@ const config: Config = {
           title: "Resources",
           items: [
             {
-              label: "Docs",
-              to: "https://docs.dagger.io/",
+              label: "Case Studies",
+              to: "https://dagger.io/case-studies",
             },
             {
-              label: "Resources",
-              to: "https://dagger.io/resources",
+              label: "Videos",
+              to: "https://dagger.io/videos",
+            },
+            {
+              label: "Adopting Dagger",
+              to: "https://dagger.io/adopting-dagger",
+            },
+            {
+              label: "Daggerized Projects",
+              to: "https://dagger.io/daggerized-projects",
+            },
+            {
+              label: "Docs",
+              to: "https://docs.dagger.io/",
             },
             {
               label: "Blog",
               to: "https://dagger.io/blog",
             },
             {
-              label: "Get involved",
+              label: "Community Content",
+              to: "https://dagger.io/community-content",
+            }
+          ],
+        },
+        {
+          title: "Community",
+          items: [
+            {
+              label: "Events",
+              to: "https://dagger.io/events",
+            },
+            {
+              label: "Get Involved",
               to: "https://dagger.io/community",
             },
             {
@@ -252,16 +305,8 @@ const config: Config = {
               to: "https://dagger.io/dagger-love",
             },
             {
-              label: "Playground",
-              to: "https://play.dagger.cloud/playground",
-            },
-            {
-              label: "Changelog",
-              to: "https://github.com/dagger/dagger/blob/main/CHANGELOG.md",
-            },
-            {
-              label: "Status",
-              to: "https://status.dagger.io",
+              label: "Dagger Commanders",
+              to: "https://dagger.io/commanders",
             },
           ],
         },
@@ -281,6 +326,10 @@ const config: Config = {
               to: "https://daggerverse.dev",
             },
             {
+              label: "Integrations",
+              to: "https://dagger.io/integrations",
+            },
+            {
               label: "Pricing",
               to: "https://dagger.io/pricing",
             },
@@ -292,6 +341,10 @@ const config: Config = {
             {
               label: "Partners",
               to: "https://dagger.io/partners",
+            },
+            {
+              label: "Careers",
+              to: "https://boards.greenhouse.io/dagger",
             },
             {
               label: "Brand",

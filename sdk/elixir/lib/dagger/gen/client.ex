@@ -687,6 +687,18 @@ defmodule Dagger.Client do
     }
   end
 
+  @doc "Load a SourceMap from its ID."
+  @spec load_source_map_from_id(t(), Dagger.SourceMapID.t()) :: Dagger.SourceMap.t()
+  def load_source_map_from_id(%__MODULE__{} = client, id) do
+    query_builder =
+      client.query_builder |> QB.select("loadSourceMapFromID") |> QB.put_arg("id", id)
+
+    %Dagger.SourceMap{
+      query_builder: query_builder,
+      client: client.client
+    }
+  end
+
   @doc "Load a Terminal from its ID."
   @spec load_terminal_from_id(t(), Dagger.TerminalID.t()) :: Dagger.Terminal.t()
   def load_terminal_from_id(%__MODULE__{} = client, id) do
@@ -741,6 +753,7 @@ defmodule Dagger.Client do
 
   @doc "Create a new module source instance from a source ref string."
   @spec module_source(t(), String.t(), [
+          {:ref_pin, String.t() | nil},
           {:stable, boolean() | nil},
           {:rel_host_path, String.t() | nil}
         ]) :: Dagger.ModuleSource.t()
@@ -749,6 +762,7 @@ defmodule Dagger.Client do
       client.query_builder
       |> QB.select("moduleSource")
       |> QB.put_arg("refString", ref_string)
+      |> QB.maybe_put_arg("refPin", optional_args[:ref_pin])
       |> QB.maybe_put_arg("stable", optional_args[:stable])
       |> QB.maybe_put_arg("relHostPath", optional_args[:rel_host_path])
 
@@ -787,6 +801,22 @@ defmodule Dagger.Client do
       |> QB.put_arg("plaintext", plaintext)
 
     %Dagger.Secret{
+      query_builder: query_builder,
+      client: client.client
+    }
+  end
+
+  @doc "Creates source map metadata."
+  @spec source_map(t(), String.t(), integer(), integer()) :: Dagger.SourceMap.t()
+  def source_map(%__MODULE__{} = client, filename, line, column) do
+    query_builder =
+      client.query_builder
+      |> QB.select("sourceMap")
+      |> QB.put_arg("filename", filename)
+      |> QB.put_arg("line", line)
+      |> QB.put_arg("column", column)
+
+    %Dagger.SourceMap{
       query_builder: query_builder,
       client: client.client
     }

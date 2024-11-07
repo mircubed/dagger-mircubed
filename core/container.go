@@ -92,10 +92,6 @@ type Container struct {
 	// Services to start before running the container.
 	Services ServiceBindings `json:"services,omitempty"`
 
-	// Focused indicates whether subsequent operations will be
-	// focused, i.e. shown more prominently in the UI.
-	Focused bool `json:"focused"`
-
 	// The args to invoke when using the terminal api on this container.
 	DefaultTerminalCmd DefaultTerminalCmdOpts `json:"defaultTerminalCmd,omitempty"`
 
@@ -245,6 +241,9 @@ type ContainerMount struct {
 	// Configure the mount as a tmpfs.
 	Tmpfs bool `json:"tmpfs,omitempty"`
 
+	// Configure the size of the mounted tmpfs in bytes
+	Size int `json:"size,omitempty"`
+
 	// Configure the mount as read-only.
 	Readonly bool `json:"readonly,omitempty"`
 }
@@ -280,36 +279,72 @@ func (mnts ContainerMounts) With(newMnt ContainerMount) ContainerMounts {
 	return mntsCp
 }
 
-func (container *Container) From(ctx context.Context, addr string) (*Container, error) {
+func (container *Container) FromRefString(ctx context.Context, addr string) (*Container, error) {
 	bk, err := container.Query.Buildkit(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get buildkit client: %w", err)
 	}
 
-	container = container.Clone()
-
 	platform := container.Platform
 
 	refName, err := reference.ParseNormalizedNamed(addr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to parse image address %s: %w", addr, err)
+	}
+	// add a default :latest if no tag or digest, otherwise this is a no-op
+	refName = reference.TagNameOnly(refName)
+
+	if refName, isCanonical := refName.(reference.Canonical); isCanonical {
+		return container.FromCanonicalRef(ctx, refName, nil)
 	}
 
-	ref := reference.TagNameOnly(refName).String()
-
-	_, digest, cfgBytes, err := bk.ResolveImageConfig(ctx, ref, sourceresolver.Opt{
+	_, digest, cfgBytes, err := bk.ResolveImageConfig(ctx, refName.String(), sourceresolver.Opt{
 		Platform: ptr(platform.Spec()),
 		ImageOpt: &sourceresolver.ResolveImageOpt{
 			ResolveMode: llb.ResolveModeDefault.String(),
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve image %s: %w", ref, err)
+		return nil, fmt.Errorf("failed to resolve image %s: %w", refName.String(), err)
+	}
+	canonRefName, err := reference.WithDigest(refName, digest)
+	if err != nil {
+		return nil, fmt.Errorf("failed to set digest on image %s: %w", refName.String(), err)
 	}
 
-	digested, err := reference.WithDigest(refName, digest)
+	return container.FromCanonicalRef(ctx, canonRefName, cfgBytes)
+}
+
+func (container *Container) FromCanonicalRef(
+	ctx context.Context,
+	refName reference.Canonical,
+	// cfgBytes is optional, will be retrieved if not provided
+	cfgBytes []byte,
+) (*Container, error) {
+	container = container.Clone()
+
+	bk, err := container.Query.Buildkit(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get buildkit client: %w", err)
+	}
+
+	platform := container.Platform
+
+	refStr := refName.String()
+
+	// since this is an image ref w/ a digest, always check the local cache for the image
+	// first before making any network requests
+	resolveMode := llb.ResolveModePreferLocal
+	if cfgBytes == nil {
+		_, _, cfgBytes, err = bk.ResolveImageConfig(ctx, refStr, sourceresolver.Opt{
+			Platform: ptr(platform.Spec()),
+			ImageOpt: &sourceresolver.ResolveImageOpt{
+				ResolveMode: resolveMode.String(),
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve image %s: %w", refStr, err)
+		}
 	}
 
 	var imgSpec specs.Image
@@ -318,8 +353,9 @@ func (container *Container) From(ctx context.Context, addr string) (*Container, 
 	}
 
 	fsSt := llb.Image(
-		digested.String(),
-		llb.WithCustomNamef("pull %s", ref),
+		refStr,
+		llb.WithCustomNamef("pull %s", refStr),
+		resolveMode,
 	)
 
 	def, err := fsSt.Marshal(ctx, llb.Platform(platform.Spec()))
@@ -330,7 +366,7 @@ func (container *Container) From(ctx context.Context, addr string) (*Container, 
 	container.FS = def.ToPB()
 
 	container.Config = mergeImageConfig(container.Config, imgSpec.Config)
-	container.ImageRef = digested.String()
+	container.ImageRef = refStr
 	container.Platform = Platform(platforms.Normalize(imgSpec.Platform))
 
 	return container, nil
@@ -622,7 +658,7 @@ func (container *Container) WithMountedCache(ctx context.Context, target string,
 	return container, nil
 }
 
-func (container *Container) WithMountedTemp(ctx context.Context, target string) (*Container, error) {
+func (container *Container) WithMountedTemp(ctx context.Context, target string, size int) (*Container, error) {
 	container = container.Clone()
 
 	target = absPath(container.Config.WorkingDir, target)
@@ -630,6 +666,7 @@ func (container *Container) WithMountedTemp(ctx context.Context, target string) 
 	container.Mounts = container.Mounts.With(ContainerMount{
 		Target: target,
 		Tmpfs:  true,
+		Size:   size,
 	})
 
 	// set image ref to empty string
@@ -1716,6 +1753,7 @@ type ImageLayerCompression string
 var ImageLayerCompressions = dagql.NewEnum[ImageLayerCompression]()
 
 var (
+	// FIXME: should be canonicalized as GZIP, ZSTD, ESTARGZ, UNCOMPRESSED
 	CompressionGzip         = ImageLayerCompressions.Register("Gzip")
 	CompressionZstd         = ImageLayerCompressions.Register("Zstd")
 	CompressionEStarGZ      = ImageLayerCompressions.Register("EStarGZ")
@@ -1746,6 +1784,7 @@ type ImageMediaTypes string
 var ImageMediaTypesEnum = dagql.NewEnum[ImageMediaTypes]()
 
 var (
+	// FIXME: should be canonicalized as OCI_MEDIA_TYPES, DOCKER_MEDIA_TYPES
 	OCIMediaTypes    = ImageMediaTypesEnum.Register("OCIMediaTypes")
 	DockerMediaTypes = ImageMediaTypesEnum.Register("DockerMediaTypes")
 )
@@ -1767,4 +1806,64 @@ func (proto ImageMediaTypes) Decoder() dagql.InputDecoder {
 
 func (proto ImageMediaTypes) ToLiteral() call.Literal {
 	return ImageMediaTypesEnum.Literal(proto)
+}
+
+type ReturnTypes string
+
+var ReturnTypesEnum = dagql.NewEnum[ReturnTypes]()
+
+var (
+	ReturnSuccess = ReturnTypesEnum.Register("SUCCESS",
+		`A successful execution (exit code 0)`,
+	)
+	ReturnFailure = ReturnTypesEnum.Register("FAILURE",
+		`A failed execution (exit codes 1-127)`,
+	)
+	ReturnAny = ReturnTypesEnum.Register("ANY",
+		`Any execution (exit codes 0-127)`,
+	)
+)
+
+func (expect ReturnTypes) Type() *ast.Type {
+	return &ast.Type{
+		NamedType: "ReturnType",
+		NonNull:   true,
+	}
+}
+
+func (expect ReturnTypes) TypeDescription() string {
+	return "Expected return type of an execution"
+}
+
+func (expect ReturnTypes) Decoder() dagql.InputDecoder {
+	return ReturnTypesEnum
+}
+
+func (expect ReturnTypes) ToLiteral() call.Literal {
+	return ReturnTypesEnum.Literal(expect)
+}
+
+// ReturnCodes gets the valid exit codes allowed for a specific return status
+//
+// NOTE: exit status codes above 127 are likely from exiting via a signal - we
+// shouldn't try and handle these.
+func (expect ReturnTypes) ReturnCodes() []int {
+	switch expect {
+	case ReturnSuccess:
+		return []int{0}
+	case ReturnFailure:
+		codes := make([]int, 0, 127)
+		for i := 1; i <= 127; i++ {
+			codes = append(codes, i)
+		}
+		return codes
+	case ReturnAny:
+		codes := make([]int, 0, 128)
+		for i := 0; i <= 127; i++ {
+			codes = append(codes, i)
+		}
+		return codes
+	default:
+		return nil
+	}
 }

@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"strings"
 
 	"go.opentelemetry.io/otel/codes"
+	"golang.org/x/mod/semver"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/dagger/dagger/.dagger/build"
@@ -183,7 +185,7 @@ func (t TypescriptSDK) Publish(
 	// +optional
 	githubToken *dagger.Secret,
 ) error {
-	version, isVersioned := strings.CutPrefix(tag, "sdk/typescript/")
+	version := strings.TrimPrefix(tag, "sdk/typescript/")
 	versionFlag := strings.TrimPrefix(version, "v")
 	if dryRun {
 		versionFlag = "prepatch"
@@ -192,6 +194,12 @@ func (t TypescriptSDK) Publish(
 	build := t.nodeJsBase().
 		WithExec([]string{"npm", "run", "build"}).
 		WithExec([]string{"npm", "version", versionFlag})
+
+	_, err := build.Directory("dist").Entries(ctx)
+	if err != nil {
+		return errors.New("dist directory does not exist")
+	}
+
 	if !dryRun {
 		plaintext, err := npmToken.Plaintext(ctx)
 		if err != nil {
@@ -207,15 +215,16 @@ always-auth=true`, plaintext)
 	if dryRun {
 		publish = build.WithExec([]string{"npm", "publish", "--access", "public", "--dry-run"})
 	}
-	_, err := publish.Sync(ctx)
+	_, err = publish.Sync(ctx)
 	if err != nil {
 		return err
 	}
 
-	if isVersioned {
-		if err := githubRelease(ctx, githubReleaseOpts{
-			tag:         tag,
-			notes:       sdkChangeNotes(t.Dagger.Src, "typescript", version),
+	if semver.IsValid(version) {
+		if err := githubRelease(ctx, t.Dagger.Git, githubReleaseOpts{
+			tag:         "sdk/typescript/" + version,
+			target:      tag,
+			notes:       changeNotes(t.Dagger.Src, "sdk/typescript", version),
 			gitRepo:     gitRepoSource,
 			githubToken: githubToken,
 			dryRun:      dryRun,

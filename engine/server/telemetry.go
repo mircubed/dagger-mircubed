@@ -11,9 +11,12 @@ import (
 	"dagger.io/dagger/telemetry"
 	"go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	otlpcommonv1 "go.opentelemetry.io/proto/otlp/common/v1"
 	"golang.org/x/sync/errgroup"
@@ -145,6 +148,50 @@ func (ps *PubSub) LogsHandler(rw http.ResponseWriter, r *http.Request) {
 	rw.WriteHeader(http.StatusCreated)
 }
 
+func (ps *PubSub) MetricsHandler(rw http.ResponseWriter, r *http.Request) {
+	sessionID := r.Header.Get("X-Dagger-Session-ID")
+	clientID := r.Header.Get("X-Dagger-Client-ID")
+	client, err := ps.srv.getClient(sessionID, clientID)
+	if err != nil {
+		slog.Warn("error getting client", "err", err)
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		slog.Warn("error reading body", "err", err)
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var req colmetricspb.ExportMetricsServiceRequest
+	if err := proto.Unmarshal(body, &req); err != nil {
+		slog.Error("error unmarshalling metrics request", "payload", string(body), "error", err)
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	slog.Debug("exporting metrics to clients", "clients", len(client.parents)+1)
+
+	eg := new(errgroup.Group)
+	for _, c := range append([]*daggerClient{client}, client.parents...) {
+		eg.Go(func() error {
+			if err := enginetel.ReexportMetricsFromPB(r.Context(), []sdkmetric.Exporter{ps.Metrics(c)}, &req); err != nil {
+				return fmt.Errorf("export to %s: %w", c.clientID, err)
+			}
+			return nil
+		})
+	}
+	if err := eg.Wait(); err != nil {
+		slog.Error("error exporting metrics", "err", err)
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	rw.WriteHeader(http.StatusCreated)
+}
+
 const otlpBatchSize = 1000
 
 func (ps *PubSub) TracesSubscribeHandler(w http.ResponseWriter, r *http.Request, client *daggerClient) error {
@@ -187,6 +234,7 @@ func (ps *PubSub) TracesSubscribeHandler(w http.ResponseWriter, r *http.Request,
 	})
 }
 
+//nolint:dupl
 func (ps *PubSub) LogsSubscribeHandler(w http.ResponseWriter, r *http.Request, client *daggerClient) error {
 	return ps.sseHandler(w, r, client, func(ctx context.Context, db *sql.DB, lastID string) (*sse.Event, bool, error) {
 		var since int64
@@ -223,8 +271,42 @@ func (ps *PubSub) LogsSubscribeHandler(w http.ResponseWriter, r *http.Request, c
 	})
 }
 
-func (ps *PubSub) MetricsHandler(rw http.ResponseWriter, r *http.Request) {
-	// TODO
+//nolint:dupl
+func (ps *PubSub) MetricsSubscribeHandler(w http.ResponseWriter, r *http.Request, client *daggerClient) error {
+	return ps.sseHandler(w, r, client, func(ctx context.Context, db *sql.DB, lastID string) (*sse.Event, bool, error) {
+		var since int64
+		if lastID != "" {
+			_, err := fmt.Sscanf(lastID, "%d", &since)
+			if err != nil {
+				return nil, false, fmt.Errorf("invalid last ID: %w", err)
+			}
+		}
+		q := clientdb.New(db)
+		metrics, err := q.SelectMetricsSince(ctx, clientdb.SelectMetricsSinceParams{
+			ID:    since,
+			Limit: otlpBatchSize,
+		})
+		if err != nil {
+			return nil, false, fmt.Errorf("select metrics: %w", err)
+		}
+
+		if len(metrics) == 0 {
+			return nil, false, nil
+		}
+		since = metrics[len(metrics)-1].ID
+		// Marshal the metrics to OTLP.
+		payload, err := protojson.Marshal(&colmetricspb.ExportMetricsServiceRequest{
+			ResourceMetrics: clientdb.MetricsToPB(metrics),
+		})
+		if err != nil {
+			return nil, false, fmt.Errorf("marshal metrics: %w", err)
+		}
+		return &sse.Event{
+			Name: "metrics",
+			ID:   fmt.Sprintf("%d", since),
+			Data: payload,
+		}, true, nil
+	})
 }
 
 type SpansPubSub struct {
@@ -239,24 +321,10 @@ func (ps *PubSub) Spans(client *daggerClient) sdktrace.SpanExporter {
 	}
 }
 
-func spanNames(spans []sdktrace.ReadOnlySpan) []string {
-	names := make([]string, len(spans))
-	for i, span := range spans {
-		names[i] = span.Name()
-	}
-	return names
-}
-
 func (ps SpansPubSub) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
 	slog.ExtraDebug("pubsub exporting spans", "client", ps.client.clientID, "count", len(spans))
 
-	tx, err := ps.client.db.Begin()
-	if err != nil {
-		return fmt.Errorf("export spans %+v: begin tx: %w", spanNames(spans), err)
-	}
-	defer tx.Rollback()
-
-	queries := clientdb.New(tx)
+	queries := clientdb.New(ps.client.db)
 
 	for _, span := range spans {
 		traceID := span.SpanContext().TraceID().String()
@@ -335,10 +403,6 @@ func (ps SpansPubSub) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnly
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit tx: %w", err)
-	}
-
 	return nil
 }
 
@@ -360,13 +424,7 @@ type LogsPubSub struct {
 func (ps LogsPubSub) Export(ctx context.Context, logs []sdklog.Record) error {
 	slog.ExtraDebug("pubsub exporting logs", "client", ps.client.clientID, "count", len(logs))
 
-	tx, err := ps.client.db.Begin()
-	if err != nil {
-		return fmt.Errorf("export logs %+v: begin tx: %w", logs, err)
-	}
-	defer tx.Rollback()
-
-	queries := clientdb.New(tx)
+	queries := clientdb.New(ps.client.db)
 
 	for _, rec := range logs {
 		traceID := rec.TraceID().String()
@@ -375,6 +433,7 @@ func (ps LogsPubSub) Export(ctx context.Context, logs []sdklog.Record) error {
 		severity := int64(rec.Severity())
 
 		var body []byte
+		var err error
 		if !rec.Body().Empty() {
 			body, err = proto.Marshal(telemetry.LogValueToPB(rec.Body()))
 			if err != nil {
@@ -433,15 +492,60 @@ func (ps LogsPubSub) Export(ctx context.Context, logs []sdklog.Record) error {
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit tx: %w", err)
-	}
-
 	return nil
 }
 
 func (ps LogsPubSub) ForceFlush(ctx context.Context) error { return nil }
 func (ps LogsPubSub) Shutdown(context.Context) error       { return nil }
+
+func (ps *PubSub) Metrics(client *daggerClient) sdkmetric.Exporter {
+	return MetricsPubSub{
+		PubSub: ps,
+		client: client,
+	}
+}
+
+type MetricsPubSub struct {
+	*PubSub
+	client *daggerClient
+}
+
+func (ps MetricsPubSub) Export(ctx context.Context, metrics *metricdata.ResourceMetrics) error {
+	slog.ExtraDebug("pubsub exporting metrics", "client", ps.client.clientID, "count", len(metrics.ScopeMetrics))
+	if len(metrics.ScopeMetrics) == 0 {
+		return nil
+	}
+
+	queries := clientdb.New(ps.client.db)
+
+	pbMetrics, err := telemetry.ResourceMetricsToPB(metrics)
+	if err != nil {
+		return fmt.Errorf("convert metrics to pb: %w", err)
+	}
+
+	metricsPBBytes, err := protojson.Marshal(pbMetrics)
+	if err != nil {
+		return fmt.Errorf("marshal metrics to pb: %w", err)
+	}
+
+	_, err = queries.InsertMetric(ctx, metricsPBBytes)
+	if err != nil {
+		return fmt.Errorf("insert metrics: %w", err)
+	}
+
+	return nil
+}
+
+func (ps MetricsPubSub) Temporality(sdkmetric.InstrumentKind) metricdata.Temporality {
+	return metricdata.DeltaTemporality
+}
+
+func (ps MetricsPubSub) Aggregation(sdkmetric.InstrumentKind) sdkmetric.Aggregation {
+	return sdkmetric.AggregationDefault{}
+}
+
+func (ps MetricsPubSub) ForceFlush(ctx context.Context) error { return nil }
+func (ps MetricsPubSub) Shutdown(context.Context) error       { return nil }
 
 type Fetcher func(ctx context.Context, db *sql.DB, since string) (*sse.Event, bool, error)
 
