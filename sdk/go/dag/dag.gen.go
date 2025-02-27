@@ -40,12 +40,6 @@ func Close() error {
 	return err
 }
 
-// Retrieves a content-addressed blob.
-func Blob(digest string, size int, mediaType string, uncompressed string) *dagger.Directory {
-	client := initClient()
-	return client.Blob(digest, size, mediaType, uncompressed)
-}
-
 // Retrieves a container builtin to the engine.
 func BuiltinContainer(digest string) *dagger.Container {
 	client := initClient()
@@ -53,9 +47,9 @@ func BuiltinContainer(digest string) *dagger.Container {
 }
 
 // Constructs a cache volume for a given cache key.
-func CacheVolume(key string) *dagger.CacheVolume {
+func CacheVolume(key string, opts ...dagger.CacheVolumeOpts) *dagger.CacheVolume {
 	client := initClient()
-	return client.CacheVolume(key)
+	return client.CacheVolume(key, opts...)
 }
 
 // Creates a scratch container.
@@ -86,12 +80,6 @@ func CurrentTypeDefs(ctx context.Context) ([]dagger.TypeDef, error) {
 	return client.CurrentTypeDefs(ctx)
 }
 
-// The Dagger engine container configuration and state
-func DaggerEngine() *dagger.DaggerEngine {
-	client := initClient()
-	return client.DaggerEngine()
-}
-
 // The default platform of the engine.
 func DefaultPlatform(ctx context.Context) (dagger.Platform, error) {
 	client := initClient()
@@ -102,6 +90,18 @@ func DefaultPlatform(ctx context.Context) (dagger.Platform, error) {
 func Directory() *dagger.Directory {
 	client := initClient()
 	return client.Directory()
+}
+
+// The Dagger engine container configuration and state
+func Engine() *dagger.Engine {
+	client := initClient()
+	return client.Engine()
+}
+
+// Create a new error.
+func Error(message string) *dagger.Error {
+	client := initClient()
+	return client.Error(message)
 }
 
 // Creates a function.
@@ -152,34 +152,34 @@ func LoadCurrentModuleFromID(id dagger.CurrentModuleID) *dagger.CurrentModule {
 	return client.LoadCurrentModuleFromID(id)
 }
 
-// Load a DaggerEngineCacheEntry from its ID.
-func LoadDaggerEngineCacheEntryFromID(id dagger.DaggerEngineCacheEntryID) *dagger.DaggerEngineCacheEntry {
-	client := initClient()
-	return client.LoadDaggerEngineCacheEntryFromID(id)
-}
-
-// Load a DaggerEngineCacheEntrySet from its ID.
-func LoadDaggerEngineCacheEntrySetFromID(id dagger.DaggerEngineCacheEntrySetID) *dagger.DaggerEngineCacheEntrySet {
-	client := initClient()
-	return client.LoadDaggerEngineCacheEntrySetFromID(id)
-}
-
-// Load a DaggerEngineCache from its ID.
-func LoadDaggerEngineCacheFromID(id dagger.DaggerEngineCacheID) *dagger.DaggerEngineCache {
-	client := initClient()
-	return client.LoadDaggerEngineCacheFromID(id)
-}
-
-// Load a DaggerEngine from its ID.
-func LoadDaggerEngineFromID(id dagger.DaggerEngineID) *dagger.DaggerEngine {
-	client := initClient()
-	return client.LoadDaggerEngineFromID(id)
-}
-
 // Load a Directory from its ID.
 func LoadDirectoryFromID(id dagger.DirectoryID) *dagger.Directory {
 	client := initClient()
 	return client.LoadDirectoryFromID(id)
+}
+
+// Load a EngineCacheEntry from its ID.
+func LoadEngineCacheEntryFromID(id dagger.EngineCacheEntryID) *dagger.EngineCacheEntry {
+	client := initClient()
+	return client.LoadEngineCacheEntryFromID(id)
+}
+
+// Load a EngineCacheEntrySet from its ID.
+func LoadEngineCacheEntrySetFromID(id dagger.EngineCacheEntrySetID) *dagger.EngineCacheEntrySet {
+	client := initClient()
+	return client.LoadEngineCacheEntrySetFromID(id)
+}
+
+// Load a EngineCache from its ID.
+func LoadEngineCacheFromID(id dagger.EngineCacheID) *dagger.EngineCache {
+	client := initClient()
+	return client.LoadEngineCacheFromID(id)
+}
+
+// Load a Engine from its ID.
+func LoadEngineFromID(id dagger.EngineID) *dagger.Engine {
+	client := initClient()
+	return client.LoadEngineFromID(id)
 }
 
 // Load a EnumTypeDef from its ID.
@@ -198,6 +198,12 @@ func LoadEnumValueTypeDefFromID(id dagger.EnumValueTypeDefID) *dagger.EnumValueT
 func LoadEnvVariableFromID(id dagger.EnvVariableID) *dagger.EnvVariable {
 	client := initClient()
 	return client.LoadEnvVariableFromID(id)
+}
+
+// Load a Error from its ID.
+func LoadErrorFromID(id dagger.ErrorID) *dagger.Error {
+	client := initClient()
+	return client.LoadErrorFromID(id)
 }
 
 // Load a FieldTypeDef from its ID.
@@ -242,12 +248,6 @@ func LoadGeneratedCodeFromID(id dagger.GeneratedCodeID) *dagger.GeneratedCode {
 	return client.LoadGeneratedCodeFromID(id)
 }
 
-// Load a GitModuleSource from its ID.
-func LoadGitModuleSourceFromID(id dagger.GitModuleSourceID) *dagger.GitModuleSource {
-	client := initClient()
-	return client.LoadGitModuleSourceFromID(id)
-}
-
 // Load a GitRef from its ID.
 func LoadGitRefFromID(id dagger.GitRefID) *dagger.GitRef {
 	client := initClient()
@@ -290,18 +290,6 @@ func LoadListTypeDefFromID(id dagger.ListTypeDefID) *dagger.ListTypeDef {
 	return client.LoadListTypeDefFromID(id)
 }
 
-// Load a LocalModuleSource from its ID.
-func LoadLocalModuleSourceFromID(id dagger.LocalModuleSourceID) *dagger.LocalModuleSource {
-	client := initClient()
-	return client.LoadLocalModuleSourceFromID(id)
-}
-
-// Load a ModuleDependency from its ID.
-func LoadModuleDependencyFromID(id dagger.ModuleDependencyID) *dagger.ModuleDependency {
-	client := initClient()
-	return client.LoadModuleDependencyFromID(id)
-}
-
 // Load a Module from its ID.
 func LoadModuleFromID(id dagger.ModuleID) *dagger.Module {
 	client := initClient()
@@ -312,12 +300,6 @@ func LoadModuleFromID(id dagger.ModuleID) *dagger.Module {
 func LoadModuleSourceFromID(id dagger.ModuleSourceID) *dagger.ModuleSource {
 	client := initClient()
 	return client.LoadModuleSourceFromID(id)
-}
-
-// Load a ModuleSourceView from its ID.
-func LoadModuleSourceViewFromID(id dagger.ModuleSourceViewID) *dagger.ModuleSourceView {
-	client := initClient()
-	return client.LoadModuleSourceViewFromID(id)
 }
 
 // Load a ObjectTypeDef from its ID.
@@ -332,6 +314,12 @@ func LoadPortFromID(id dagger.PortID) *dagger.Port {
 	return client.LoadPortFromID(id)
 }
 
+// Load a SDKConfig from its ID.
+func LoadSDKConfigFromID(id dagger.SDKConfigID) *dagger.SDKConfig {
+	client := initClient()
+	return client.LoadSDKConfigFromID(id)
+}
+
 // Load a ScalarTypeDef from its ID.
 func LoadScalarTypeDefFromID(id dagger.ScalarTypeDefID) *dagger.ScalarTypeDef {
 	client := initClient()
@@ -342,6 +330,12 @@ func LoadScalarTypeDefFromID(id dagger.ScalarTypeDefID) *dagger.ScalarTypeDef {
 func LoadSecretFromID(id dagger.SecretID) *dagger.Secret {
 	client := initClient()
 	return client.LoadSecretFromID(id)
+}
+
+// Load a Secret from its Name.
+func LoadSecretFromName(name string, opts ...dagger.LoadSecretFromNameOpts) *dagger.Secret {
+	client := initClient()
+	return client.LoadSecretFromName(name, opts...)
 }
 
 // Load a Service from its ID.
@@ -380,22 +374,16 @@ func Module() *dagger.Module {
 	return client.Module()
 }
 
-// Create a new module dependency configuration from a module source and name
-func ModuleDependency(source *dagger.ModuleSource, opts ...dagger.ModuleDependencyOpts) *dagger.ModuleDependency {
-	client := initClient()
-	return client.ModuleDependency(source, opts...)
-}
-
-// Create a new module source instance from a source ref string.
+// Create a new module source instance from a source ref string
 func ModuleSource(refString string, opts ...dagger.ModuleSourceOpts) *dagger.ModuleSource {
 	client := initClient()
 	return client.ModuleSource(refString, opts...)
 }
 
-// Reference a secret by name.
-func Secret(name string, opts ...dagger.SecretOpts) *dagger.Secret {
+// Creates a new secret.
+func Secret(uri string) *dagger.Secret {
 	client := initClient()
-	return client.Secret(name, opts...)
+	return client.Secret(uri)
 }
 
 // Sets a secret given a user defined name to its plaintext and returns the secret.

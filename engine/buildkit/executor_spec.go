@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/containerd/containerd/mount"
@@ -23,11 +24,13 @@ import (
 	"github.com/containerd/continuity/fs"
 	runc "github.com/containerd/go-runc"
 	"github.com/dagger/dagger/engine/buildkit/resources"
+	"github.com/dagger/dagger/engine/client/pathutil"
+	"github.com/dagger/dagger/engine/slog"
 	"github.com/docker/docker/pkg/idtools"
+	"github.com/google/uuid"
 	"github.com/moby/buildkit/executor"
 	"github.com/moby/buildkit/executor/oci"
 	randid "github.com/moby/buildkit/identity"
-	bksession "github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/solver/pb"
 	"github.com/moby/buildkit/util/bklog"
 	bknetwork "github.com/moby/buildkit/util/network"
@@ -42,9 +45,7 @@ import (
 	"github.com/dagger/dagger/engine"
 	"github.com/dagger/dagger/engine/buildkit/cacerts"
 	"github.com/dagger/dagger/engine/buildkit/containerfs"
-	"github.com/dagger/dagger/engine/client"
 	"github.com/dagger/dagger/engine/distconsts"
-	"github.com/dagger/dagger/engine/session"
 	"github.com/dagger/dagger/network"
 )
 
@@ -63,17 +64,6 @@ const (
 
 	// this is set by buildkit, we cannot change
 	BuildkitSessionIDHeader = "x-docker-expose-session-uuid"
-
-	OTelTraceParentEnv      = "TRACEPARENT"
-	OTelExporterProtocolEnv = "OTEL_EXPORTER_OTLP_PROTOCOL"
-	OTelExporterEndpointEnv = "OTEL_EXPORTER_OTLP_ENDPOINT"
-	OTelTracesProtocolEnv   = "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"
-	OTelTracesEndpointEnv   = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
-	OTelTracesLiveEnv       = "OTEL_EXPORTER_OTLP_TRACES_LIVE"
-	OTelLogsProtocolEnv     = "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL"
-	OTelLogsEndpointEnv     = "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"
-	OTelMetricsProtocolEnv  = "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"
-	OTelMetricsEndpointEnv  = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
 
 	buildkitQemuEmulatorMountPoint = "/dev/.buildkit_qemu_emulator"
 
@@ -99,17 +89,18 @@ type execState struct {
 
 	cleanups *Cleanups
 
-	spec             *specs.Spec
-	networkNamespace bknetwork.Namespace
-	rootfsPath       string
-	uid              uint32
-	gid              uint32
-	sgids            []uint32
-	resolvConfPath   string
-	hostsFilePath    string
-	exitCodePath     string
-	metaMount        *specs.Mount
-	origEnvMap       map[string]string
+	spec               *specs.Spec
+	networkNamespace   bknetwork.Namespace
+	rootfsPath         string
+	uid                uint32
+	gid                uint32
+	sgids              []uint32
+	resolvConfPath     string
+	hostsFilePath      string
+	exitCodePath       string
+	metaMount          *specs.Mount
+	origEnvMap         map[string]string
+	sessionClientConnF *os.File
 
 	startedOnce *sync.Once
 	startedCh   chan<- struct{}
@@ -147,6 +138,11 @@ func (w *Worker) setupNetwork(ctx context.Context, state *execState) error {
 	provider, ok := w.networkProviders[state.procInfo.Meta.NetMode]
 	if !ok {
 		return fmt.Errorf("unknown network mode %s", state.procInfo.Meta.NetMode)
+	}
+	// if our process spec allows changes to the netns and doesn't have a hostname, assign one so buildkit doesn't default to pooled network namespaces
+	// ideally, we'd be less aggressive and find a way to CLONE_NEWNET the parent netns, but for now isolation is preferable to unpredictable rule bleeding.
+	if state.procInfo.Meta.SecurityMode == pb.SecurityMode_INSECURE && state.procInfo.Meta.Hostname == "" {
+		state.procInfo.Meta.Hostname = uuid.NewString()
 	}
 	networkNamespace, err := provider.New(ctx, state.procInfo.Meta.Hostname)
 	if err != nil {
@@ -333,18 +329,18 @@ func (m hostBindMountRef) IdentityMapping() *idtools.IdentityMapping {
 	return nil
 }
 
-func (w *Worker) injectDumbInit(_ context.Context, state *execState) error {
+func (w *Worker) injectInit(_ context.Context, state *execState) error {
 	if w.execMD != nil && w.execMD.NoInit {
 		return nil
 	}
 
-	dumbInitPath := "/.init"
+	initPath := "/.init"
 	state.mounts = append(state.mounts, executor.Mount{
-		Src:      hostBindMount{srcPath: distconsts.DumbInitPath},
-		Dest:     dumbInitPath,
+		Src:      hostBindMount{srcPath: distconsts.DaggerInitPath},
+		Dest:     initPath,
 		Readonly: true,
 	})
-	state.procInfo.Meta.Args = append([]string{dumbInitPath}, state.procInfo.Meta.Args...)
+	state.procInfo.Meta.Args = append([]string{initPath}, state.procInfo.Meta.Args...)
 
 	return nil
 }
@@ -470,21 +466,31 @@ func (w *Worker) setupRootfs(ctx context.Context, state *execState) error {
 			return fmt.Errorf("mount %s points to invalid target: %w", mnt.Target, err)
 		}
 
-		// ref: https://github.com/opencontainers/runc/blob/9d02c20df7faf7b356a632e35dfccf332fc7efed/libcontainer/rootfs_linux.go#L1173
 		if _, err := os.Stat(dstPath); err != nil {
 			if !os.IsNotExist(err) {
 				return fmt.Errorf("stat mount target %s: %w", dstPath, err)
 			}
-			srcStat, err := os.Stat(mnt.Source)
-			if err != nil {
-				return fmt.Errorf("stat mount source %s: %w", mnt.Source, err)
+
+			// Need to check if the source is a directory or file so we can create the stub for the mount
+			// with the correct type. Only bind mounts can be files (as far as we are concerned), so look
+			// for that option and otherwise assume it is a directory (i.e. overlay).
+			srcIsDir := true
+			for _, opt := range mnt.Options {
+				if opt == "bind" || opt == "rbind" {
+					srcStat, err := os.Stat(mnt.Source)
+					if err != nil {
+						return fmt.Errorf("stat mount source %s: %w", mnt.Source, err)
+					}
+					srcIsDir = srcStat.IsDir()
+					break
+				}
 			}
-			switch srcStat.Mode() & os.ModeType {
-			case os.ModeDir:
+
+			if srcIsDir {
 				if err := os.MkdirAll(dstPath, 0o755); err != nil {
 					return fmt.Errorf("create mount target dir %s: %w", dstPath, err)
 				}
-			default:
+			} else {
 				if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
 					return fmt.Errorf("create mount target parent dir %s: %w", dstPath, err)
 				}
@@ -641,12 +647,14 @@ func (w *Worker) setupStdio(_ context.Context, state *execState) error {
 	return nil
 }
 
-const InstrumentationLibrary = "dagger.io/engine.buildkit"
-
 func (w *Worker) setupOTel(ctx context.Context, state *execState) error {
 	if state.procInfo.Meta.NetMode != pb.NetMode_UNSET {
 		// align with setupNetwork; otherwise we hang waiting for a netNS worker
 		return nil
+	}
+
+	if w.causeCtx.IsValid() {
+		ctx = trace.ContextWithSpanContext(ctx, w.causeCtx)
 	}
 
 	var destSession string
@@ -659,10 +667,6 @@ func (w *Worker) setupOTel(ctx context.Context, state *execState) error {
 		// If you set ClientID here, nested dagger CLI calls made against an engine running
 		// as a service in Dagger will end up in a loop sending logs to themselves.
 		destClientID = w.execMD.CallerClientID
-
-		if len(w.execMD.SpanContext) > 0 {
-			ctx = telemetry.Propagator.Extract(ctx, w.execMD.SpanContext)
-		}
 	}
 
 	stdio := telemetry.SpanStdio(ctx, InstrumentationLibrary)
@@ -685,7 +689,7 @@ func (w *Worker) setupOTel(ctx context.Context, state *execState) error {
 			r.Header.Set("X-Dagger-Client-ID", destClientID)
 			w.telemetryPubSub.ServeHTTP(rw, r)
 		}),
-		ReadHeaderTimeout: 10 * time.Second, // for gocritic
+		ReadHeaderTimeout: 5 * time.Second, // for gocritic
 	}
 	listenerPool := pool.New().WithErrors()
 	listenerPool.Go(func() error {
@@ -697,28 +701,35 @@ func (w *Worker) setupOTel(ctx context.Context, state *execState) error {
 		}
 		return nil
 	})
-	state.cleanups.Add("shutdown otel proxy", func() error {
+	state.cleanups.Add("shutdown otel proxy", Infallible(func() {
 		shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		return otelSrv.Shutdown(shutdownCtx)
-	})
+		switch err := otelSrv.Shutdown(shutdownCtx); {
+		case err == nil:
+			return
+		case errors.Is(err, context.DeadlineExceeded):
+			slog.ErrorContext(ctx, "timeout waiting for OTel proxy to shutdown", err)
+		default:
+			slog.ErrorContext(ctx, "failed to shutdown OTel proxy", err)
+		}
+	}))
 
 	// Configure our OpenTelemetry proxy. A lot.
 	otelProto := "http/protobuf"
 	otelEndpoint := "http://" + listener.Addr().String()
 	state.spec.Process.Env = append(state.spec.Process.Env,
-		OTelExporterProtocolEnv+"="+otelProto,
-		OTelExporterEndpointEnv+"="+otelEndpoint,
-		OTelTracesProtocolEnv+"="+otelProto,
-		OTelTracesEndpointEnv+"="+otelEndpoint+"/v1/traces",
+		engine.OTelExporterProtocolEnv+"="+otelProto,
+		engine.OTelExporterEndpointEnv+"="+otelEndpoint,
+		engine.OTelTracesProtocolEnv+"="+otelProto,
+		engine.OTelTracesEndpointEnv+"="+otelEndpoint+"/v1/traces",
 		// Indicate that the /v1/trace endpoint accepts live telemetry.
-		OTelTracesLiveEnv+"=1",
+		engine.OTelTracesLiveEnv+"=1",
 		// Dagger sets up log+metric exporters too. Explicitly set them
 		// so things can detect support for it.
-		OTelLogsProtocolEnv+"="+otelProto,
-		OTelLogsEndpointEnv+"="+otelEndpoint+"/v1/logs",
-		OTelMetricsProtocolEnv+"="+otelProto,
-		OTelMetricsEndpointEnv+"="+otelEndpoint+"/v1/metrics",
+		engine.OTelLogsProtocolEnv+"="+otelProto,
+		engine.OTelLogsEndpointEnv+"="+otelEndpoint+"/v1/logs",
+		engine.OTelMetricsProtocolEnv+"="+otelProto,
+		engine.OTelMetricsEndpointEnv+"="+otelEndpoint+"/v1/metrics",
 	)
 
 	// Telemetry propagation (traceparent, tracestate, baggage, etc)
@@ -910,10 +921,8 @@ func (w *Worker) setupNestedClient(ctx context.Context, state *execState) (rerr 
 		w.execMD.Hostname = state.spec.Hostname
 	}
 
-	if len(w.execMD.SpanContext) > 0 {
-		// propagate trace ctx to session attachables
-		ctx = telemetry.Propagator.Extract(ctx, w.execMD.SpanContext)
-	}
+	// propagate trace ctx to session attachables
+	ctx = trace.ContextWithSpanContext(ctx, w.causeCtx)
 
 	state.spec.Process.Env = append(state.spec.Process.Env, DaggerSessionTokenEnv+"="+w.execMD.SecretToken)
 
@@ -923,7 +932,7 @@ func (w *Worker) setupNestedClient(ctx context.Context, state *execState) (rerr 
 	if sockPath, ok := state.origEnvMap["SSH_AUTH_SOCK"]; ok {
 		if strings.HasPrefix(sockPath, "~") {
 			if homeDir, ok := state.origEnvMap["HOME"]; ok {
-				expandedPath, err := client.ExpandHomeDir(homeDir, sockPath)
+				expandedPath, err := pathutil.ExpandHomeDir(homeDir, sockPath)
 				if err != nil {
 					return fmt.Errorf("failed to expand homedir: %w", err)
 				}
@@ -936,77 +945,19 @@ func (w *Worker) setupNestedClient(ctx context.Context, state *execState) (rerr 
 		}
 	}
 
-	filesyncer, err := client.NewFilesyncer(
-		state.rootfsPath,
-		strings.TrimPrefix(state.spec.Process.Cwd, "/"),
-		&state.uid, &state.gid,
-	)
+	sessionClientConnF, sessionSrvConnF, err := newSocketpair()
 	if err != nil {
-		return fmt.Errorf("create filesyncer: %w", err)
+		return fmt.Errorf("create session socket pair: %w", err)
 	}
+	// closing net.FileConn won't close the underlying fd, so do that here
+	state.cleanups.Add("close session client conn", sessionClientConnF.Close)
+	state.cleanups.Add("close session srv conn", sessionSrvConnF.Close)
+	state.sessionClientConnF = sessionClientConnF
 
-	attachables := []bksession.Attachable{
-		client.SocketProvider{
-			EnableHostNetworkAccess: true,
-			IPDialer: func(networkType, addr string) (net.Conn, error) {
-				// To handle the case where the host being looked up is another service container
-				// endpoint without any qualification, we check both the unqualified and
-				// search-domain-qualified hostnames.
-				// The alternative here would be to also enter into the container's mount namespace,
-				// which while entirely feasible is an annoyance that outweighs the annoyance of this.
-				hostName, port, err := net.SplitHostPort(addr)
-				if err != nil {
-					return nil, fmt.Errorf("split host port %s: %w", addr, err)
-				}
-				var resolvedHost string
-				var errs error
-				for _, searchDomain := range []string{"", network.SessionDomain(w.execMD.SessionID)} {
-					qualified := hostName
-					if searchDomain != "" {
-						qualified += "." + searchDomain
-					}
-					_, err := net.LookupIP(qualified)
-					if err == nil {
-						resolvedHost = qualified
-						break
-					}
-					errs = errors.Join(errs, err)
-				}
-				if resolvedHost == "" {
-					return nil, fmt.Errorf("resolve %s: %w", hostName, errors.Join(errs))
-				}
-				addr = net.JoinHostPort(resolvedHost, port)
-
-				return runInNetNS(ctx, state, func() (net.Conn, error) {
-					return net.Dial(networkType, addr)
-				})
-			},
-			UnixPathMapper: func(p string) (string, error) {
-				if !filepath.IsAbs(p) {
-					return "", fmt.Errorf("path %s is not absolute", p)
-				}
-				fullPath, err := fs.RootPath(state.rootfsPath, p)
-				if err != nil {
-					return "", fmt.Errorf("find full root path: %w", err)
-				}
-				return fullPath, nil
-			},
-		},
-		session.NewTunnelListenerAttachable(ctx, func(network, addr string) (net.Listener, error) {
-			return runInNetNS(ctx, state, func() (net.Listener, error) {
-				return net.Listen(network, addr)
-			})
-		}),
-		filesyncer.AsSource(),
-		filesyncer.AsTarget(),
+	sessionSrvConn, err := net.FileConn(sessionSrvConnF)
+	if err != nil {
+		return fmt.Errorf("convert session srv conn: %w", err)
 	}
-
-	sessionClientConn, sessionSrvConn := net.Pipe()
-	state.cleanups.Add("close session client conn", sessionClientConn.Close)
-	state.cleanups.Add("close session server conn", sessionSrvConn.Close)
-
-	sessionSrv := client.NewBuildkitSessionServer(ctx, sessionClientConn, attachables...)
-	stopSessionSrv := state.cleanups.Add("stop session server", Infallible(sessionSrv.Stop))
 
 	srvCtx, srvCancel := context.WithCancelCause(ctx)
 	state.cleanups.Add("cancel session server", Infallible(func() {
@@ -1014,15 +965,15 @@ func (w *Worker) setupNestedClient(ctx context.Context, state *execState) (rerr 
 	}))
 	srvPool := pool.New().WithContext(srvCtx).WithCancelOnError()
 	srvPool.Go(func(ctx context.Context) error {
-		sessionSrv.Run(ctx)
-		return nil
-	})
-	srvPool.Go(func(ctx context.Context) error {
 		return w.bkSessionManager.HandleConn(ctx, sessionSrvConn, map[string][]string{
-			engine.SessionIDMetaKey:         {w.execMD.ClientID},
-			engine.SessionNameMetaKey:       {w.execMD.ClientID},
-			engine.SessionSharedKeyMetaKey:  {""},
-			engine.SessionMethodNameMetaKey: sessionSrv.MethodURLs,
+			engine.SessionIDMetaKey:        {w.execMD.ClientID},
+			engine.SessionNameMetaKey:      {w.execMD.ClientID},
+			engine.SessionSharedKeyMetaKey: {""},
+			engine.SessionMethodNameMetaKey: {
+				// buildkit doesn't care about this, except one codepath where it insists on checking
+				// for FileSend/diffcopy, so include that here
+				"/moby.filesync.v1.FileSend/diffcopy",
+			},
 		})
 	})
 
@@ -1060,13 +1011,32 @@ func (w *Worker) setupNestedClient(ctx context.Context, state *execState) (rerr 
 	})
 
 	state.cleanups.Add("wait for nested client server pool", srvPool.Wait)
-	state.cleanups.ReAdd(stopSessionSrv)
+	// state.cleanups.ReAdd(stopSessionSrv)
 	state.cleanups.Add("close nested client http server", httpSrv.Close)
 	state.cleanups.Add("cancel nested client server pool", Infallible(func() {
 		srvCancel(errors.New("container cleanup"))
 	}))
 
 	return nil
+}
+
+func newSocketpair() (*os.File, *os.File, error) {
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		return nil, nil, fmt.Errorf("socketpair: %w", err)
+	}
+
+	fd0 := fds[0]
+	fd1 := fds[1]
+
+	if err := syscall.SetNonblock(fd0, true); err != nil {
+		return nil, nil, fmt.Errorf("set nonblock fd0: %w", err)
+	}
+	if err := syscall.SetNonblock(fd1, true); err != nil {
+		return nil, nil, fmt.Errorf("set nonblock fd1: %w", err)
+	}
+
+	return os.NewFile(uintptr(fd0), "socketpair0"), os.NewFile(uintptr(fd1), "socketpair1"), nil
 }
 
 func (w *Worker) installCACerts(ctx context.Context, state *execState) error {
@@ -1104,7 +1074,7 @@ func (w *Worker) installCACerts(ctx context.Context, state *execState) error {
 		}
 
 		// copy the spec by doing a json ser/deser round (this could be more efficient, but
-		// probably not a bottlneck)
+		// probably not a bottleneck)
 		bs, err := json.Marshal(state.spec)
 		if err != nil {
 			return fmt.Errorf("marshal spec: %w", err)
@@ -1173,7 +1143,7 @@ func (w *Worker) runContainer(ctx context.Context, state *execState) (rerr error
 	if w.execMD != nil {
 		lg = lg.WithField("caller_client_id", w.execMD.CallerClientID)
 		if w.execMD.CallID != nil {
-			lg = lg.WithField("call_id", w.execMD.CallID.Display())
+			lg = lg.WithField("call_id", w.execMD.CallID.Digest())
 		}
 		if w.execMD.ClientID != "" {
 			lg = lg.WithField("nested_client_id", w.execMD.ClientID)
@@ -1209,7 +1179,7 @@ func (w *Worker) runContainer(ctx context.Context, state *execState) (rerr error
 			)
 		}
 
-		cgroupSampler, err := resources.NewSampler(cgroupPath, meter, attribute.NewSet(commonAttrs...))
+		cgroupSampler, err := resources.NewSampler(cgroupPath, state.networkNamespace, meter, attribute.NewSet(commonAttrs...))
 		if err != nil {
 			return fmt.Errorf("create cgroup sampler: %w", err)
 		}
@@ -1258,10 +1228,15 @@ func (w *Worker) runContainer(ctx context.Context, state *execState) (rerr error
 	killer := newRunProcKiller(w.runc, state.id)
 
 	runcCall := func(ctx context.Context, started chan<- int, io runc.IO, pidfile string) error {
+		var extraFiles []*os.File
+		if state.sessionClientConnF != nil {
+			extraFiles = append(extraFiles, state.sessionClientConnF)
+		}
 		_, err := w.runc.Run(ctx, state.id, bundle, &runc.CreateOpts{
-			Started:   started,
-			IO:        io,
-			ExtraArgs: []string{"--keep"},
+			Started:    started,
+			IO:         io,
+			ExtraArgs:  []string{"--keep"},
+			ExtraFiles: extraFiles,
 		})
 		return err
 	}

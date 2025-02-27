@@ -11,7 +11,7 @@ import (
 	"dagger.io/dagger"
 	"github.com/creack/pty"
 	"github.com/dagger/dagger/internal/testutil"
-	"github.com/dagger/dagger/testctx"
+	"github.com/dagger/testctx"
 	"github.com/stretchr/testify/require"
 )
 
@@ -101,7 +101,7 @@ func (ContainerSuite) TestSystemCACerts(ctx context.Context, t *testctx.T) {
 
 			// verify no system CAs are leftover
 			_, err := ctr.Directory("/usr/local/share/ca-certificates").Entries(ctx)
-			require.ErrorContains(t, err, "no such file or directory")
+			requireErrOut(t, err, "no such file or directory")
 
 			bundleContents, err := ctr.File("/etc/ssl/certs/ca-certificates.crt").Contents(ctx)
 			require.NoError(t, err)
@@ -143,12 +143,33 @@ func (ContainerSuite) TestSystemCACerts(ctx context.Context, t *testctx.T) {
 
 			// verify no system CAs are leftover
 			_, err = ctr.Directory("/usr/local/share/ca-certificates").Entries(ctx)
-			require.ErrorContains(t, err, "no such file or directory")
+			requireErrOut(t, err, "no such file or directory")
 
 			bundleContents, err = ctr.File("/etc/ssl/certs/ca-certificates.crt").Contents(ctx)
 			require.NoError(t, err)
 			require.NotEmpty(t, bundleContents)
 			require.NotContains(t, bundleContents, f.caCertContents)
+		}},
+
+		caCertsTest{"wolfi basic", func(t *testctx.T, c *dagger.Client, f caCertsTestFixtures) {
+			ctr := c.Container().From(wolfiImage).
+				WithExec([]string{"apk", "add", "curl"})
+			initialBundleContents, err := ctr.File("/etc/ssl/certs/ca-certificates.crt").Contents(ctx)
+			require.NoError(t, err)
+
+			ctr, err = ctr.
+				WithExec([]string{"curl", "https://server"}).
+				Sync(ctx)
+			require.NoError(t, err)
+
+			// verify no system CAs are leftover
+			_, err = ctr.Directory("/usr/local/share/ca-certificates").Entries(ctx)
+			requireErrOut(t, err, "no such file or directory")
+
+			bundleContents, err := ctr.File("/etc/ssl/certs/ca-certificates.crt").Contents(ctx)
+			require.NoError(t, err)
+			require.NotContains(t, bundleContents, f.caCertContents)
+			require.Equal(t, initialBundleContents, bundleContents)
 		}},
 
 		caCertsTest{"debian basic", func(t *testctx.T, c *dagger.Client, f caCertsTestFixtures) {
@@ -268,10 +289,10 @@ func (ContainerSuite) TestSystemCACerts(ctx context.Context, t *testctx.T) {
 
 			// verify no system CAs are leftover
 			_, err = ctr.Directory("/usr/local/share/ca-certificates").Entries(ctx)
-			require.ErrorContains(t, err, "no such file or directory")
+			requireErrOut(t, err, "no such file or directory")
 
 			_, err = ctr.File("/etc/ssl/certs/ca-certificates.crt").Contents(ctx)
-			require.ErrorContains(t, err, "no such file or directory")
+			requireErrOut(t, err, "no such file or directory")
 		}},
 
 		caCertsTest{"rhel basic", func(t *testctx.T, c *dagger.Client, f caCertsTestFixtures) {
@@ -546,9 +567,9 @@ func customCACertTests(
 			WithMountedFile("/usr/local/share/ca-certificates/dagger-test-custom-ca.crt", certGen.caRootCert).
 			WithServiceBinding("server", serverCtr.AsService())
 	})
-	engineSvc, err := c.Host().Tunnel(devEngine.AsService()).Start(ctx)
+	engineSvc, err := c.Host().Tunnel(devEngineContainerAsService(devEngine)).Start(ctx)
 	require.NoError(t, err)
-	t.Cleanup(func() { engineSvc.Stop(ctx) })
+	t.Cleanup(func() { _, _ = engineSvc.Stop(ctx) })
 	endpoint, err := engineSvc.Endpoint(ctx, dagger.ServiceEndpointOpts{Scheme: "tcp"})
 	require.NoError(t, err)
 	c2, err := dagger.Connect(ctx, dagger.WithRunnerHost(endpoint), dagger.WithLogOutput(testutil.NewTWriter(t)))
@@ -756,5 +777,5 @@ ssl_dhparam /etc/ssl/certs/dhparam.pem;
 		WithExec([]string{"nginx", "-t"}).
 		WithExposedPort(80).
 		WithExposedPort(443).
-		WithExec([]string{"nginx", "-g", "daemon off;"})
+		WithDefaultArgs([]string{"nginx", "-g", "daemon off;"})
 }

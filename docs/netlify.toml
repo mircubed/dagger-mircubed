@@ -157,6 +157,11 @@
   status = 301
 
 [[redirects]]
+  from = "/api/publish"
+  to = "/api/daggerverse"
+  status = 301
+
+[[redirects]]
   from = "/manuals/developer/publish-modules"
   to = "/api/publish"
   status = 301
@@ -195,6 +200,17 @@
   from = "/developer-guide/python/820256/module-structure"
   to = "/api/module-structure"
   status = 301
+
+[[redirects]]
+  from = "/manuals/developer/overview/942201/execution-environment"
+  to = "/api/custom-functions"
+  status = 301
+
+[[redirects]]
+  from = "/manuals/developer/python/640201/documentation"
+  to = "/api/documentation"
+  status = 301
+
 
 [[redirects]]
   from = "/manuals/developer/go"
@@ -358,6 +374,11 @@
   status = 301
 
 [[redirects]]
+  from = "/manuals/user/919011/tui"
+  to = "/api/terminal"
+  status = 301
+
+[[redirects]]
   from = "/manuals/user/visualization"
   to = "/features/visualization"
   status = 301
@@ -442,6 +463,11 @@
 [[redirects]]
   from = "/integrations/containerd"
   to = "/integrations/nerdctl"
+  status = 301
+
+[[redirects]]
+  from = "/integrations/php"
+  to = "/reference/php"
   status = 301
 
 [[redirects]]
@@ -1179,6 +1205,24 @@
   # redirect quickstart custom function page to new URL
   from = "/quickstart/428201/custom-modules"
   to = "/quickstart/428201/custom-function"
+  status = 301
+
+[[redirects]]
+  # redirect
+  from = "/configuration/custom-registry"
+  to = "/configuration/engine#custom-registries"
+  status = 301
+
+[[redirects]]
+  # redirect
+  from = "/configuration/cache"
+  to = "/api/engine#caching"
+  status = 301
+
+[[redirects]]
+  # redirect
+  from = "/configuration/cache"
+  to = "/api/engine#caching"
   status = 301
 
 ###### end: redirects for specific v0.9 pages ######

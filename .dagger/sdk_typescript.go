@@ -19,12 +19,12 @@ import (
 
 const (
 	typescriptRuntimeSubdir    = "sdk/typescript/runtime"
-	typescriptGeneratedAPIPath = "sdk/typescript/api/client.gen.ts"
+	typescriptGeneratedAPIPath = "sdk/typescript/src/api/client.gen.ts"
 
-	nodeVersionMaintenance = "18"
-	nodeVersionLTS         = "20"
+	nodePreviousLTS = "20.18.1"
+	nodeCurrentLTS  = "22.11.0"
 
-	bunVersion = "1.1.26"
+	bunVersion = "1.1.38"
 )
 
 type TypescriptSDK struct {
@@ -33,7 +33,7 @@ type TypescriptSDK struct {
 
 // Lint the Typescript SDK
 func (t TypescriptSDK) Lint(ctx context.Context) (rerr error) {
-	eg, ctx := errgroup.WithContext(ctx)
+	eg := errgroup.Group{}
 
 	base := t.nodeJsBase()
 
@@ -119,10 +119,10 @@ func (t TypescriptSDK) Test(ctx context.Context) (rerr error) {
 		return err
 	}
 
-	eg, ctx := errgroup.WithContext(ctx)
+	eg := errgroup.Group{}
 
 	// Loop over the LTS and Maintenance versions and test them
-	for _, version := range []string{nodeVersionLTS, nodeVersionMaintenance} {
+	for _, version := range []string{nodeCurrentLTS, nodePreviousLTS} {
 		base := t.nodeJsBaseFromVersion(version).With(installer)
 
 		eg.Go(func() error {
@@ -166,7 +166,7 @@ func (t TypescriptSDK) Generate(ctx context.Context) (*dagger.Directory, error) 
 
 // Test the publishing process
 func (t TypescriptSDK) TestPublish(ctx context.Context, tag string) error {
-	return t.Publish(ctx, tag, true, nil, "https://github.com/dagger/dagger.git", nil)
+	return t.Publish(ctx, tag, true, nil)
 }
 
 // Publish the Typescript SDK
@@ -178,16 +178,10 @@ func (t TypescriptSDK) Publish(
 	dryRun bool,
 	// +optional
 	npmToken *dagger.Secret,
-
-	// +optional
-	// +default="https://github.com/dagger/dagger.git"
-	gitRepoSource string,
-	// +optional
-	githubToken *dagger.Secret,
 ) error {
 	version := strings.TrimPrefix(tag, "sdk/typescript/")
 	versionFlag := strings.TrimPrefix(version, "v")
-	if dryRun {
+	if !semver.IsValid(version) {
 		versionFlag = "prepatch"
 	}
 
@@ -220,19 +214,6 @@ always-auth=true`, plaintext)
 		return err
 	}
 
-	if semver.IsValid(version) {
-		if err := githubRelease(ctx, t.Dagger.Git, githubReleaseOpts{
-			tag:         "sdk/typescript/" + version,
-			target:      tag,
-			notes:       changeNotes(t.Dagger.Src, "sdk/typescript", version),
-			gitRepo:     gitRepoSource,
-			githubToken: githubToken,
-			dryRun:      dryRun,
-		}); err != nil {
-			return err
-		}
-	}
-
 	return nil
 }
 
@@ -246,12 +227,12 @@ func (t TypescriptSDK) Bump(ctx context.Context, version string) (*dagger.Direct
 
 	// NOTE: if you change this path, be sure to update .github/workflows/publish.yml so that
 	// provision tests run whenever this file changes.
-	return dag.Directory().WithNewFile("sdk/typescript/provisioning/default.ts", engineReference), nil
+	return dag.Directory().WithNewFile("sdk/typescript/src/provisioning/default.ts", engineReference), nil
 }
 
 func (t TypescriptSDK) nodeJsBase() *dagger.Container {
 	// Use the LTS version by default
-	return t.nodeJsBaseFromVersion(nodeVersionMaintenance)
+	return t.nodeJsBaseFromVersion(nodePreviousLTS)
 }
 
 func (t TypescriptSDK) nodeJsBaseFromVersion(nodeVersion string) *dagger.Container {

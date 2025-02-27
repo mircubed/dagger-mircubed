@@ -26,9 +26,7 @@ import (
 	bksession "github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/session/auth/authprovider"
 	"github.com/moby/buildkit/util/grpcerrors"
-	"github.com/moby/buildkit/util/tracing"
 	"github.com/vito/go-sse/sse"
-	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -49,6 +47,8 @@ import (
 	"github.com/dagger/dagger/analytics"
 	"github.com/dagger/dagger/engine"
 	"github.com/dagger/dagger/engine/client/drivers"
+	"github.com/dagger/dagger/engine/client/pathutil"
+	"github.com/dagger/dagger/engine/client/secretprovider"
 	"github.com/dagger/dagger/engine/session"
 	"github.com/dagger/dagger/engine/slog"
 	enginetel "github.com/dagger/dagger/engine/telemetry"
@@ -186,6 +186,9 @@ func Connect(ctx context.Context, params Params) (_ *Client, _ context.Context, 
 		c.nestedSessionPort = nestedSessionPort
 		c.SecretToken = os.Getenv("DAGGER_SESSION_TOKEN")
 		c.httpClient = c.newHTTPClient()
+		if err := c.init(connectCtx); err != nil {
+			return nil, nil, fmt.Errorf("initialize nested client: %w", err)
+		}
 		if err := c.subscribeTelemetry(connectCtx); err != nil {
 			return nil, nil, fmt.Errorf("subscribe to telemetry: %w", err)
 		}
@@ -328,7 +331,7 @@ func (c *Client) subscribeTelemetry(ctx context.Context) (rerr error) {
 }
 
 func (c *Client) startSession(ctx context.Context) (rerr error) {
-	ctx, sessionSpan := Tracer(ctx).Start(ctx, "starting session")
+	ctx, sessionSpan := Tracer(ctx).Start(ctx, "starting session", telemetry.Encapsulate())
 	defer telemetry.End(sessionSpan, func() error { return rerr })
 
 	clientMetadata := c.clientMetadata()
@@ -337,16 +340,20 @@ func (c *Client) startSession(ctx context.Context) (rerr error) {
 	attachables := []bksession.Attachable{
 		// sockets
 		SocketProvider{EnableHostNetworkAccess: !c.DisableHostRW},
+		// secrets
+		secretprovider.NewSecretProvider(),
 		// registry auth
 		authprovider.NewDockerAuthProvider(config.LoadDefaultConfigFile(os.Stderr), nil),
 		// host=>container networking
-		session.NewTunnelListenerAttachable(ctx, nil),
+		session.NewTunnelListenerAttachable(ctx),
 		// terminal
 		session.NewTerminalAttachable(ctx, c.Params.WithTerminal),
+		// Git credentials
+		session.NewGitCredentialAttachable(ctx),
 	}
 	// filesync
 	if !c.DisableHostRW {
-		filesyncer, err := NewFilesyncer("", "", nil, nil)
+		filesyncer, err := NewFilesyncer()
 		if err != nil {
 			return fmt.Errorf("new filesyncer: %w", err)
 		}
@@ -444,13 +451,6 @@ func NewBuildkitSessionServer(ctx context.Context, conn net.Conn, attachables ..
 	sessionSrvOpts := []grpc.ServerOption{
 		grpc.UnaryInterceptor(grpcerrors.UnaryServerInterceptor),
 		grpc.StreamInterceptor(grpcerrors.StreamServerInterceptor),
-	}
-	if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
-		statsHandler := tracing.ServerStatsHandler(
-			otelgrpc.WithTracerProvider(span.TracerProvider()),
-			otelgrpc.WithPropagators(telemetry.Propagator),
-		)
-		sessionSrvOpts = append(sessionSrvOpts, grpc.StatsHandler(statsHandler))
 	}
 
 	srv := grpc.NewServer(sessionSrvOpts...)
@@ -687,7 +687,7 @@ func (c *Client) exportLogs(ctx context.Context, httpClient *httpClient) error {
 		if err := protojson.Unmarshal(data, &req); err != nil {
 			return fmt.Errorf("unmarshal spans: %w", err)
 		}
-		if err := enginetel.ReexportLogsFromPB(ctx, c.EngineLogs, &req); err != nil {
+		if err := telemetry.ReexportLogsFromPB(ctx, c.EngineLogs, &req); err != nil {
 			return fmt.Errorf("re-export logs: %w", err)
 		}
 		return nil
@@ -717,6 +717,25 @@ func (c *Client) exportMetrics(ctx context.Context, httpClient *httpClient) erro
 		}
 		return nil
 	})
+}
+
+func (c *Client) init(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", "http://dagger"+engine.InitEndpoint, nil)
+	if err != nil {
+		return fmt.Errorf("new request: %w", err)
+	}
+
+	req.SetBasicAuth(c.SecretToken, "")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("do shutdown: %w", err)
+	}
+
+	return resp.Body.Close()
 }
 
 func (c *Client) shutdownServer() error {
@@ -1072,7 +1091,7 @@ func (c *Client) clientMetadata() engine.ClientMetadata {
 	// for consistent behavior of CLI inside nested execution
 	homeDir, err := os.UserHomeDir()
 	if err == nil {
-		expandedPath, err := ExpandHomeDir(homeDir, sshAuthSock)
+		expandedPath, err := pathutil.ExpandHomeDir(homeDir, sshAuthSock)
 		if err == nil {
 			sshAuthSock = expandedPath
 		}

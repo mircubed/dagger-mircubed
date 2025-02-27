@@ -2,27 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"main/internal/dagger"
 	"path"
 	"path/filepath"
 	"slices"
 	"strings"
 
+	"typescript-sdk/internal/dagger"
+	"typescript-sdk/tsdistconsts"
+
 	"github.com/iancoleman/strcase"
-	"github.com/tidwall/gjson"
 	"golang.org/x/mod/semver"
-)
-
-const (
-	bunVersion  = "1.1.26"
-	nodeVersion = "20" // LTS version, IRON (https://nodejs.org/en/about/previous-releases)
-
-	nodeImageDigest = "sha256:df01469346db2bf1cfc1f7261aeab86b2960efa840fe2bd46d83ff339f463665"
-	bunImageDigest  = "sha256:f344713375598be5f0b40e478cdb70578cc255135a37f9c98179edb1ceb3b4f0"
-
-	nodeImageRef = "node:" + nodeVersion + "-alpine@" + nodeImageDigest
-	bunImageRef  = "oven/bun:" + bunVersion + "-alpine@" + bunImageDigest
 )
 
 type SupportedTSRuntime string
@@ -57,9 +48,21 @@ func New(
 	}
 }
 
+type packageJSONConfig struct {
+	PackageManager string `json:"packageManager"`
+	Dagger         *struct {
+		BaseImage string `json:"baseImage"`
+		Runtime   string `json:"runtime"`
+	} `json:"dagger"`
+}
+
 type moduleConfig struct {
 	runtime        SupportedTSRuntime
 	runtimeVersion string
+
+	// Custom base image
+	image             string
+	packageJSONConfig *packageJSONConfig
 
 	packageManager        SupportedPackageManager
 	packageManagerVersion string
@@ -72,8 +75,7 @@ type moduleConfig struct {
 }
 
 type TypescriptSdk struct {
-	SDKSourceDir  *dagger.Directory
-	RequiredPaths []string
+	SDKSourceDir *dagger.Directory
 
 	moduleConfig *moduleConfig
 }
@@ -82,8 +84,9 @@ const (
 	ModSourceDirPath         = "/src"
 	EntrypointExecutableFile = "__dagger.entrypoint.ts"
 
-	SrcDir = "src"
-	GenDir = "sdk"
+	SrcDir         = "src"
+	GenDir         = "sdk"
+	NodeModulesDir = "node_modules"
 
 	schemaPath     = "/schema.json"
 	codegenBinPath = "/codegen"
@@ -240,31 +243,19 @@ func (t *TypescriptSdk) moduleConfigFiles(path string) []string {
 
 // Base returns a Node or Bun container with cache setup for node package managers or bun
 func (t *TypescriptSdk) Base() (*dagger.Container, error) {
-	ctr := dag.Container()
+	ctr := dag.Container().From(t.moduleConfig.image)
 
 	runtime := t.moduleConfig.runtime
 	version := t.moduleConfig.runtimeVersion
 
 	switch runtime {
 	case Bun:
-		if version != "" {
-			ctr = ctr.From(fmt.Sprintf("oven/%s:%s-alpine", Bun, version))
-		} else {
-			ctr = ctr.From(bunImageRef)
-		}
-
 		return ctr.
 			WithoutEntrypoint().
-			WithMountedCache("/root/.bun/install/cache", dag.CacheVolume(fmt.Sprintf("mod-bun-cache-%s", bunVersion)), dagger.ContainerWithMountedCacheOpts{
-				Sharing: dagger.Private,
+			WithMountedCache("/root/.bun/install/cache", dag.CacheVolume(fmt.Sprintf("mod-bun-cache-%s", tsdistconsts.DefaultBunVersion)), dagger.ContainerWithMountedCacheOpts{
+				Sharing: dagger.CacheSharingModePrivate,
 			}), nil
 	case Node:
-		if version != "" {
-			ctr = ctr.From(fmt.Sprintf("%s:%s-alpine", Node, version))
-		} else {
-			ctr = ctr.From(nodeImageRef)
-		}
-
 		return ctr.
 			WithoutEntrypoint().
 			// Install default CA certificates and configure node to use them instead of its compiled in CA bundle.
@@ -275,8 +266,10 @@ func (t *TypescriptSdk) Base() (*dagger.Container, error) {
 			WithMountedCache("/root/.npm", dag.CacheVolume(fmt.Sprintf("npm-cache-%s-%s", runtime, version))).
 			WithMountedCache("/root/.cache/yarn", dag.CacheVolume(fmt.Sprintf("yarn-cache-%s-%s", runtime, version))).
 			WithMountedCache("/root/.pnpm-store", dag.CacheVolume(fmt.Sprintf("pnpm-cache-%s-%s", runtime, version))).
-			// Install tsx
-			WithExec([]string{"npm", "install", "-g", "tsx@4.15.6"}), nil
+			// install tsx from its bundled location in the engine image
+			WithMountedDirectory("/usr/local/lib/node_modules/tsx", t.SDKSourceDir.Directory("/tsx_module")).
+			WithExec([]string{"ln", "-s", "/usr/local/lib/node_modules/tsx/dist/cli.mjs", "/usr/local/bin/tsx"}), nil
+
 	default:
 		return nil, fmt.Errorf("unknown runtime: %s", runtime)
 	}
@@ -330,7 +323,7 @@ func (t *TypescriptSdk) configureModule(ctr *dagger.Container) *dagger.Container
 
 	// If there's a package.json, run the tsconfig updator script and install the genDir.
 	// else, copy the template config files.
-	if t.moduleConfig.hasFile("package.json") {
+	if t.moduleConfig.packageJSONConfig != nil {
 		if runtime == Bun {
 			ctr = ctr.
 				WithExec([]string{"bun", "/opt/module/bin/__tsconfig.updator.ts"}).
@@ -352,7 +345,8 @@ func (t *TypescriptSdk) configureModule(ctr *dagger.Container) *dagger.Container
 func (t *TypescriptSdk) addSDK() *dagger.Directory {
 	return t.SDKSourceDir.
 		WithoutDirectory("codegen").
-		WithoutDirectory("runtime")
+		WithoutDirectory("runtime").
+		WithoutDirectory("tsx_module")
 }
 
 // generateClient uses the given container to generate the client code.
@@ -368,13 +362,51 @@ func (t *TypescriptSdk) generateClient(ctr *dagger.Container, introspectionJSON 
 			"--lang", "typescript",
 			"--output", ModSourceDirPath,
 			"--module-name", t.moduleConfig.name,
-			"--module-context-path", t.moduleConfig.modulePath(),
+			"--module-source-path", t.moduleConfig.modulePath(),
 			"--introspection-json-path", schemaPath,
 		}, dagger.ContainerWithExecOpts{
 			ExperimentalPrivilegedNesting: true,
 		}).
 		// Return the generated code directory.
 		Directory(t.moduleConfig.sdkPath())
+}
+
+// detectBaseImageRef return the base image ref of the runtime
+// based on the user's module config.
+//
+// If set in the `dagger.baseImage` field of the module's package.json, the
+// runtime use that ref.
+// If not set, it return the default base image ref based on the detected runtime and
+// it's version.
+//
+// Note: This function must be called after `detectRuntime`.
+func (t *TypescriptSdk) detectBaseImageRef() (string, error) {
+	runtime := t.moduleConfig.runtime
+	version := t.moduleConfig.runtimeVersion
+
+	if t.moduleConfig.packageJSONConfig != nil && t.moduleConfig.packageJSONConfig.Dagger != nil {
+		value := t.moduleConfig.packageJSONConfig.Dagger.BaseImage
+		if value != "" {
+			return value, nil
+		}
+	}
+
+	switch runtime {
+	case Bun:
+		if version != "" {
+			return fmt.Sprintf("oven/%s:%s-alpine", Bun, version), nil
+		}
+
+		return tsdistconsts.DefaultBunImageRef, nil
+	case Node:
+		if version != "" {
+			return fmt.Sprintf("%s:%s-alpine", Node, version), nil
+		}
+
+		return tsdistconsts.DefaultNodeImageRef, nil
+	default:
+		return "", fmt.Errorf("unknown runtime: %q", runtime)
+	}
 }
 
 // DetectRuntime returns the runtime(bun or node) detected for the user's module
@@ -384,15 +416,10 @@ func (t *TypescriptSdk) generateClient(ctr *dagger.Container, introspectionJSON 
 // If none of the above is present, node will be used.
 //
 // If the runtime is detected and pinned to a specific version, it will also return the pinned version.
-func (t *TypescriptSdk) detectRuntime(ctx context.Context) (SupportedTSRuntime, string, error) {
+func (t *TypescriptSdk) detectRuntime() error {
 	// If we find a package.json, we check if the runtime is specified in `dagger.runtime` field.
-	if t.moduleConfig.hasFile("package.json") {
-		json, err := t.moduleConfig.source.File("package.json").Contents(ctx)
-		if err != nil {
-			return "", "", fmt.Errorf("failed to read package.json: %w", err)
-		}
-
-		value := gjson.Get(json, "dagger.runtime").String()
+	if t.moduleConfig.packageJSONConfig != nil && t.moduleConfig.packageJSONConfig.Dagger != nil {
+		value := t.moduleConfig.packageJSONConfig.Dagger.Runtime
 		if value != "" {
 			// Retrieve the runtime and version from the value (e.g., node@lts, bun@1)
 			// If version isn't specified, version will be an empty string and only the runtime will be used in Base.
@@ -400,26 +427,32 @@ func (t *TypescriptSdk) detectRuntime(ctx context.Context) (SupportedTSRuntime, 
 
 			switch runtime := SupportedTSRuntime(runtime); runtime {
 			case Bun, Node:
-				return runtime, version, nil
+				t.moduleConfig.runtime = runtime
+				t.moduleConfig.runtimeVersion = version
+
+				return nil
 			default:
-				return "", "", fmt.Errorf("detected unknown runtime: %s", runtime)
+				return fmt.Errorf("unsupported runtime %q", runtime)
 			}
 		}
 	}
 
 	// Try to detect runtime from lock files
 	if t.moduleConfig.hasFile("bun.lockb") {
-		return Bun, "", nil
+		t.moduleConfig.runtime = Bun
+
+		return nil
 	}
 
 	if t.moduleConfig.hasFile("package-lock.json") ||
 		t.moduleConfig.hasFile("yarn.lock") ||
 		t.moduleConfig.hasFile("pnpm-lock.yaml") {
-		return Node, "", nil
+		t.moduleConfig.runtime = Node
+
+		return nil
 	}
 
-	// Default to node
-	return Node, "", nil
+	return nil
 }
 
 // detectPackageManager detects the package manager from the user's module.
@@ -431,20 +464,15 @@ func (t *TypescriptSdk) detectRuntime(ctx context.Context) (SupportedTSRuntime, 
 //
 // Except if the package.json has an invalid value in field "packageManager", this
 // function should never return an error.
-func (t *TypescriptSdk) detectPackageManager(ctx context.Context) (SupportedPackageManager, string, error) {
+func (t *TypescriptSdk) detectPackageManager() (SupportedPackageManager, string, error) {
 	// If the runtime is Bun, we should use BunManager
 	if t.moduleConfig.runtime == Bun {
 		return BunManager, "", nil
 	}
 
 	// If we find a package.json, we check if the packageManager is specified in `packageManager` field.
-	if t.moduleConfig.hasFile("package.json") {
-		json, err := t.moduleConfig.source.File("package.json").Contents(ctx)
-		if err != nil {
-			return "", "", fmt.Errorf("failed to read package.json: %w", err)
-		}
-
-		value := gjson.Get(json, "packageManager").String()
+	if t.moduleConfig.packageJSONConfig != nil {
+		value := t.moduleConfig.packageJSONConfig.PackageManager
 		if value != "" {
 			// Retrieve the package manager and version from the value (e.g., yarn@4.2.0, pnpm@8.5.1)
 			packageManager, version, _ := strings.Cut(value, "@")
@@ -490,6 +518,7 @@ func (t *TypescriptSdk) generateLockFile(ctr *dagger.Container) (*dagger.Contain
 	switch packageManager {
 	case Yarn:
 		// Enable corepack
+		// NOTE: this incidentally fetches and installs node modules, maybe we could install yarn some other way?
 		ctr = ctr.
 			WithExec([]string{"corepack", "enable"}).
 			WithExec([]string{"corepack", "use", fmt.Sprintf("yarn@%s", version)})
@@ -562,7 +591,9 @@ func (t *TypescriptSdk) installDependencies(ctr *dagger.Container) (*dagger.Cont
 func (t *TypescriptSdk) analyzeModuleConfig(ctx context.Context, modSource *dagger.ModuleSource) (err error) {
 	if t.moduleConfig == nil {
 		t.moduleConfig = &moduleConfig{
-			entries: make(map[string]bool),
+			entries:           make(map[string]bool),
+			runtime:           Node,
+			packageJSONConfig: nil,
 		}
 	}
 
@@ -588,14 +619,33 @@ func (t *TypescriptSdk) analyzeModuleConfig(ctx context.Context, modSource *dagg
 		}
 	}
 
-	t.moduleConfig.runtime, t.moduleConfig.runtimeVersion, err = t.detectRuntime(ctx)
-	if err != nil {
+	if t.moduleConfig.hasFile("package.json") {
+		var packageJSONConfig packageJSONConfig
+
+		content, err := t.moduleConfig.source.File("package.json").Contents(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to read package.json: %w", err)
+		}
+
+		if err := json.Unmarshal([]byte(content), &packageJSONConfig); err != nil {
+			return fmt.Errorf("failed to unmarshal package.json: %w", err)
+		}
+
+		t.moduleConfig.packageJSONConfig = &packageJSONConfig
+	}
+
+	if err := t.detectRuntime(); err != nil {
 		return fmt.Errorf("failed to detect module runtime: %w", err)
 	}
 
-	t.moduleConfig.packageManager, t.moduleConfig.packageManagerVersion, err = t.detectPackageManager(ctx)
+	t.moduleConfig.packageManager, t.moduleConfig.packageManagerVersion, err = t.detectPackageManager()
 	if err != nil {
 		return fmt.Errorf("failed to detect package manager: %w", err)
+	}
+
+	t.moduleConfig.image, err = t.detectBaseImageRef()
+	if err != nil {
+		return fmt.Errorf("failed to detect base image ref: %w", err)
 	}
 
 	return nil

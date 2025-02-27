@@ -1,10 +1,6 @@
 package io.dagger.codegen.introspection;
 
-import com.squareup.javapoet.ClassName;
-import com.squareup.javapoet.FieldSpec;
-import com.squareup.javapoet.MethodSpec;
-import com.squareup.javapoet.ParameterizedTypeName;
-import com.squareup.javapoet.TypeSpec;
+import com.palantir.javapoet.*;
 import java.nio.charset.Charset;
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -21,7 +17,7 @@ class InputVisitor extends AbstractVisitor {
   TypeSpec generateType(Type type) {
     TypeSpec.Builder classBuilder =
         TypeSpec.classBuilder(Helpers.formatName(type))
-            .addJavadoc(type.getDescription())
+            .addJavadoc(type.getDescription() != null ? type.getDescription() : "")
             .addModifiers(Modifier.PUBLIC)
             .addSuperinterface(ClassName.bestGuess("InputValue"));
 

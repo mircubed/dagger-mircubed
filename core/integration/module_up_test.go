@@ -7,17 +7,22 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"testing"
 	"time"
 
 	"github.com/creack/pty"
-	"github.com/dagger/dagger/testctx"
+	"github.com/dagger/testctx"
 	"github.com/stretchr/testify/require"
 )
 
 // Note: ensure each testcase use unique port, otherwise you might see flakes.
 func (ModuleSuite) TestDaggerUp(ctx context.Context, t *testctx.T) {
+	// these tests are slow if you're running locally, skip if -short is specified
+	if testing.Short() {
+		t.SkipNow()
+	}
 	// set timeout to 3m for each test
-	t = t.WithTimeout(3 * time.Minute)
+	t = t.Using(testctx.WithTimeout[*testing.T](3 * time.Minute))
 
 	const defaultTrafficPortForContainerTests = "23100"
 	const defaultTrafficPortForServiceTests = "23200"
@@ -63,6 +68,13 @@ func (ModuleSuite) TestDaggerUp(ctx context.Context, t *testctx.T) {
 			cachedModDir: modDirForAsContainerTests,
 		},
 		{
+			name:         "container port map with explicit args",
+			endpointFn:   daggerUpAndGetEndpoint,
+			trafficPort:  "23103",
+			daggerArgs:   []string{"call", "ctr", "without-exposed-port", "--port", defaultTrafficPortForContainerTests, "with-exposed-port", "--port", "23103", "up", "--args", "python,-m,http.server,23103", "--ports", "23103:23103"},
+			cachedModDir: modDirForAsContainerTests,
+		},
+		{
 			name:         "service native",
 			endpointFn:   daggerUpAndGetEndpoint,
 			trafficPort:  "23200",
@@ -91,8 +103,6 @@ func (ModuleSuite) TestDaggerUp(ctx context.Context, t *testctx.T) {
 			cachedModDir: modDirForAsServiceTests,
 		},
 	}
-
-	t = t.WithTimeout(3 * time.Minute)
 
 	for _, tc := range testcases {
 		t.Run(tc.name, func(ctx context.Context, t *testctx.T) {
@@ -176,7 +186,7 @@ func daggerUpInitModFn(ctx context.Context, t *testctx.T, defaultPort string) st
 		"strconv"
 		"dagger/test/internal/dagger"
 	)
-	
+
 	func New(
 		// +optional
 		// +default=%s
@@ -191,10 +201,10 @@ func daggerUpInitModFn(ctx context.Context, t *testctx.T, defaultPort string) st
 				).
 				WithWorkdir("/srv/www").
 				WithExposedPort(port).
-				WithExec([]string{"python", "-m", "http.server", strconv.Itoa(port)}),
+				WithDefaultArgs([]string{"python", "-m", "http.server", strconv.Itoa(port)}),
 		}
 	}
-	
+
 	type Test struct {
 		Ctr *dagger.Container
 	}
@@ -204,11 +214,11 @@ func daggerUpInitModFn(ctx context.Context, t *testctx.T, defaultPort string) st
 	err := os.WriteFile(filepath.Join(modDir, "main.go"), []byte(fmt.Sprintf(mainGoTmpl, defaultPort)), 0o644)
 	require.NoError(t, err)
 
-	_, err = hostDaggerExec(ctx, t, modDir, "--debug", "init", "--source=.", "--name=test", "--sdk=go")
+	_, err = hostDaggerExec(ctx, t, modDir, "init", "--source=.", "--name=test", "--sdk=go")
 	require.NoError(t, err)
 
 	// cache the module load itself so there's less to wait for below
-	_, err = hostDaggerExec(ctx, t, modDir, "--debug", "functions")
+	_, err = hostDaggerExec(ctx, t, modDir, "functions")
 	require.NoError(t, err)
 
 	return modDir

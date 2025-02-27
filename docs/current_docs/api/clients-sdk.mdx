@@ -15,7 +15,7 @@ A Dagger SDK provides two components:
 
 The Dagger API uses GraphQL as its low-level language-agnostic framework, and can also be accessed using any standard GraphQL client. However, you do not need to know GraphQL to call the Dagger API; the translation to underlying GraphQL API calls is handled internally by the Dagger SDKs.
 
-Stable Dagger SDKs are currently available for Go, TypeScript and Python. There are also [experimental SDKs contributed by the community](https://github.com/dagger/dagger/tree/main/sdk).
+Official Dagger SDKs are currently available for Go, TypeScript and Python. There are also [experimental and community SDKs contributed by the Dagger community](https://github.com/dagger/dagger/tree/main/sdk).
 
 ## Dagger Functions
 
@@ -46,10 +46,16 @@ dagger init --name=my-module
 dagger develop --sdk=typescript
 ```
 </TabItem>
+<TabItem value="PHP">
+```shell
+dagger init --name=my-module
+dagger develop --sdk=php
+```
+</TabItem>
 </Tabs>
 
-:::info
-At any point, running `dagger develop` regenerates the module's code based on dependencies and the current state of the module.
+:::warning
+Running `dagger develop` regenerates the module's code based on dependencies, the current state of the module, and the current Dagger API version. This can result in unexpected results if there are significant changes between the previous and latest installed Dagger API versions. Always refer to the [changelog](https://github.com/dagger/dagger/blob/main/CHANGELOG.md) for a complete list of changes (including breaking changes) in each Dagger release before running `dagger develop`, or use the `--compat=skip` option to bypass updating the Dagger API version.
 :::
 
 The default template from `dagger develop` creates the following structure:
@@ -73,7 +79,7 @@ The default template from `dagger develop` creates the following structure:
 
 In this structure:
 
-- `dagger.json` is the Dagger module configuration file.
+- `dagger.json` is the [Dagger module configuration file](../configuration/modules.mdx).
 - `go.mod`/`go.sum` manage the Go module and its dependencies.
 - `main.go` is where your Dagger module code goes. It contains sample code to help you get started.
 - `internal` contains automatically-generated types and helpers needed to configure and run the module:
@@ -91,20 +97,21 @@ In this structure:
 ├── uv.lock
 ├── sdk
 ├── src
-│   └── main
-│       └── __init__.py
+│   └── my_module
+│       ├── __init__.py
+│       └── main.py
 └── dagger.json
 ```
 
 In this structure:
 
-- `dagger.json` is the Dagger module configuration file.
+- `dagger.json` is the [Dagger module configuration file](../configuration/modules.mdx).
 - `pyproject.toml` manages the Python project configuration.
-- `requirements.lock` manages the module dependencies.
-- `src/main/` is where your Dagger module code goes. It contains sample code to help you get started.
-- `sdk/` contains the Python SDK.
+- `uv.lock` manages the module's pinned dependencies.
+- `src/my_module/` is where your Dagger module code goes. It contains sample code to help you get started.
+- `sdk/` contains the vendored Python SDK [client library](https://pypi.org/project/dagger-io/).
 
-This structure hosts a `main` package inside a `src` directory. This follows a [Python convention](https://packaging.python.org/en/latest/discussions/src-layout-vs-flat-layout/) that requires a project to be installed in order to run its code. This prevents accidental usage of development code since the Python interpreter includes the current working directory as the first item on the import path (more information is available in this [blog post on Python packaging](https://blog.ionelmc.ro/2014/05/25/python-packaging/)).
+This structure hosts a Python import package, with a name derived from the project name (in `pyproject.toml`), inside a `src` directory. This follows a [Python convention](https://packaging.python.org/en/latest/discussions/src-layout-vs-flat-layout/) that requires a project to be installed in order to run its code. This convention prevents accidental usage of development code since the Python interpreter includes the current working directory as the first item on the import path (more information is available in this [blog post on Python packaging](https://blog.ionelmc.ro/2014/05/25/python-packaging/)).
 
 </TabItem>
 <TabItem value="TypeScript">
@@ -123,10 +130,33 @@ This structure hosts a `main` package inside a `src` directory. This follows a [
 
 In this structure:
 
-- `dagger.json` is the Dagger module configuration file.
+- `dagger.json` is the [Dagger module configuration file](../configuration/modules.mdx).
 - `package.json` manages the module dependencies.
 - `src/` is where your Dagger module code goes. It contains sample code to help you get started.
 - `sdk/` contains the TypeScript SDK.
+
+</TabItem>
+<TabItem value="PHP">
+
+```
+.
+├── LICENSE
+├── README.md
+├── composer.json
+├── composer.lock
+├── entrypoint.php
+├── sdk
+├── src
+│   └── MyModule.php
+└── vendor
+```
+
+In this structure:
+
+- `dagger.json` is the [Dagger module configuration file](../configuration/modules.mdx).
+- `composer.json` manages the module dependencies.
+- `src/` is where your Dagger module code goes. It contains sample code to help you get started.
+- `sdk/` contains the PHP SDK.
 
 </TabItem>
 </Tabs>
@@ -163,6 +193,10 @@ the main object needs to be named `MyModule`.
 </TabItem>
 <TabItem value="TypeScript">
 ```typescript file=./snippets/functions/functions-complex/typescript/index.ts
+```
+</TabItem>
+<TabItem value="PHP">
+```php file=./snippets/functions/functions-complex/php/src/MyModule.php
 ```
 </TabItem>
 </Tabs>
@@ -405,6 +439,71 @@ build-node-20
     ├── css
     ├── js
     └── media
+```
+</TabItem>
+<TabItem value="PHP">
+
+:::note
+The Dagger PHP SDK requires [PHP 8.2 or later](https://www.php.net/downloads.php).
+:::
+
+Install the Dagger PHP SDK in your project using `composer`:
+
+```shell
+composer require dagger/dagger
+```
+
+This example demonstrates how to test a PHP application against multiple PHP versions using the PHP SDK.
+
+Clone an example project:
+
+```shell
+git clone https://github.com/slimphp/Slim-Skeleton.git
+cd Slim-Skeleton
+```
+
+Create a new file named `test.php` in the project directory and add the following code to it.
+
+```php file=./snippets/clients-sdk/php/test.php
+```
+
+This PHP program imports the Dagger SDK and defines a function named `test()`. This `test()` function creates a Dagger client, which provides an interface to the Dagger API. It also defines the test matrix, consisting of PHP versions `8.2` to `8.4` and iterates over this matrix, downloading a PHP container image for each specified version and testing the source application in that version.
+
+Run the PHP program by executing the command below from the project directory:
+
+```shell
+dagger run php test.php
+```
+
+The `dagger run` command executes the specified command in a Dagger session and displays live progress. The program tests the application against each version concurrently and displays the following final output:
+
+```shell
+Starting tests for PHP 8.2...
+PHPUnit 9.6.22 by Sebastian Bergmann and contributors.
+
+Warning:       Your XML configuration validates against a deprecated schema.
+Suggestion:    Migrate your XML configuration using "--migrate-configuration"!
+
+...................                                               19 / 19 (100%)
+
+Time: 00:00.038, Memory: 12.00 MB
+
+OK (19 tests, 37 assertions)
+Completed tests for PHP 8.2
+**********
+Starting tests for PHP 8.3...
+PHPUnit 9.6.22 by Sebastian Bergmann and contributors.
+
+Warning:       Your XML configuration validates against a deprecated schema.
+Suggestion:    Migrate your XML configuration using "--migrate-configuration"!
+
+...................                                               19 / 19 (100%)
+
+Time: 00:00.039, Memory: 12.00 MB
+
+OK (19 tests, 37 assertions)
+Completed tests for PHP 8.3
+**********
 ```
 </TabItem>
 </Tabs>

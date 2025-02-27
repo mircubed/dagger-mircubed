@@ -67,6 +67,20 @@ defmodule Dagger.FunctionCall do
     Client.execute(function_call.client, query_builder)
   end
 
+  @doc "Return an error from the function."
+  @spec return_error(t(), Dagger.Error.t()) :: :ok | {:error, term()}
+  def return_error(%__MODULE__{} = function_call, error) do
+    query_builder =
+      function_call.query_builder
+      |> QB.select("returnError")
+      |> QB.put_arg("error", Dagger.ID.id!(error))
+
+    case Client.execute(function_call.client, query_builder) do
+      {:ok, _} -> :ok
+      error -> error
+    end
+  end
+
   @doc "Set the return value of the function call to the provided value."
   @spec return_value(t(), Dagger.JSON.t()) :: :ok | {:error, term()}
   def return_value(%__MODULE__{} = function_call, value) do
@@ -77,5 +91,18 @@ defmodule Dagger.FunctionCall do
       {:ok, _} -> :ok
       error -> error
     end
+  end
+end
+
+defimpl Jason.Encoder, for: Dagger.FunctionCall do
+  def encode(function_call, opts) do
+    {:ok, id} = Dagger.FunctionCall.id(function_call)
+    Jason.Encode.string(id, opts)
+  end
+end
+
+defimpl Nestru.Decoder, for: Dagger.FunctionCall do
+  def decode_fields_hint(_struct, _context, id) do
+    {:ok, Dagger.Client.load_function_call_from_id(Dagger.Global.dag(), id)}
   end
 end

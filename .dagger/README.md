@@ -10,7 +10,7 @@ interactive local dev environment.
 
 In Dagger, a pipeline is a sequence of containerized functions, each passing
 its output to the next. Unlike typical CI and build tools, functions are
-composed *dynamically*. This can be done from the command-line with `dagger
+composed _dynamically_. This can be done from the command-line with `dagger
 call`.
 
 For example `dagger call foo bar baz` will call 3 functions (`foo`, `bar` and
@@ -18,12 +18,12 @@ For example `dagger call foo bar baz` will call 3 functions (`foo`, `bar` and
 this case, `baz`) will be printed to the terminal.
 
 A module is a collection of functions (and types) which can be used by `dagger
-call`. By default, the current module will be infered from your working
+call`. By default, the current module will be inferred from your working
 directory, but you can override this with `-m`.
 
 To discover available functions in a given module: `dagger functions`.
 
-With that in mind: this document includes examples of *typical pipelines* that
+With that in mind: this document includes examples of _typical pipelines_ that
 are useful while developing Dagger. But remember, you are free to compose your
 own pipelines, either by modifying the examples, of starting from scratch. This
 flexibility is one of the killer features of Dagger.
@@ -70,6 +70,18 @@ Connect to it from a dagger cli:
     dagger call -m github.com/shykes/daggerverse/hello@main hello
     # hello, world!
 
+## Code Generation
+
+In core/schema, changes utilizing the dagql package modify the engine's GraphQL API. API documentation and SDK bindings must be generated and committed when modifying the schema. See "Docs" and "SDKs" below for more granular generation functionality. This command also runs go generate for engine code.
+
+    dagger call generate export --path=.
+
+> [!NOTE]
+>
+> For `PHP` and `Elixir` SDKs it's important to manually delete the generated folder before running
+> this command
+
+
 ## Docs
 
 Lint the docs:
@@ -79,6 +91,8 @@ Lint the docs:
 Auto-generate docs components:
 
     dagger call docs generate -o .
+
+    
 
 ## SDKs
 
@@ -93,7 +107,7 @@ All SDKs have the same functions defined:
 - `generate`: generates any auto-generated files against a dev engine
 - `bump`: bumps the SDK version number
 - `publish`: publishes the SDK to a registry
-    - Note: options for this function are SDK-specific
+  - Note: options for this function are SDK-specific
 
 ### Linting
 
@@ -109,13 +123,18 @@ Run SDK tests (replace `<sdk>` with one of the supported SDKs):
 
 ### Generate
 
-Generate SDK static files (replace `<sdk>` with one of the supported SDKs):
+Generate SDK static files (replace `<sdk>` with one of the supported SDKs, or "all" for all of them):
 
     dagger call sdk <sdk> generate export --path=.
 
 If you've made changes to the GraphQL schema, you will need to generate all sdks in one go prior to committing:
 
     dagger call sdk all generate export --path=.
+
+> [!NOTE]
+>
+> For `PHP` and `Elixir` SDKs it's important to manually delete the generated folder before running
+> this command
 
 ### Publish
 

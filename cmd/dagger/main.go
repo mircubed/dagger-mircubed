@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime/pprof"
 	runtimetrace "runtime/trace"
 	"sort"
@@ -26,7 +25,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/resource"
-	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/term"
 
@@ -34,6 +33,7 @@ import (
 	"github.com/dagger/dagger/dagql/dagui"
 	"github.com/dagger/dagger/dagql/idtui"
 	"github.com/dagger/dagger/engine"
+	"github.com/dagger/dagger/engine/client/pathutil"
 	"github.com/dagger/dagger/engine/slog"
 	enginetel "github.com/dagger/dagger/engine/telemetry"
 )
@@ -87,6 +87,8 @@ func init() {
 		configCmd,
 		moduleInitCmd,
 		moduleInstallCmd,
+		moduleUnInstallCmd,
+		moduleUpdateCmd,
 		moduleDevelopCmd,
 		modulePublishCmd,
 		funcListCmd,
@@ -182,6 +184,10 @@ var rootCmd = &cobra.Command{
 
 		return nil
 	},
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cmd.SetArgs(append([]string{"shell"}, args...))
+		return cmd.Execute()
+	},
 }
 
 func checkForUpdates(ctx context.Context, w io.Writer) {
@@ -268,16 +274,26 @@ func Tracer() trace.Tracer {
 	return otel.Tracer("dagger.io/cli")
 }
 
-func Resource() *resource.Resource {
+func Resource(ctx context.Context) *resource.Resource {
 	attrs := []attribute.KeyValue{
 		semconv.ServiceName("dagger-cli"),
 		semconv.ServiceVersion(engine.Version),
-		semconv.ProcessCommandArgs(os.Args...),
 	}
 	for k, v := range enginetel.LoadDefaultLabels(workdir, engine.Version) {
 		attrs = append(attrs, attribute.String(k, v))
 	}
-	return resource.NewWithAttributes(semconv.SchemaURL, attrs...)
+	res, err := resource.New(ctx,
+		resource.WithSchemaURL(semconv.SchemaURL),
+		resource.WithAttributes(attrs...),
+		resource.WithFromEnv(),
+		resource.WithOSType(),
+		resource.WithContainer(),
+		resource.WithProcessCommandArgs(),
+	)
+	if err != nil {
+		slog.Warn("failed to set up OTel resource", "error", err)
+	}
+	return res
 }
 
 // ExitError is an error that indicates a command should exit with a specific
@@ -332,7 +348,9 @@ func main() {
 			fmt.Fprintf(os.Stderr, "no tty available for progress %q\n", progress)
 			os.Exit(1)
 		}
-		Frontend = idtui.New()
+		Frontend = idtui.NewPretty()
+	case "report":
+		Frontend = idtui.NewReporter()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown progress type %q\n", progress)
 		os.Exit(1)
@@ -374,12 +392,12 @@ func NormalizeWorkdir(workdir string) (string, error) {
 
 	if workdir == "" {
 		var err error
-		workdir, err = os.Getwd()
+		workdir, err = pathutil.Getwd()
 		if err != nil {
 			return "", err
 		}
 	}
-	workdir, err := filepath.Abs(workdir)
+	workdir, err := pathutil.Abs(workdir)
 	if err != nil {
 		return "", err
 	}
@@ -439,23 +457,54 @@ func flagUsagesWrapped(flags *pflag.FlagSet) string {
 //
 // Ideally `c.Short` fields should be as short as possible.
 func cmdShortWrapped(c *cobra.Command) string {
+	return wrapCmdDescription(c.Name(), c.Short, c.NamePadding())
+}
+
+func wrapCmdDescription(name, short string, padding int) string {
 	width := getViewWidth()
 
 	// Produce the same string length for all sibling commands by padding to
 	// the right based on the longest name. Add two extra spaces to the left
 	// of the screen, and three extra spaces before the description.
-	nameFormat := fmt.Sprintf("  %%-%ds   ", c.NamePadding())
-	name := fmt.Sprintf(nameFormat, c.Name())
-
-	description := c.Short
-	if len(name)+len(description) >= width {
-		wrapped := wordwrap.String(c.Short, width-len(name))
+	nameFormat := fmt.Sprintf("  %%-%ds   ", padding)
+	name = fmt.Sprintf(nameFormat, name)
+	if len(name)+len(short) >= width {
+		wrapped := wordwrap.String(short, width-len(name))
 		indented := indent.String(wrapped, uint(len(name)))
 		// first line shouldn't be indented since we're going to prepend the name
-		description = strings.TrimLeftFunc(indented, unicode.IsSpace)
+		short = strings.TrimLeftFunc(indented, unicode.IsSpace)
+	}
+	return name + short
+}
+
+func nameShortWrapped[S ~[]E, E any](s S, f func(e E) (string, string)) string {
+	minPadding := 11
+	maxLen := 0
+	lines := []string{}
+
+	for _, e := range s {
+		name, short := f(e)
+		nameLen := len(name)
+		if nameLen > maxLen {
+			maxLen = nameLen
+		}
+		// This special character will be replaced with spacing once the
+		// correct alignment is calculated
+		lines = append(lines, fmt.Sprintf("%s\x00%s", name, short))
 	}
 
-	return name + description
+	padding := maxLen
+	if minPadding > maxLen {
+		padding = minPadding
+	}
+
+	sb := new(strings.Builder)
+	for _, line := range lines {
+		s := strings.SplitN(line, "\x00", 2)
+		sb.WriteString(wrapCmdDescription(s[0], s[1], padding))
+		sb.WriteString("\n")
+	}
+	return sb.String()
 }
 
 // toUpperBold returns the given string in uppercase and bold.

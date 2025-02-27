@@ -12,14 +12,12 @@ import (
 	"github.com/moby/buildkit/client/llb"
 	bkgw "github.com/moby/buildkit/frontend/gateway/client"
 	"github.com/moby/buildkit/solver/pb"
-	"github.com/moby/buildkit/util/compression"
 	"github.com/moby/patternmatcher"
 	"github.com/pkg/errors"
 	fstypes "github.com/tonistiigi/fsutil/types"
 	"github.com/vektah/gqlparser/v2/ast"
 
 	"dagger.io/dagger/telemetry"
-	"github.com/dagger/dagger/dagql"
 	"github.com/dagger/dagger/engine/buildkit"
 )
 
@@ -130,9 +128,13 @@ func (dir *Directory) StateWithSourcePath() (llb.State, error) {
 }
 
 func (dir *Directory) SetState(ctx context.Context, st llb.State) error {
-	def, err := st.Marshal(ctx, llb.Platform(dir.Platform.Spec()))
+	def, err := st.Marshal(ctx,
+		llb.Platform(dir.Platform.Spec()),
+		buildkit.WithTracePropagation(ctx),
+		buildkit.WithPassthrough(), // these spans aren't particularly interesting
+	)
 	if err != nil {
-		return nil
+		return err
 	}
 
 	dir.LLB = def.ToPB()
@@ -174,7 +176,10 @@ func (dir *Directory) Evaluate(ctx context.Context) (*buildkit.Result, error) {
 func (dir *Directory) Digest(ctx context.Context) (string, error) {
 	result, err := dir.Evaluate(ctx)
 	if err != nil {
-		return "", fmt.Errorf("failed to evaluate file: %w", err)
+		return "", fmt.Errorf("failed to evaluate directory: %w", err)
+	}
+	if result == nil {
+		return "", fmt.Errorf("failed to evaluate null directory")
 	}
 
 	digest, err := result.Ref.Digest(ctx, dir.Dir)
@@ -445,6 +450,11 @@ func (dir *Directory) File(ctx context.Context, file string) (*File, error) {
 	}, nil
 }
 
+type CopyFilter struct {
+	Exclude []string `default:"[]"`
+	Include []string `default:"[]"`
+}
+
 func (dir *Directory) WithDirectory(ctx context.Context, destDir string, src *Directory, filter CopyFilter, owner *Ownership) (*Directory, error) {
 	dir = dir.Clone()
 
@@ -605,7 +615,7 @@ func mergeStates(input mergeStateInput) llb.State {
 			input.Src, path.Join(input.SrcDir, input.SrcFileName), path.Join(input.DestDir, input.DestFileName), copyInfo,
 		)))
 	}
-	return llb.Merge(mergeStates, llb.WithCustomName(buildkit.InternalPrefix+"merge"))
+	return llb.Merge(mergeStates)
 }
 
 func (dir *Directory) WithTimestamps(ctx context.Context, unix int) (*Directory, error) {
@@ -734,7 +744,7 @@ func (dir *Directory) Export(ctx context.Context, destPath string, merge bool) (
 	}
 
 	var defPB *pb.Definition
-	if dir.Dir != "" {
+	if dir.Dir != "" && dir.Dir != "/" {
 		src, err := dir.State()
 		if err != nil {
 			return err
@@ -769,43 +779,6 @@ func (dir *Directory) Root() (*Directory, error) {
 	dir = dir.Clone()
 	dir.Dir = "/"
 	return dir, nil
-}
-
-// AsBlob converts this directory into a stable content addressed blob, valid for the duration of the current
-// session. Currently only used internally to support local module sources.
-func (dir *Directory) AsBlob(
-	ctx context.Context,
-	srv *dagql.Server,
-) (inst dagql.Instance[*Directory], rerr error) {
-	// currently, all layers need to be squashed to 1 for DefToBlob to work, so
-	// unconditionally copy to scratch
-	src, err := dir.State()
-	if err != nil {
-		return inst, fmt.Errorf("failed to get dir state: %w", err)
-	}
-	src = llb.Scratch().File(llb.Copy(src, dir.Dir, ".", &llb.CopyInfo{
-		CopyDirContentsOnly: true,
-	}))
-	def, err := src.Marshal(ctx, llb.Platform(dir.Platform.Spec()))
-	if err != nil {
-		return inst, fmt.Errorf("failed to marshal dir state: %w", err)
-	}
-	pbDef := def.ToPB()
-
-	bk, err := dir.Query.Buildkit(ctx)
-	if err != nil {
-		return inst, fmt.Errorf("failed to get buildkit client: %w", err)
-	}
-	_, desc, err := bk.DefToBlob(ctx, pbDef, compression.Zstd)
-	if err != nil {
-		return inst, fmt.Errorf("failed to get blob descriptor: %w", err)
-	}
-
-	inst, err = LoadBlob(ctx, srv, desc)
-	if err != nil {
-		return inst, fmt.Errorf("failed to load blob: %w", err)
-	}
-	return inst, nil
 }
 
 func validateFileName(file string) error {

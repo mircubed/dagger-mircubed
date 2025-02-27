@@ -1,6 +1,7 @@
 {
   "name": "typescript-sdk",
-  "sdk": "go",
-  "source": ".",
-  "engineVersion": "v0.12.2"
+  "engineVersion": "v0.12.2",
+  "sdk": {
+    "source": "go"
+  }
 }

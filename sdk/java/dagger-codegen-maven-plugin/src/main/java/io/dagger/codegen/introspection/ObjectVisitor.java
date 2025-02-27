@@ -2,7 +2,11 @@ package io.dagger.codegen.introspection;
 
 import static org.apache.commons.lang3.StringUtils.capitalize;
 
-import com.squareup.javapoet.*;
+import com.palantir.javapoet.*;
+import jakarta.json.bind.annotation.JsonbTypeSerializer;
+import jakarta.json.bind.serializer.DeserializationContext;
+import jakarta.json.bind.serializer.JsonbDeserializer;
+import jakarta.json.stream.JsonParser;
 import java.nio.charset.Charset;
 import java.nio.file.Path;
 import java.util.List;
@@ -19,7 +23,7 @@ class ObjectVisitor extends AbstractVisitor {
   TypeSpec generateType(Type type) {
     TypeSpec.Builder classBuilder =
         TypeSpec.classBuilder(Helpers.formatName(type))
-            .addJavadoc(type.getDescription())
+            .addJavadoc(Helpers.escapeJavadoc(type.getDescription()))
             .addModifiers(Modifier.PUBLIC)
             .addField(
                 FieldSpec.builder(
@@ -64,12 +68,49 @@ class ObjectVisitor extends AbstractVisitor {
         classBuilder.addSuperinterface(
             ParameterizedTypeName.get(
                 ClassName.bestGuess("IDAble"), type.getIdField().getTypeRef().formatOutput()));
+        classBuilder.addAnnotation(
+            AnnotationSpec.builder(JsonbTypeSerializer.class)
+                .addMember("value", "$T.class", ClassName.bestGuess("IDAbleSerializer"))
+                .build());
+        classBuilder.addType(
+            TypeSpec.classBuilder("Deserializer")
+                .addModifiers(Modifier.PUBLIC, Modifier.STATIC)
+                .addSuperinterface(
+                    ParameterizedTypeName.get(
+                        ClassName.get(JsonbDeserializer.class),
+                        ClassName.bestGuess(Helpers.formatName(type))))
+                .addField(ClassName.bestGuess("Client"), "dag", Modifier.PRIVATE, Modifier.FINAL)
+                .addMethod(
+                    MethodSpec.constructorBuilder()
+                        .addParameter(ClassName.bestGuess("Client"), "dag")
+                        .addStatement("this.dag = dag")
+                        .build())
+                .addMethod(
+                    MethodSpec.methodBuilder("deserialize")
+                        .addModifiers(Modifier.PUBLIC)
+                        .addAnnotation(Override.class)
+                        .returns(ClassName.bestGuess(Helpers.formatName(type)))
+                        .addParameter(JsonParser.class, "parser")
+                        .addParameter(DeserializationContext.class, "ctx")
+                        .addParameter(java.lang.reflect.Type.class, "type")
+                        .addStatement(
+                            "$T id = ctx.deserialize($T.class, parser)", String.class, String.class)
+                        .addStatement(
+                            "$T o = dag.load$LFromID(new $T(id))",
+                            ClassName.bestGuess(Helpers.formatName(type)),
+                            Helpers.formatName(type),
+                            type.getIdField().getTypeRef().formatOutput())
+                        .addStatement("return o")
+                        .build())
+                .build());
       }
 
       for (Field scalarField :
           type.getFields().stream().filter(f -> f.getTypeRef().isScalar()).toList()) {
         classBuilder.addField(
-            scalarField.getTypeRef().formatOutput(), scalarField.getName(), Modifier.PRIVATE);
+            scalarField.getTypeRef().formatOutput(),
+            Helpers.formatName(scalarField),
+            Modifier.PRIVATE);
       }
     }
 
@@ -124,7 +165,7 @@ class ObjectVisitor extends AbstractVisitor {
                                 ? arg.getType().formatOutput()
                                 : arg.getType().formatInput(),
                             Helpers.formatName(arg))
-                        .addJavadoc(arg.getDescription() + "\n")
+                        .addJavadoc(Helpers.escapeJavadoc(arg.getDescription()) + "\n")
                         .build())
             .toList();
     fieldMethodBuilder.addParameters(mandatoryParams);

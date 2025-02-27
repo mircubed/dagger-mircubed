@@ -95,7 +95,7 @@ type VersionTag struct {
 	Date string
 }
 
-// VersionTagLatests gets the latest version tag for a given component
+// VersionTagLatest gets the latest version tag for a given component
 func (git *Git) VersionTagLatest(
 	ctx context.Context,
 
@@ -310,7 +310,8 @@ func (git *Git) status(ctx context.Context) (string, error) {
 
 	args := []string{"git", "status", "--porcelain", "--"}
 	for _, ignore := range ignores {
-		args = append(args, ":(exclude)"+ignore)
+		pathspec := ":(exclude)" + ignore
+		args = append(args, pathspec, pathspec+"/**")
 	}
 	result, err := git.Container.WithExec(args).Stdout(ctx)
 	if err != nil {

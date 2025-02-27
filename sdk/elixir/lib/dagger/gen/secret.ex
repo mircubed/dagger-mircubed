@@ -37,4 +37,26 @@ defmodule Dagger.Secret do
 
     Client.execute(secret.client, query_builder)
   end
+
+  @doc "The URI of this secret."
+  @spec uri(t()) :: {:ok, String.t()} | {:error, term()}
+  def uri(%__MODULE__{} = secret) do
+    query_builder =
+      secret.query_builder |> QB.select("uri")
+
+    Client.execute(secret.client, query_builder)
+  end
+end
+
+defimpl Jason.Encoder, for: Dagger.Secret do
+  def encode(secret, opts) do
+    {:ok, id} = Dagger.Secret.id(secret)
+    Jason.Encode.string(id, opts)
+  end
+end
+
+defimpl Nestru.Decoder, for: Dagger.Secret do
+  def decode_fields_hint(_struct, _context, id) do
+    {:ok, Dagger.Client.load_secret_from_id(Dagger.Global.dag(), id)}
+  end
 end

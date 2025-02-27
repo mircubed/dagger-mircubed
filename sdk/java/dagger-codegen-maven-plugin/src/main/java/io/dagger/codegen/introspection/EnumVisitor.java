@@ -1,6 +1,6 @@
 package io.dagger.codegen.introspection;
 
-import com.squareup.javapoet.*;
+import com.palantir.javapoet.*;
 import java.nio.charset.Charset;
 import java.nio.file.Path;
 import javax.lang.model.element.Modifier;
@@ -15,7 +15,7 @@ public class EnumVisitor extends AbstractVisitor {
   TypeSpec generateType(Type type) {
     TypeSpec.Builder classBuilder =
         TypeSpec.enumBuilder(Helpers.formatName(type))
-            .addJavadoc(type.getDescription())
+            .addJavadoc(type.getDescription() != null ? type.getDescription() : "")
             .addModifiers(Modifier.PUBLIC);
 
     for (EnumValue enumValue : type.getEnumValues()) {

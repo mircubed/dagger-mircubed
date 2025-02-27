@@ -3,21 +3,19 @@ package idtui
 import (
 	"context"
 	"fmt"
-	"io"
-	"math/rand"
 	"os"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/dustin/go-humanize"
 	"github.com/muesli/termenv"
-	"github.com/opencontainers/go-digest"
 	"go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/term"
 
 	"dagger.io/dagger/telemetry"
@@ -49,14 +47,15 @@ func FromCmdContext(ctx context.Context) (*cmdContext, bool) {
 	return nil, false
 }
 
-// having a bit of fun with these. cc @vito @jedevc
-var skipLoggedOutTraceMsgEnvs = []string{"NOTHANKS", "SHUTUP", "GOAWAY", "STOPIT"}
+var SkipLoggedOutTraceMsgEnvs = []string{
+	"DAGGER_NO_NAG",
 
-// Keep this to one line, and 80 characters max (longest env var name is NOTHANKS)
-//
-//nolint:gosec
-var loggedOutTraceMsg = fmt.Sprintf("Setup tracing at %%s. To hide: export %s=1",
-	skipLoggedOutTraceMsgEnvs[rand.Intn(len(skipLoggedOutTraceMsgEnvs))])
+	// old envs kept for backwards compat
+	"NOTHANKS", "SHUTUP", "GOAWAY", "STOPIT",
+}
+
+// NOTE: keep this to one line, and 80 characters max
+var loggedOutTraceMsg = fmt.Sprintf("Setup tracing at %%s. To hide set %s=1", SkipLoggedOutTraceMsgEnvs[0])
 
 type Frontend interface {
 	// Run starts a frontend, and runs the target function.
@@ -64,15 +63,17 @@ type Frontend interface {
 
 	// Opts returns the opts of the currently running frontend.
 	Opts() *dagui.FrontendOpts
+	SetCustomExit(fn func())
+	SetVerbosity(n int)
 
 	// SetPrimary tells the frontend which span should be treated like the focal
 	// point of the command. Its output will be displayed at the end, and its
 	// children will be promoted to the "top-level" of the TUI.
-	SetPrimary(spanID trace.SpanID)
+	SetPrimary(spanID dagui.SpanID)
 	Background(cmd tea.ExecCommand, raw bool) error
-	// RevealAllSpans tells the frontend to show all spans, not just the spans
-	// beneath the primary span.
-	SetRevealAllSpans(bool)
+	// RevealAllSpans tells the frontend to show all spans, not just
+	// the spans beneath the primary span.
+	RevealAllSpans()
 
 	// Can consume otel spans, logs and metrics.
 	SpanExporter() sdktrace.SpanExporter
@@ -109,7 +110,7 @@ func (d *Dump) DumpID(out *termenv.Output, id *call.ID) error {
 	if d.Newline != "" {
 		r.newline = d.Newline
 	}
-	err = r.renderCall(out, nil, id.Call(), d.Prefix, 0, false, false, false)
+	err = r.renderCall(out, nil, id.Call(), d.Prefix, false, 0, false, false, false)
 	fmt.Fprint(out, r.newline)
 	return err
 }
@@ -124,8 +125,8 @@ type renderer struct {
 	rendering     map[string]bool
 }
 
-func newRenderer(db *dagui.DB, maxLiteralLen int, fe dagui.FrontendOpts) renderer {
-	return renderer{
+func newRenderer(db *dagui.DB, maxLiteralLen int, fe dagui.FrontendOpts) *renderer {
+	return &renderer{
 		FrontendOpts:  fe,
 		now:           time.Now(),
 		db:            db,
@@ -141,11 +142,13 @@ const (
 	moduleColor = termenv.ANSIMagenta
 )
 
-func (r renderer) indent(out io.Writer, depth int) {
-	fmt.Fprint(out, strings.Repeat("  ", depth))
+func (r *renderer) indent(out *termenv.Output, depth int) {
+	fmt.Fprint(out, out.String(strings.Repeat(VertBar+" ", depth)).
+		Foreground(termenv.ANSIBrightBlack).
+		Faint())
 }
 
-func (r renderer) renderIDBase(out *termenv.Output, call *callpbv1.Call) {
+func (r *renderer) renderIDBase(out *termenv.Output, call *callpbv1.Call) {
 	typeName := call.Type.ToAST().Name()
 	parent := out.String(typeName)
 	if call.Module != nil {
@@ -157,18 +160,19 @@ func (r renderer) renderIDBase(out *termenv.Output, call *callpbv1.Call) {
 	}
 }
 
-func (r renderer) renderCall(
+func (r *renderer) renderCall(
 	out *termenv.Output,
 	span *dagui.Span,
 	call *callpbv1.Call,
 	prefix string,
+	chained bool,
 	depth int,
 	inline bool,
 	internal bool,
 	focused bool,
 ) error {
 	if r.rendering[call.Digest] {
-		slog.Warn("cycle detected while rendering call", "span", span.Name(), "call", call.String())
+		slog.Warn("cycle detected while rendering call", "span", span.Name, "call", call.String())
 		return nil
 	}
 	r.rendering[call.Digest] = true
@@ -184,7 +188,9 @@ func (r renderer) renderCall(
 	}
 
 	if call.ReceiverDigest != "" {
-		r.renderIDBase(out, r.db.MustCall(call.ReceiverDigest))
+		if !chained {
+			r.renderIDBase(out, r.db.MustCall(call.ReceiverDigest))
+		}
 		fmt.Fprint(out, ".")
 	}
 
@@ -221,7 +227,7 @@ func (r renderer) renderCall(
 						}
 					}
 					argCall := r.db.Simplify(r.db.MustCall(argDig), forceSimplify)
-					if err := r.renderCall(out, argSpan, argCall, prefix, depth-1, true, internal, false); err != nil {
+					if err := r.renderCall(out, argSpan, argCall, prefix, false, depth-1, true, internal, false); err != nil {
 						return err
 					}
 				} else {
@@ -257,12 +263,13 @@ func (r renderer) renderCall(
 	if span != nil {
 		r.renderDuration(out, span)
 		r.renderMetrics(out, span)
+		r.renderCached(out, span)
 	}
 
 	return nil
 }
 
-func (r renderer) renderSpan(
+func (r *renderer) renderSpan(
 	out *termenv.Output,
 	span *dagui.Span,
 	name string,
@@ -276,8 +283,7 @@ func (r renderer) renderSpan(
 	style := lipgloss.NewStyle()
 	if span != nil {
 		r.renderStatus(out, span, focused)
-
-		if span.EffectID != "" {
+		if len(span.Links) > 0 {
 			style = style.Italic(true)
 		}
 	}
@@ -288,12 +294,13 @@ func (r renderer) renderSpan(
 		// fe.renderVertexTasks(out, span, depth)
 		r.renderDuration(out, span)
 		r.renderMetrics(out, span)
+		r.renderCached(out, span)
 	}
 
 	return nil
 }
 
-func (r renderer) renderLiteral(out *termenv.Output, lit *callpbv1.Literal) {
+func (r *renderer) renderLiteral(out *termenv.Output, lit *callpbv1.Literal) {
 	switch val := lit.GetValue().(type) {
 	case *callpbv1.Literal_Bool:
 		fmt.Fprint(out, out.String(fmt.Sprintf("%v", val.Bool)).Foreground(termenv.ANSIRed))
@@ -302,11 +309,6 @@ func (r renderer) renderLiteral(out *termenv.Output, lit *callpbv1.Literal) {
 	case *callpbv1.Literal_Float:
 		fmt.Fprint(out, out.String(fmt.Sprintf("%f", val.Float)).Foreground(termenv.ANSIRed))
 	case *callpbv1.Literal_String_:
-		if r.maxLiteralLen != -1 && len(val.Value()) > r.maxLiteralLen {
-			display := string(digest.FromString(val.Value()))
-			fmt.Fprint(out, out.String("ETOOBIG:"+display).Foreground(termenv.ANSIYellow))
-			return
-		}
 		fmt.Fprint(out, out.String(fmt.Sprintf("%q", val.String_)).Foreground(termenv.ANSIYellow))
 	case *callpbv1.Literal_CallDigest:
 		fmt.Fprint(out, out.String(val.CallDigest).Foreground(termenv.ANSIMagenta))
@@ -336,19 +338,25 @@ func (r renderer) renderLiteral(out *termenv.Output, lit *callpbv1.Literal) {
 	}
 }
 
-func (r renderer) renderStatus(out *termenv.Output, span *dagui.Span, focused bool) {
+func (r *renderer) renderStatus(out *termenv.Output, span *dagui.Span, focused bool) {
 	var symbol string
 	var color termenv.Color
 	switch {
-	case span.IsRunning():
+	case span.IsRunningOrEffectsRunning():
 		symbol = DotFilled
 		color = termenv.ANSIYellow
+	case span.IsCached():
+		symbol = IconCached
+		color = termenv.ANSIBlue
 	case span.Canceled:
 		symbol = IconSkipped
 		color = termenv.ANSIBrightBlack
-	case span.Failed():
+	case span.IsFailedOrCausedFailure():
 		symbol = IconFailure
 		color = termenv.ANSIRed
+	case span.IsPending():
+		symbol = DotEmpty
+		color = termenv.ANSIBrightBlack
 	default:
 		symbol = IconSuccess
 		color = termenv.ANSIGreen
@@ -367,10 +375,10 @@ func (r renderer) renderStatus(out *termenv.Output, span *dagui.Span, focused bo
 	}
 }
 
-func (r renderer) renderDuration(out *termenv.Output, span *dagui.Span) {
+func (r *renderer) renderDuration(out *termenv.Output, span *dagui.Span) {
 	fmt.Fprint(out, " ")
-	duration := out.String(dagui.FormatDuration(span.ActiveDuration(r.now)))
-	if span.IsRunning() {
+	duration := out.String(dagui.FormatDuration(span.Activity.Duration(r.now)))
+	if span.IsRunningOrEffectsRunning() {
 		duration = duration.Foreground(termenv.ANSIYellow)
 	} else {
 		duration = duration.Faint()
@@ -378,56 +386,120 @@ func (r renderer) renderDuration(out *termenv.Output, span *dagui.Span) {
 	fmt.Fprint(out, duration)
 }
 
+func (r *renderer) renderCached(out *termenv.Output, span *dagui.Span) {
+	if !span.IsRunningOrEffectsRunning() && span.IsCached() {
+		fmt.Fprintf(out, " %s", out.String("CACHED").
+			Foreground(termenv.ANSIBlue))
+	}
+}
+
 func (r renderer) renderMetrics(out *termenv.Output, span *dagui.Span) {
-	if span.MetricsByName == nil {
+	if r.Verbosity < dagui.ShowMetricsVerbosity {
 		return
 	}
 
-	if dataPoints := span.MetricsByName[telemetry.IOStatDiskReadBytes]; len(dataPoints) > 0 {
-		lastPoint := dataPoints[len(dataPoints)-1]
-		fmt.Fprint(out, " | ")
-		displayMetric := out.String(fmt.Sprintf("Disk Read Bytes: %d", lastPoint.Value))
-		displayMetric = displayMetric.Foreground(termenv.ANSIGreen)
-		fmt.Fprint(out, displayMetric)
+	if span.CallDigest == "" {
+		return
 	}
-	if dataPoints := span.MetricsByName[telemetry.IOStatDiskWriteBytes]; len(dataPoints) > 0 {
-		lastPoint := dataPoints[len(dataPoints)-1]
-		fmt.Fprint(out, " | ")
-		displayMetric := out.String(fmt.Sprintf("Disk Write Bytes: %d", lastPoint.Value))
-		displayMetric = displayMetric.Foreground(termenv.ANSIGreen)
-		fmt.Fprint(out, displayMetric)
-	}
-	if dataPoints := span.MetricsByName[telemetry.IOStatPressureSomeTotal]; len(dataPoints) > 0 {
-		lastPoint := dataPoints[len(dataPoints)-1]
-		if lastPoint.Value != 0 {
-			fmt.Fprint(out, " | ")
-			displayMetric := out.String(fmt.Sprintf("IO Pressure: %dµs", lastPoint.Value))
-			displayMetric = displayMetric.Foreground(termenv.ANSIGreen)
-			fmt.Fprint(out, displayMetric)
-		}
+	metricsByName := r.db.MetricsByCall[span.CallDigest]
+	if metricsByName == nil {
+		return
 	}
 
-	if dataPoints := span.MetricsByName[telemetry.CPUStatPressureSomeTotal]; len(dataPoints) > 0 {
+	// IO Stats
+	r.renderMetric(out, metricsByName, telemetry.IOStatDiskReadBytes, "Disk Read", humanizeBytes)
+	r.renderMetric(out, metricsByName, telemetry.IOStatDiskWriteBytes, "Disk Write", humanizeBytes)
+	r.renderMetricIfNonzero(out, metricsByName, telemetry.IOStatPressureSomeTotal, "IO Pressure", durationString)
+
+	// CPU Stats
+	r.renderMetricIfNonzero(out, metricsByName, telemetry.CPUStatPressureSomeTotal, "CPU Pressure (some)", durationString)
+	r.renderMetricIfNonzero(out, metricsByName, telemetry.CPUStatPressureFullTotal, "CPU Pressure (full)", durationString)
+
+	// Memory Stats
+	r.renderMetric(out, metricsByName, telemetry.MemoryCurrentBytes, "Memory Bytes (current)", humanizeBytes)
+	r.renderMetric(out, metricsByName, telemetry.MemoryPeakBytes, "Memory Bytes (peak)", humanizeBytes)
+
+	// Network Stats
+	r.renderNetworkMetric(out, metricsByName, telemetry.NetstatRxBytes, telemetry.NetstatRxDropped, telemetry.NetstatRxPackets, "Network Rx")
+	r.renderNetworkMetric(out, metricsByName, telemetry.NetstatTxBytes, telemetry.NetstatTxDropped, telemetry.NetstatTxPackets, "Network Tx")
+}
+
+func (r renderer) renderMetric(
+	out *termenv.Output,
+	metricsByName map[string][]metricdata.DataPoint[int64],
+	metricName string, label string,
+	formatValue func(int64) string,
+) {
+	if dataPoints := metricsByName[metricName]; len(dataPoints) > 0 {
 		lastPoint := dataPoints[len(dataPoints)-1]
 		fmt.Fprint(out, " | ")
-		displayMetric := out.String(fmt.Sprintf("CPU Pressure (some): %dµs", lastPoint.Value))
+		displayMetric := out.String(fmt.Sprintf("%s: %s", label, formatValue(lastPoint.Value)))
 		displayMetric = displayMetric.Foreground(termenv.ANSIGreen)
 		fmt.Fprint(out, displayMetric)
 	}
-	if dataPoints := span.MetricsByName[telemetry.CPUStatPressureFullTotal]; len(dataPoints) > 0 {
+}
+
+func (r renderer) renderMetricIfNonzero(
+	out *termenv.Output,
+	metricsByName map[string][]metricdata.DataPoint[int64],
+	metricName string, label string,
+	formatValue func(int64) string,
+) {
+	if dataPoints := metricsByName[metricName]; len(dataPoints) > 0 {
 		lastPoint := dataPoints[len(dataPoints)-1]
-		fmt.Fprint(out, " | ")
-		displayMetric := out.String(fmt.Sprintf("CPU Pressure (full): %dµs", lastPoint.Value))
-		displayMetric = displayMetric.Foreground(termenv.ANSIGreen)
-		fmt.Fprint(out, displayMetric)
+		if lastPoint.Value == 0 {
+			return
+		}
+		r.renderMetric(out, metricsByName, metricName, label, formatValue)
 	}
+}
+
+func (r renderer) renderNetworkMetric(
+	out *termenv.Output,
+	metricsByName map[string][]metricdata.DataPoint[int64],
+	bytesMetric, droppedMetric, packetsMetric, label string,
+) {
+	r.renderMetricIfNonzero(out, metricsByName, bytesMetric, label, humanizeBytes)
+	if dataPoints := metricsByName[bytesMetric]; len(dataPoints) > 0 {
+		renderPacketLoss(out, metricsByName, droppedMetric, packetsMetric)
+	}
+}
+
+func renderPacketLoss(
+	out *termenv.Output,
+	metricsByName map[string][]metricdata.DataPoint[int64],
+	droppedMetric, packetsMetric string,
+) {
+	if drops := metricsByName[droppedMetric]; len(drops) > 0 {
+		if packets := metricsByName[packetsMetric]; len(packets) > 0 {
+			lastDrops := drops[len(drops)-1]
+			lastPackets := packets[len(packets)-1]
+			if lastDrops.Value > 0 && lastPackets.Value > 0 {
+				droppedPercent := (float64(lastDrops.Value) / float64(lastPackets.Value)) * 100
+				if droppedPercent > 0 {
+					displaydropped := out.String(fmt.Sprintf(" (%.3g%% dropped)", droppedPercent))
+					displaydropped = displaydropped.Foreground(termenv.ANSIRed)
+					fmt.Fprint(out, displaydropped)
+				}
+			}
+		}
+	}
+}
+
+func durationString(microseconds int64) string {
+	duration := time.Duration(microseconds) * time.Microsecond
+	return duration.String()
+}
+
+func humanizeBytes(v int64) string {
+	return humanize.Bytes(uint64(v))
 }
 
 // var (
 // 	progChars = []string{"⠀", "⡀", "⣀", "⣄", "⣤", "⣦", "⣶", "⣷", "⣿"}
 // )
 
-// func (r renderer) renderVertexTasks(out *termenv.Output, span *Span, depth int) error {
+// func (r *renderer) renderVertexTasks(out *termenv.Output, span *Span, depth int) error {
 // 	tasks := r.db.Tasks[span.SpanContext().SpanID()]
 // 	if len(tasks) == 0 {
 // 		return nil
@@ -469,6 +541,8 @@ func renderPrimaryOutput(db *dagui.DB) error {
 		return nil
 	}
 
+	fmt.Fprintln(os.Stderr)
+
 	for _, l := range logs {
 		data := l.Body().AsString()
 		var stream int
@@ -506,7 +580,7 @@ func renderPrimaryOutput(db *dagui.DB) error {
 }
 
 func skipLoggedOutTraceMsg() bool {
-	for _, env := range skipLoggedOutTraceMsgEnvs {
+	for _, env := range SkipLoggedOutTraceMsgEnvs {
 		if os.Getenv(env) != "" {
 			return true
 		}

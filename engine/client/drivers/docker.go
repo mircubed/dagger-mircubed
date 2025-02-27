@@ -9,9 +9,13 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"dagger.io/dagger/telemetry"
+	"github.com/adrg/xdg"
 	"github.com/google/go-containerregistry/pkg/name"
 	connh "github.com/moby/buildkit/client/connhelper"
 	connhDocker "github.com/moby/buildkit/client/connhelper/dockercontainer"
@@ -19,8 +23,13 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/dagger/dagger/engine/config"
 	"github.com/dagger/dagger/engine/distconsts"
 	"github.com/dagger/dagger/engine/slog"
+)
+
+var (
+	engineConfigPath = filepath.Join(xdg.ConfigHome, "dagger", "engine.json")
 )
 
 func init() {
@@ -31,7 +40,18 @@ func init() {
 type dockerDriver struct{}
 
 func (d *dockerDriver) Provision(ctx context.Context, target *url.URL, opts *DriverOpts) (Connector, error) {
-	helper, err := d.create(ctx, target.Host+target.Path, opts)
+	cleanup := true
+	if val, ok := os.LookupEnv("DAGGER_LEAVE_OLD_ENGINE"); ok {
+		b, _ := strconv.ParseBool(val)
+		cleanup = !b
+	} else if val := target.Query().Get("cleanup"); val != "" {
+		cleanup, _ = strconv.ParseBool(val)
+	}
+
+	containerName := target.Query().Get("container")
+	volumeName := target.Query().Get("volume")
+
+	helper, err := d.create(ctx, target.Host+target.Path, containerName, volumeName, cleanup, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -60,20 +80,21 @@ const InstrumentationLibrary = "dagger.io/client.drivers"
 // previous executions of the engine at different versions (which
 // are identified by looking for containers with the prefix
 // "dagger-engine-").
-func (d *dockerDriver) create(ctx context.Context, imageRef string, opts *DriverOpts) (helper *connh.ConnectionHelper, rerr error) {
+func (d *dockerDriver) create(ctx context.Context, imageRef string, containerName string, volumeName string, cleanup bool, opts *DriverOpts) (helper *connh.ConnectionHelper, rerr error) {
 	ctx, span := otel.Tracer("").Start(ctx, "create")
 	defer telemetry.End(span, func() error { return rerr })
 	slog := slog.SpanLogger(ctx, InstrumentationLibrary)
 
-	id, err := resolveImageID(imageRef)
-	if err != nil {
-		return nil, err
+	if containerName == "" {
+		id, err := resolveImageID(imageRef)
+		if err != nil {
+			return nil, err
+		}
+		// run the container using that id in the name
+		containerName = containerNamePrefix + id
 	}
 
-	// run the container using that id in the name
-	containerName := containerNamePrefix + id
-
-	leftoverEngines, err := collectLeftoverEngines(ctx)
+	leftoverEngines, err := collectLeftoverEngines(ctx, containerName)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil, err
@@ -89,7 +110,7 @@ func (d *dockerDriver) create(ctx context.Context, imageRef string, opts *Driver
 			if output, err := traceExec(ctx, cmd); err != nil {
 				return nil, errors.Wrapf(err, "failed to start container: %s", output)
 			}
-			garbageCollectEngines(ctx, slog, append(leftoverEngines[:i], leftoverEngines[i+1:]...))
+			garbageCollectEngines(ctx, cleanup, slog, append(leftoverEngines[:i], leftoverEngines[i+1:]...))
 			return connhDocker.Helper(&url.URL{
 				Scheme: "docker-container",
 				Host:   containerName,
@@ -107,15 +128,27 @@ func (d *dockerDriver) create(ctx context.Context, imageRef string, opts *Driver
 		}
 	}
 
+	volume := distconsts.EngineDefaultStateDir
+	if volumeName != "" {
+		volume = volumeName + ":" + volume
+	}
 	cmd := exec.CommandContext(ctx,
 		"docker",
 		"run",
 		"--name", containerName,
 		"-d",
 		"--restart", "always",
-		"-v", distconsts.EngineDefaultStateDir,
+		"-v", volume,
 		"--privileged",
 	)
+
+	// mount the config path
+	if _, err := os.Stat(engineConfigPath); err == nil {
+		cmd.Args = append(cmd.Args, "-v", engineConfigPath+":"+config.DefaultConfigPath())
+	} else if !errors.Is(err, os.ErrNotExist) {
+		slog.Warn("could not stat config", "path", engineConfigPath, "error", err)
+	}
+
 	// explicitly pass current env vars; if we append more below existing ones like DOCKER_HOST
 	// won't be passed to the cmd
 	cmd.Env = os.Environ()
@@ -139,7 +172,7 @@ func (d *dockerDriver) create(ctx context.Context, imageRef string, opts *Driver
 	// garbage collect any other containers with the same name pattern, which
 	// we assume to be leftover from previous runs of the engine using an older
 	// version
-	garbageCollectEngines(ctx, slog, leftoverEngines)
+	garbageCollectEngines(ctx, cleanup, slog, leftoverEngines)
 
 	return connhDocker.Helper(&url.URL{
 		Scheme: "docker-container",
@@ -169,7 +202,10 @@ func resolveImageID(imageRef string) (string, error) {
 	return "latest", nil
 }
 
-func garbageCollectEngines(ctx context.Context, log *slog.Logger, engines []string) {
+func garbageCollectEngines(ctx context.Context, cleanup bool, log *slog.Logger, engines []string) {
+	if !cleanup {
+		return
+	}
 	for _, engine := range engines {
 		if engine == "" {
 			continue
@@ -201,12 +237,16 @@ func traceExec(ctx context.Context, cmd *exec.Cmd, opts ...trace.SpanStartOption
 	return outBuf.String(), nil
 }
 
-func collectLeftoverEngines(ctx context.Context) ([]string, error) {
+func collectLeftoverEngines(ctx context.Context, additionalNames ...string) ([]string, error) {
+	names := []string{"^" + containerNamePrefix}
+	for _, name := range additionalNames {
+		names = append(names, "^"+regexp.QuoteMeta(name)+"$")
+	}
 	cmd := exec.CommandContext(ctx,
 		"docker", "ps",
 		"-a",
 		"--no-trunc",
-		"--filter", "name=^/"+containerNamePrefix,
+		"--filter", "name="+strings.Join(names, "|"),
 		"--format", "{{.Names}}",
 	)
 	output, err := traceExec(ctx, cmd)

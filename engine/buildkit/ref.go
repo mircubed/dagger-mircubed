@@ -33,6 +33,7 @@ import (
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/tonistiigi/fsutil"
 	fstypes "github.com/tonistiigi/fsutil/types"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -232,7 +233,7 @@ func (r *ref) Result(ctx context.Context) (bksolver.CachedResult, error) {
 		// writing log w/ %+v so that we can see stack traces embedded in err by buildkit's usage of pkg/errors
 		bklog.G(ctx).Errorf("ref evaluate error: %+v", err)
 		err = includeBuildkitContextCancelledLine(err)
-		return nil, wrapError(ctx, err, r.c)
+		return nil, WrapError(ctx, err, r.c)
 	}
 	return res, nil
 }
@@ -285,7 +286,7 @@ func ConvertToWorkerCacheResult(ctx context.Context, res *solverresult.Result[*r
 	})
 }
 
-func wrapError(ctx context.Context, baseErr error, client *Client) error {
+func WrapError(ctx context.Context, baseErr error, client *Client) error {
 	var slowCacheErr *bksolver.SlowCacheError
 	if errors.As(baseErr, &slowCacheErr) {
 		if slowCacheErr.Result != nil {
@@ -349,16 +350,15 @@ func wrapError(ctx context.Context, baseErr error, client *Client) error {
 		return errors.Join(err, baseErr)
 	}
 
-	stdoutBytes, err := getExecMetaFile(ctx, mntable, MetaMountStdoutPath)
+	stdoutBytes, err := getExecMetaFile(ctx, client, mntable, MetaMountStdoutPath)
 	if err != nil {
 		return errors.Join(err, baseErr)
 	}
-	stderrBytes, err := getExecMetaFile(ctx, mntable, MetaMountStderrPath)
+	stderrBytes, err := getExecMetaFile(ctx, client, mntable, MetaMountStderrPath)
 	if err != nil {
 		return errors.Join(err, baseErr)
 	}
-
-	exitCodeBytes, err := getExecMetaFile(ctx, mntable, MetaMountExitCodePath)
+	exitCodeBytes, err := getExecMetaFile(ctx, client, mntable, MetaMountExitCodePath)
 	if err != nil {
 		return errors.Join(err, baseErr)
 	}
@@ -410,14 +410,34 @@ func debugContainer(ctx context.Context, execOp *bksolverpb.ExecOp, execErr *llb
 		return nil
 	}
 
+	// relevant buildkit code we need to contend with here:
+	// https://github.com/moby/buildkit/blob/44504feda1ce39bb8578537a6e6a93f90bdf4220/solver/llbsolver/ops/exec.go#L386-L409
 	mounts := []ContainerMount{}
 	for i, m := range execOp.Mounts {
-		mountID := execErr.Mounts[i]
-		if mountID == nil {
+		if m.Input == -1 {
+			mounts = append(mounts, ContainerMount{
+				Mount: &bkgw.Mount{
+					Dest:      m.Dest,
+					Selector:  m.Selector,
+					Readonly:  m.Readonly,
+					MountType: m.MountType,
+					CacheOpt:  m.CacheOpt,
+					SecretOpt: m.SecretOpt,
+					SSHOpt:    m.SSHOpt,
+				},
+			})
 			continue
 		}
 
-		workerRef, ok := mountID.Sys().(*bkworker.WorkerRef)
+		// sanity check we don't panic
+		if i >= len(execErr.Mounts) {
+			return fmt.Errorf("exec error mount index out of bounds: %d", i)
+		}
+		errMnt := execErr.Mounts[i]
+		if errMnt == nil {
+			continue
+		}
+		workerRef, ok := errMnt.Sys().(*bkworker.WorkerRef)
 		if !ok {
 			continue
 		}
@@ -432,7 +452,7 @@ func debugContainer(ctx context.Context, execOp *bksolverpb.ExecOp, execErr *llb
 				CacheOpt:  m.CacheOpt,
 				SecretOpt: m.SecretOpt,
 				SSHOpt:    m.SSHOpt,
-				ResultID:  mountID.ID(),
+				ResultID:  errMnt.ID(),
 			},
 		})
 	}
@@ -448,6 +468,8 @@ func debugContainer(ctx context.Context, execOp *bksolverpb.ExecOp, execErr *llb
 	if err != nil {
 		return err
 	}
+	// always close term; it's wrapped in a once so it won't be called multiple times
+	defer term.Close(bkgwpb.UnknownExitStatus)
 
 	output := idtui.NewOutput(term.Stderr)
 	fmt.Fprint(term.Stderr,
@@ -468,6 +490,8 @@ func debugContainer(ctx context.Context, execOp *bksolverpb.ExecOp, execErr *llb
 		debugCommand = client.Opts.InteractiveCommand
 	}
 
+	eg, ctx := errgroup.WithContext(ctx)
+
 	dbgShell, err := dbgCtr.Start(ctx, bkgw.StartRequest{
 		Args: debugCommand,
 
@@ -485,30 +509,50 @@ func debugContainer(ctx context.Context, execOp *bksolverpb.ExecOp, execErr *llb
 	if err != nil {
 		return err
 	}
-	go func() {
+
+	eg.Go(func() error {
+		err := <-term.ErrCh
+		if err != nil {
+			return fmt.Errorf("terminal error: %w", err)
+		}
+		return nil
+	})
+	eg.Go(func() error {
 		for resize := range term.ResizeCh {
-			dbgShell.Resize(ctx, resize)
+			err := dbgShell.Resize(ctx, resize)
+			if err != nil {
+				return fmt.Errorf("failed to resize terminal: %w", err)
+			}
 		}
-	}()
-	waitErr := dbgShell.Wait()
-	termExitCode := 0
-	if waitErr != nil {
-		termExitCode = 1
-		var exitErr *bkgwpb.ExitError
-		if errors.As(waitErr, &exitErr) {
-			termExitCode = int(exitErr.ExitCode)
+		return nil
+	})
+	eg.Go(func() error {
+		waitErr := dbgShell.Wait()
+		termExitCode := 0
+		if waitErr != nil {
+			termExitCode = 1
+			var exitErr *bkgwpb.ExitError
+			if errors.As(waitErr, &exitErr) {
+				termExitCode = int(exitErr.ExitCode)
+			}
 		}
-	}
-	return term.Close(termExitCode)
+
+		return term.Close(termExitCode)
+	})
+
+	return eg.Wait()
 }
 
-func getExecMetaFile(ctx context.Context, mntable snapshot.Mountable, fileName string) ([]byte, error) {
+func getExecMetaFile(ctx context.Context, c *Client, mntable snapshot.Mountable, fileName string) ([]byte, error) {
+	return ReadSnapshotPath(ctx, c, mntable, path.Join(MetaMountDestPath, fileName))
+}
+
+func ReadSnapshotPath(ctx context.Context, c *Client, mntable snapshot.Mountable, filePath string) ([]byte, error) {
 	ctx = withOutgoingContext(ctx)
-	filePath := path.Join(MetaMountDestPath, fileName)
 	stat, err := cacheutil.StatFile(ctx, mntable, filePath)
 	if err != nil {
 		// TODO: would be better to verify this is a "not exists" error, return err if not
-		bklog.G(ctx).Debugf("getExecMetaFile: failed to stat file: %v", err)
+		bklog.G(ctx).Debugf("ReadSnapshotPath: failed to stat file: %v", err)
 		return nil, nil
 	}
 

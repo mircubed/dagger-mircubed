@@ -1,12 +1,13 @@
 {
   "name": "version",
-  "sdk": "go",
+  "engineVersion": "v0.13.3",
+  "sdk": {
+    "source": "go"
+  },
   "dependencies": [
     {
       "name": "wolfi",
       "source": "../modules/wolfi"
     }
-  ],
-  "source": ".",
-  "engineVersion": "v0.13.3"
+  ]
 }

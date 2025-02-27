@@ -14,19 +14,6 @@ namespace Dagger;
 class Client extends Client\AbstractClient
 {
     /**
-     * Retrieves a content-addressed blob.
-     */
-    public function blob(string $digest, int $size, string $mediaType, string $uncompressed): Directory
-    {
-        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('blob');
-        $innerQueryBuilder->setArgument('digest', $digest);
-        $innerQueryBuilder->setArgument('size', $size);
-        $innerQueryBuilder->setArgument('mediaType', $mediaType);
-        $innerQueryBuilder->setArgument('uncompressed', $uncompressed);
-        return new \Dagger\Directory($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
-    }
-
-    /**
      * Retrieves a container builtin to the engine.
      */
     public function builtinContainer(string $digest): Container
@@ -39,10 +26,13 @@ class Client extends Client\AbstractClient
     /**
      * Constructs a cache volume for a given cache key.
      */
-    public function cacheVolume(string $key): CacheVolume
+    public function cacheVolume(string $key, ?string $namespace = ''): CacheVolume
     {
         $innerQueryBuilder = new \Dagger\Client\QueryBuilder('cacheVolume');
         $innerQueryBuilder->setArgument('key', $key);
+        if (null !== $namespace) {
+        $innerQueryBuilder->setArgument('namespace', $namespace);
+        }
         return new \Dagger\CacheVolume($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
     }
 
@@ -90,15 +80,6 @@ class Client extends Client\AbstractClient
     }
 
     /**
-     * The Dagger engine container configuration and state
-     */
-    public function daggerEngine(): DaggerEngine
-    {
-        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('daggerEngine');
-        return new \Dagger\DaggerEngine($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
-    }
-
-    /**
      * The default platform of the engine.
      */
     public function defaultPlatform(): Platform
@@ -114,6 +95,25 @@ class Client extends Client\AbstractClient
     {
         $innerQueryBuilder = new \Dagger\Client\QueryBuilder('directory');
         return new \Dagger\Directory($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
+    }
+
+    /**
+     * The Dagger engine container configuration and state
+     */
+    public function engine(): Engine
+    {
+        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('engine');
+        return new \Dagger\Engine($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
+    }
+
+    /**
+     * Create a new error.
+     */
+    public function error(string $message): Error
+    {
+        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('error');
+        $innerQueryBuilder->setArgument('message', $message);
+        return new \Dagger\Error($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
     }
 
     /**
@@ -217,48 +217,6 @@ class Client extends Client\AbstractClient
     }
 
     /**
-     * Load a DaggerEngineCacheEntry from its ID.
-     */
-    public function loadDaggerEngineCacheEntryFromID(
-        DaggerEngineCacheEntryId|DaggerEngineCacheEntry $id,
-    ): DaggerEngineCacheEntry {
-        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('loadDaggerEngineCacheEntryFromID');
-        $innerQueryBuilder->setArgument('id', $id);
-        return new \Dagger\DaggerEngineCacheEntry($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
-    }
-
-    /**
-     * Load a DaggerEngineCacheEntrySet from its ID.
-     */
-    public function loadDaggerEngineCacheEntrySetFromID(
-        DaggerEngineCacheEntrySetId|DaggerEngineCacheEntrySet $id,
-    ): DaggerEngineCacheEntrySet {
-        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('loadDaggerEngineCacheEntrySetFromID');
-        $innerQueryBuilder->setArgument('id', $id);
-        return new \Dagger\DaggerEngineCacheEntrySet($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
-    }
-
-    /**
-     * Load a DaggerEngineCache from its ID.
-     */
-    public function loadDaggerEngineCacheFromID(DaggerEngineCacheId|DaggerEngineCache $id): DaggerEngineCache
-    {
-        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('loadDaggerEngineCacheFromID');
-        $innerQueryBuilder->setArgument('id', $id);
-        return new \Dagger\DaggerEngineCache($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
-    }
-
-    /**
-     * Load a DaggerEngine from its ID.
-     */
-    public function loadDaggerEngineFromID(DaggerEngineId|DaggerEngine $id): DaggerEngine
-    {
-        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('loadDaggerEngineFromID');
-        $innerQueryBuilder->setArgument('id', $id);
-        return new \Dagger\DaggerEngine($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
-    }
-
-    /**
      * Load a Directory from its ID.
      */
     public function loadDirectoryFromID(DirectoryId|Directory $id): Directory
@@ -266,6 +224,46 @@ class Client extends Client\AbstractClient
         $innerQueryBuilder = new \Dagger\Client\QueryBuilder('loadDirectoryFromID');
         $innerQueryBuilder->setArgument('id', $id);
         return new \Dagger\Directory($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
+    }
+
+    /**
+     * Load a EngineCacheEntry from its ID.
+     */
+    public function loadEngineCacheEntryFromID(EngineCacheEntryId|EngineCacheEntry $id): EngineCacheEntry
+    {
+        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('loadEngineCacheEntryFromID');
+        $innerQueryBuilder->setArgument('id', $id);
+        return new \Dagger\EngineCacheEntry($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
+    }
+
+    /**
+     * Load a EngineCacheEntrySet from its ID.
+     */
+    public function loadEngineCacheEntrySetFromID(EngineCacheEntrySetId|EngineCacheEntrySet $id): EngineCacheEntrySet
+    {
+        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('loadEngineCacheEntrySetFromID');
+        $innerQueryBuilder->setArgument('id', $id);
+        return new \Dagger\EngineCacheEntrySet($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
+    }
+
+    /**
+     * Load a EngineCache from its ID.
+     */
+    public function loadEngineCacheFromID(EngineCacheId|EngineCache $id): EngineCache
+    {
+        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('loadEngineCacheFromID');
+        $innerQueryBuilder->setArgument('id', $id);
+        return new \Dagger\EngineCache($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
+    }
+
+    /**
+     * Load a Engine from its ID.
+     */
+    public function loadEngineFromID(EngineId|Engine $id): Engine
+    {
+        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('loadEngineFromID');
+        $innerQueryBuilder->setArgument('id', $id);
+        return new \Dagger\Engine($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
     }
 
     /**
@@ -296,6 +294,16 @@ class Client extends Client\AbstractClient
         $innerQueryBuilder = new \Dagger\Client\QueryBuilder('loadEnvVariableFromID');
         $innerQueryBuilder->setArgument('id', $id);
         return new \Dagger\EnvVariable($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
+    }
+
+    /**
+     * Load a Error from its ID.
+     */
+    public function loadErrorFromID(ErrorId|Error $id): Error
+    {
+        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('loadErrorFromID');
+        $innerQueryBuilder->setArgument('id', $id);
+        return new \Dagger\Error($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
     }
 
     /**
@@ -370,16 +378,6 @@ class Client extends Client\AbstractClient
     }
 
     /**
-     * Load a GitModuleSource from its ID.
-     */
-    public function loadGitModuleSourceFromID(GitModuleSourceId|GitModuleSource $id): GitModuleSource
-    {
-        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('loadGitModuleSourceFromID');
-        $innerQueryBuilder->setArgument('id', $id);
-        return new \Dagger\GitModuleSource($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
-    }
-
-    /**
      * Load a GitRef from its ID.
      */
     public function loadGitRefFromID(GitRefId|GitRef $id): GitRef
@@ -450,26 +448,6 @@ class Client extends Client\AbstractClient
     }
 
     /**
-     * Load a LocalModuleSource from its ID.
-     */
-    public function loadLocalModuleSourceFromID(LocalModuleSourceId|LocalModuleSource $id): LocalModuleSource
-    {
-        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('loadLocalModuleSourceFromID');
-        $innerQueryBuilder->setArgument('id', $id);
-        return new \Dagger\LocalModuleSource($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
-    }
-
-    /**
-     * Load a ModuleDependency from its ID.
-     */
-    public function loadModuleDependencyFromID(ModuleDependencyId|ModuleDependency $id): ModuleDependency
-    {
-        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('loadModuleDependencyFromID');
-        $innerQueryBuilder->setArgument('id', $id);
-        return new \Dagger\ModuleDependency($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
-    }
-
-    /**
      * Load a Module from its ID.
      */
     public function loadModuleFromID(ModuleId|Module $id): Module
@@ -487,16 +465,6 @@ class Client extends Client\AbstractClient
         $innerQueryBuilder = new \Dagger\Client\QueryBuilder('loadModuleSourceFromID');
         $innerQueryBuilder->setArgument('id', $id);
         return new \Dagger\ModuleSource($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
-    }
-
-    /**
-     * Load a ModuleSourceView from its ID.
-     */
-    public function loadModuleSourceViewFromID(ModuleSourceViewId|ModuleSourceView $id): ModuleSourceView
-    {
-        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('loadModuleSourceViewFromID');
-        $innerQueryBuilder->setArgument('id', $id);
-        return new \Dagger\ModuleSourceView($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
     }
 
     /**
@@ -520,6 +488,16 @@ class Client extends Client\AbstractClient
     }
 
     /**
+     * Load a SDKConfig from its ID.
+     */
+    public function loadSDKConfigFromID(SDKConfigId|SDKConfig $id): SDKConfig
+    {
+        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('loadSDKConfigFromID');
+        $innerQueryBuilder->setArgument('id', $id);
+        return new \Dagger\SDKConfig($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
+    }
+
+    /**
      * Load a ScalarTypeDef from its ID.
      */
     public function loadScalarTypeDefFromID(ScalarTypeDefId|ScalarTypeDef $id): ScalarTypeDef
@@ -536,6 +514,19 @@ class Client extends Client\AbstractClient
     {
         $innerQueryBuilder = new \Dagger\Client\QueryBuilder('loadSecretFromID');
         $innerQueryBuilder->setArgument('id', $id);
+        return new \Dagger\Secret($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
+    }
+
+    /**
+     * Load a Secret from its Name.
+     */
+    public function loadSecretFromName(string $name, ?string $accessor = null): Secret
+    {
+        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('loadSecretFromName');
+        $innerQueryBuilder->setArgument('name', $name);
+        if (null !== $accessor) {
+        $innerQueryBuilder->setArgument('accessor', $accessor);
+        }
         return new \Dagger\Secret($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
     }
 
@@ -599,51 +590,39 @@ class Client extends Client\AbstractClient
     }
 
     /**
-     * Create a new module dependency configuration from a module source and name
-     */
-    public function moduleDependency(ModuleSourceId|ModuleSource $source, ?string $name = ''): ModuleDependency
-    {
-        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('moduleDependency');
-        $innerQueryBuilder->setArgument('source', $source);
-        if (null !== $name) {
-        $innerQueryBuilder->setArgument('name', $name);
-        }
-        return new \Dagger\ModuleDependency($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
-    }
-
-    /**
-     * Create a new module source instance from a source ref string.
+     * Create a new module source instance from a source ref string
      */
     public function moduleSource(
         string $refString,
         ?string $refPin = '',
-        ?bool $stable = false,
-        ?string $relHostPath = '',
+        ?bool $disableFindUp = false,
+        ?bool $allowNotExists = false,
+        ?ModuleSourceKind $requireKind = null,
     ): ModuleSource {
         $innerQueryBuilder = new \Dagger\Client\QueryBuilder('moduleSource');
         $innerQueryBuilder->setArgument('refString', $refString);
         if (null !== $refPin) {
         $innerQueryBuilder->setArgument('refPin', $refPin);
         }
-        if (null !== $stable) {
-        $innerQueryBuilder->setArgument('stable', $stable);
+        if (null !== $disableFindUp) {
+        $innerQueryBuilder->setArgument('disableFindUp', $disableFindUp);
         }
-        if (null !== $relHostPath) {
-        $innerQueryBuilder->setArgument('relHostPath', $relHostPath);
+        if (null !== $allowNotExists) {
+        $innerQueryBuilder->setArgument('allowNotExists', $allowNotExists);
+        }
+        if (null !== $requireKind) {
+        $innerQueryBuilder->setArgument('requireKind', $requireKind);
         }
         return new \Dagger\ModuleSource($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
     }
 
     /**
-     * Reference a secret by name.
+     * Creates a new secret.
      */
-    public function secret(string $name, ?string $accessor = null): Secret
+    public function secret(string $uri): Secret
     {
         $innerQueryBuilder = new \Dagger\Client\QueryBuilder('secret');
-        $innerQueryBuilder->setArgument('name', $name);
-        if (null !== $accessor) {
-        $innerQueryBuilder->setArgument('accessor', $accessor);
-        }
+        $innerQueryBuilder->setArgument('uri', $uri);
         return new \Dagger\Secret($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
     }
 

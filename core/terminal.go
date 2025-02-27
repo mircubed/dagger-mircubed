@@ -38,14 +38,27 @@ func (container *Container) Terminal(
 	svcID *call.ID,
 	args *TerminalArgs,
 ) error {
+	container = container.Clone()
+
+	// HACK: ensure that container is entirely built before interrupting nice
+	// progress output with the terminal
+	_, err := container.Evaluate(ctx)
+	if err != nil {
+		return err
+	}
+
 	bk, err := container.Query.Buildkit(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get buildkit client: %w", err)
 	}
+
 	term, err := bk.OpenTerminal(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to open terminal: %w", err)
 	}
+	// always close term; it's wrapped in a once so it won't be called multiple times
+	defer term.Close(bkgwpb.UnknownExitStatus)
+
 	output := idtui.NewOutput(term.Stderr)
 	fmt.Fprint(
 		term.Stderr,
@@ -58,21 +71,17 @@ func (container *Container) Terminal(
 	}
 	fmt.Fprint(term.Stderr, dump.Newline)
 
-	container = container.Clone()
 	// Inject a custom shell prompt `dagger:<cwd>$`
 	container.Config.Env = append(container.Config.Env, fmt.Sprintf("PS1=%s %s $ ",
 		output.String("dagger").Foreground(termenv.ANSIYellow).String(),
 		output.String(`$(pwd | sed "s|^$HOME|~|")`).Faint().String(),
 	))
-	container, err = container.WithExec(ctx, ContainerExecOpts{
+
+	svc, err := container.AsService(ctx, ContainerAsServiceArgs{
 		Args:                          args.Cmd,
 		ExperimentalPrivilegedNesting: args.ExperimentalPrivilegedNesting.Value.Bool(),
 		InsecureRootCapabilities:      args.InsecureRootCapabilities.Value.Bool(),
 	})
-	if err != nil {
-		return fmt.Errorf("failed to create container for interactive terminal: %w", err)
-	}
-	svc, err := container.Service(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create service for interactive terminal: %w", err)
 	}

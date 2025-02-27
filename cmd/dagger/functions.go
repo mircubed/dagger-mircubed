@@ -20,6 +20,7 @@ import (
 	"dagger.io/dagger/telemetry"
 	"github.com/dagger/dagger/dagql/idtui"
 	"github.com/dagger/dagger/engine/client"
+	"github.com/dagger/dagger/engine/client/pathutil"
 	"github.com/dagger/dagger/engine/slog"
 )
 
@@ -179,6 +180,17 @@ func (fc *FuncCommand) Command() *cobra.Command {
 						// Return the same ExecError exit code.
 						var ex *dagger.ExecError
 						if errors.As(err, &ex) {
+							tty := !silent && (hasTTY && progress == "auto" || progress == "tty")
+							// Only the pretty frontend prints the stderr of
+							// the exec error in the final render
+							if !tty && ex.Stdout != "" {
+								c.Println("Stdout:")
+								c.Println(ex.Stdout)
+							}
+							if !tty && ex.Stderr != "" {
+								c.PrintErrln("Stderr:")
+								c.PrintErrln(ex.Stderr)
+							}
 							return ExitError{Code: ex.ExitCode}
 						}
 						return Fail
@@ -263,7 +275,13 @@ func (fc *FuncCommand) execute(c *cobra.Command, a []string) (rerr error) {
 		}
 	}()
 
-	mod, err := initializeModule(ctx, fc.c.Dagger(), !fc.DisableModuleLoad)
+	var mod *moduleDef
+	var err error
+	if fc.DisableModuleLoad {
+		mod, err = initializeCore(ctx, fc.c.Dagger())
+	} else {
+		mod, err = initializeDefaultModule(ctx, fc.c.Dagger())
+	}
 	if err != nil {
 		return err
 	}
@@ -290,61 +308,11 @@ func (fc *FuncCommand) execute(c *cobra.Command, a []string) (rerr error) {
 	return cmd.RunE(cmd, flags)
 }
 
-// initializeModule loads the module's type definitions.
-func initializeModule(ctx context.Context, dag *dagger.Client, loadModule bool) (rdef *moduleDef, rerr error) {
-	def := &moduleDef{}
-
-	ctx, span := Tracer().Start(ctx, "initialize")
-	defer telemetry.End(span, func() error { return rerr })
-
-	if loadModule {
-		resolveCtx, resolveSpan := Tracer().Start(ctx, "resolving module ref", telemetry.Encapsulate())
-		defer telemetry.End(resolveSpan, func() error { return rerr })
-		modConf, err := getDefaultModuleConfiguration(resolveCtx, dag, true, true)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get configured module: %w", err)
-		}
-		if !modConf.FullyInitialized() {
-			return nil, fmt.Errorf("module at source dir %q doesn't exist or is invalid", modConf.LocalRootSourcePath)
-		}
-		resolveSpan.End()
-
-		def.Source = modConf.Source
-		mod := modConf.Source.AsModule().Initialize()
-
-		serveCtx, serveSpan := Tracer().Start(ctx, "installing module", telemetry.Encapsulate())
-		err = mod.Serve(serveCtx)
-		telemetry.End(serveSpan, func() error { return err })
-		if err != nil {
-			return nil, err
-		}
-
-		ctx, loadSpan := Tracer().Start(ctx, "analyzing module", telemetry.Encapsulate())
-		defer telemetry.End(loadSpan, func() error { return rerr })
-
-		name, err := mod.Name(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("get module name: %w", err)
-		}
-		def.Name = name
-	}
-
-	if err := def.loadTypeDefs(ctx, dag); err != nil {
-		return nil, err
-	}
-
-	if def.MainObject == nil {
-		return nil, fmt.Errorf("main object not found, check that your module's name and main object match")
-	}
-
-	return def, nil
-}
-
 // loadCommand finds the leaf command to run.
 func (fc *FuncCommand) loadCommand(c *cobra.Command, a []string) (rcmd *cobra.Command, rargs []string, rerr error) {
 	ctx := c.Context()
 
-	spanCtx, span := Tracer().Start(ctx, "prepare", telemetry.Encapsulate())
+	spanCtx, span := Tracer().Start(ctx, "parsing command line arguments", telemetry.Encapsulate())
 	defer telemetry.End(span, func() error { return rerr })
 	fc.ctx = spanCtx
 
@@ -480,13 +448,9 @@ func (fc *FuncCommand) addSubCommands(ctx context.Context, cmd *cobra.Command, t
 
 	cmd.AddGroup(funcGroup)
 
-	skipped := make([]string, 0)
+	fns, skipped := GetSupportedFunctions(fnProvider)
 
-	for _, fn := range fnProvider.GetFunctions() {
-		if fn.IsUnsupported() {
-			skipped = append(skipped, fn.CmdName())
-			continue
-		}
+	for _, fn := range fns {
 		subCmd := fc.makeSubCmd(ctx, fn)
 		cmd.AddCommand(subCmd)
 	}
@@ -504,7 +468,7 @@ func (fc *FuncCommand) addSubCommands(ctx context.Context, cmd *cobra.Command, t
 func (fc *FuncCommand) makeSubCmd(ctx context.Context, fn *modFunction) *cobra.Command {
 	newCmd := &cobra.Command{
 		Use:                   cliName(fn.Name),
-		Short:                 strings.SplitN(fn.Description, "\n", 2)[0],
+		Short:                 fn.Short(),
 		Long:                  fn.Description,
 		GroupID:               funcGroup.ID,
 		DisableFlagsInUseLine: true,
@@ -574,25 +538,24 @@ func (fc *FuncCommand) RunE(ctx context.Context, fn *modFunction) func(*cobra.Co
 		// from wrong CLI usage.
 		fc.showUsage = false
 
-		return executeRequest(ctx, q, fn.ReturnType, cmd.OutOrStdout(), cmd.ErrOrStderr())
+		o := cmd.OutOrStdout()
+		e := cmd.ErrOrStderr()
+
+		// It's possible that a chain ending in an object doesn't have anything
+		// else to sub-select. In that case `q` will be nil to signal that we
+		// just want to return the object's name, without making an API request.
+		if q == nil {
+			return handleResponse(fn.ReturnType, nil, o, e)
+		}
+
+		var response any
+
+		if err := makeRequest(ctx, q, &response); err != nil {
+			return err
+		}
+
+		return handleResponse(fn.ReturnType, response, o, e)
 	}
-}
-
-func executeRequest(ctx context.Context, q *querybuilder.Selection, returnType *modTypeDef, o, e io.Writer) error {
-	// It's possible that a chain ending in an object doesn't have anything
-	// else to sub-select. In that case `q` will be nil to signal that we
-	// just want to return the object's name, without making an API request.
-	if q == nil {
-		return handleResponse(returnType, nil, o, e)
-	}
-
-	var response any
-
-	if err := makeRequest(ctx, q, &response); err != nil {
-		return err
-	}
-
-	return handleResponse(returnType, response, o, e)
 }
 
 func handleObjectLeaf(ctx context.Context, q *querybuilder.Selection, typeDef *modTypeDef) (*querybuilder.Selection, error) {
@@ -661,7 +624,7 @@ func makeRequest(ctx context.Context, q *querybuilder.Selection, response any) e
 	q = q.Bind(&response)
 
 	if err := q.Execute(ctx); err != nil {
-		return fmt.Errorf("response from query: %w", err)
+		return err
 	}
 
 	return nil
@@ -672,7 +635,7 @@ func handleResponse(returnType *modTypeDef, response any, o, e io.Writer) error 
 		return nil
 	}
 
-	// Handle the `export` convenience.
+	// Handle the `export` convenience, i.e, -o,--output flag.
 	switch returnType.Name() {
 	case Container, Directory, File:
 		if outputPath != "" {
@@ -685,9 +648,7 @@ func handleResponse(returnType *modTypeDef, response any, o, e io.Writer) error 
 		}
 	}
 
-	var outputFormat string
-
-	// Command chain ended in an object.
+	// Command chain ended in an object, so add the _type field.
 	if returnType.AsFunctionProvider() != nil {
 		typeName := returnType.AsFunctionProvider().ProviderName()
 
@@ -708,52 +669,19 @@ func handleResponse(returnType *modTypeDef, response any, o, e io.Writer) error 
 			}
 			response = r
 		}
-
-		// Use yaml when printing scalars because it's more human-readable
-		// and handles lists and multiline strings well.
-		if stdoutIsTTY {
-			outputFormat = "yaml"
-		} else {
-			outputFormat = "json"
-		}
-	}
-
-	// The --json flag has precedence over the autodetected format above.
-	if jsonOutput {
-		outputFormat = "json"
 	}
 
 	buf := new(bytes.Buffer)
-	switch outputFormat {
-	case "json":
-		// disable HTML escaping to improve readability
-		encoder := json.NewEncoder(buf)
-		encoder.SetEscapeHTML(false)
-		encoder.SetIndent("", "    ")
-		if err := encoder.Encode(response); err != nil {
-			return err
-		}
-	case "yaml":
-		out, err := yaml.Marshal(response)
-		if err != nil {
-			return err
-		}
-		if _, err := buf.Write(out); err != nil {
-			return err
-		}
-	case "":
-		if err := printFunctionResult(buf, response); err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("wrong output format %q", outputFormat)
+	frmt := outputFormat(returnType)
+	if err := printResponse(buf, response, frmt); err != nil {
+		return err
 	}
 
 	if outputPath != "" {
 		if err := writeOutputFile(outputPath, buf); err != nil {
 			return fmt.Errorf("couldn't write output to file: %w", err)
 		}
-		path, err := filepath.Abs(outputPath)
+		path, err := pathutil.Abs(outputPath)
 		if err != nil {
 			// don't fail because at this point the output has been saved successfully
 			slog.Warn("Failed to get absolute path", "error", err)
@@ -768,6 +696,52 @@ func handleResponse(returnType *modTypeDef, response any, o, e io.Writer) error 
 	}
 
 	return err
+}
+
+func outputFormat(typeDef *modTypeDef) string {
+	var outputFormat string
+
+	if typeDef != nil && typeDef.AsFunctionProvider() != nil {
+		// Use yaml when printing scalars because it's more human-readable
+		// and handles lists and multiline strings well.
+		if stdoutIsTTY {
+			outputFormat = "yaml"
+		} else {
+			outputFormat = "json"
+		}
+	}
+
+	// The --json flag has precedence over the autodetected format above.
+	if jsonOutput {
+		outputFormat = "json"
+	}
+
+	return outputFormat
+}
+
+func printResponse(w io.Writer, response any, format string) error {
+	switch format {
+	case "json":
+		// disable HTML escaping to improve readability
+		encoder := json.NewEncoder(w)
+		encoder.SetEscapeHTML(false)
+		encoder.SetIndent("", "    ")
+		return encoder.Encode(response)
+
+	case "yaml":
+		out, err := yaml.Marshal(response)
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(out)
+		return err
+
+	case "":
+		return printPlainResult(w, response)
+
+	default:
+		return fmt.Errorf("wrong output format %q", format)
+	}
 }
 
 // addPayload merges a map into a response from getting an object's values.
@@ -809,11 +783,11 @@ func writeOutputFile(path string, buf *bytes.Buffer) error {
 	return os.WriteFile(path, buf.Bytes(), 0o644) //nolint: gosec
 }
 
-func printFunctionResult(w io.Writer, r any) error {
+func printPlainResult(w io.Writer, r any) error {
 	switch t := r.(type) {
 	case []any:
 		for _, v := range t {
-			if err := printFunctionResult(w, v); err != nil {
+			if err := printPlainResult(w, v); err != nil {
 				return err
 			}
 			fmt.Fprintln(w)
@@ -823,7 +797,7 @@ func printFunctionResult(w io.Writer, r any) error {
 		// NB: we're only interested in values because this is where we unwrap
 		// things like {"container":{"from":{"withExec":{"stdout":"foo"}}}}.
 		for _, v := range t {
-			if err := printFunctionResult(w, v); err != nil {
+			if err := printPlainResult(w, v); err != nil {
 				return err
 			}
 		}

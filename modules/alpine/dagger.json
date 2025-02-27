@@ -1,6 +1,7 @@
 {
   "name": "alpine",
-  "sdk": "go",
-  "source": ".",
-  "engineVersion": "v0.13.5"
+  "engineVersion": "v0.13.5",
+  "sdk": {
+    "source": "go"
+  }
 }

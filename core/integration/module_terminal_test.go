@@ -14,13 +14,19 @@ import (
 	"github.com/containerd/continuity/fs"
 	"github.com/creack/pty"
 	"github.com/dagger/dagger/internal/testutil"
-	"github.com/dagger/dagger/testctx"
+	"github.com/dagger/testctx"
+	"github.com/muesli/termenv"
 	"github.com/stretchr/testify/require"
 )
 
 // Terminal tests are run directly on the host rather than in exec containers because we want to
 // directly interact with the dagger shell tui without resorting to embedding more go code
 // into a container for driving it.
+
+const (
+	// this is used in some shell prompts
+	resetSeq = termenv.CSI + termenv.ResetSeq + "m"
+)
 
 func (ModuleSuite) TestDaggerTerminal(ctx context.Context, t *testctx.T) {
 	t.Run("default arg /bin/sh", func(ctx context.Context, t *testctx.T) {
@@ -46,11 +52,11 @@ type Test struct {
 `, alpineImage)), 0644)
 		require.NoError(t, err)
 
-		_, err = hostDaggerExec(ctx, t, modDir, "--debug", "init", "--source=.", "--name=test", "--sdk=go")
+		_, err = hostDaggerExec(ctx, t, modDir, "init", "--source=.", "--name=test", "--sdk=go")
 		require.NoError(t, err)
 
 		// cache the module load itself so there's less to wait for in the shell invocation below
-		_, err = hostDaggerExec(ctx, t, modDir, "--debug", "functions")
+		_, err = hostDaggerExec(ctx, t, modDir, "functions")
 		require.NoError(t, err)
 
 		// timeout for waiting for each expected line is very generous in case CI is under heavy load or something
@@ -74,16 +80,27 @@ type Test struct {
 		err = cmd.Start()
 		require.NoError(t, err)
 
+		prompt := fmt.Sprintf("/coolworkdir%s $ ", resetSeq)
+
+		_, err = console.ExpectString(prompt)
+		require.NoError(t, err)
+
 		_, err = console.SendLine("pwd")
 		require.NoError(t, err)
 
-		_, err = console.ExpectString("/coolworkdir")
+		_, err = console.ExpectString("/coolworkdir\r\n")
+		require.NoError(t, err)
+
+		_, err = console.ExpectString(prompt)
 		require.NoError(t, err)
 
 		_, err = console.SendLine("echo $COOLENV")
 		require.NoError(t, err)
 
-		err = console.ExpectLineRegex(ctx, "woo")
+		_, err = console.ExpectString("woo\r\n")
+		require.NoError(t, err)
+
+		_, err = console.ExpectString(prompt)
 		require.NoError(t, err)
 
 		_, err = console.SendLine("exit")
@@ -105,11 +122,17 @@ type Test struct {
 	)
 
 	func New(ctx context.Context) *Test {
+		d1 := dag.Directory().WithNewFile("foo", "FOO\n")
+		d2 := dag.Directory().WithNewFile("bar", "BAR\n")
+
 		return &Test{
 			Ctr: dag.Container().
 				From("%s").
 				WithEnvVariable("COOLENV", "woo").
 				WithWorkdir("/coolworkdir").
+				WithMountedDirectory("/a_mnt", d1).
+				WithMountedCache("/cachemnt", dag.CacheVolume("whateverbrah")).
+				WithMountedDirectory("/z_mnt", d2).
 				WithDefaultTerminalCmd([]string{"/bin/sh"}),
 		}
 	}
@@ -120,11 +143,11 @@ type Test struct {
 	`, alpineImage)), 0644)
 		require.NoError(t, err)
 
-		_, err = hostDaggerExec(ctx, t, modDir, "--debug", "init", "--source=.", "--name=test", "--sdk=go")
+		_, err = hostDaggerExec(ctx, t, modDir, "init", "--source=.", "--name=test", "--sdk=go")
 		require.NoError(t, err)
 
 		// cache the module load itself so there's less to wait for in the shell invocation below
-		_, err = hostDaggerExec(ctx, t, modDir, "--debug", "functions")
+		_, err = hostDaggerExec(ctx, t, modDir, "functions")
 		require.NoError(t, err)
 
 		// timeout for waiting for each expected line is very generous in case CI is under heavy load or something
@@ -148,19 +171,54 @@ type Test struct {
 		err = cmd.Start()
 		require.NoError(t, err)
 
-		_, err = console.ExpectString(" $ ")
+		prompt := fmt.Sprintf("/coolworkdir%s $ ", resetSeq)
+
+		_, err = console.ExpectString(prompt)
 		require.NoError(t, err)
 
 		_, err = console.SendLine("pwd")
 		require.NoError(t, err)
 
-		_, err = console.ExpectString("/coolworkdir")
+		_, err = console.ExpectString("/coolworkdir\r\n")
+		require.NoError(t, err)
+
+		_, err = console.ExpectString(prompt)
+		require.NoError(t, err)
+
+		_, err = console.SendLine("cat /a_mnt/foo")
+		require.NoError(t, err)
+
+		_, err = console.ExpectString("FOO\r\n")
+		require.NoError(t, err)
+
+		_, err = console.ExpectString(prompt)
+		require.NoError(t, err)
+
+		_, err = console.SendLine("stat /cachemnt")
+		require.NoError(t, err)
+
+		_, err = console.ExpectString("File: /cachemnt\r\n")
+		require.NoError(t, err)
+
+		_, err = console.ExpectString(prompt)
+		require.NoError(t, err)
+
+		_, err = console.SendLine("cat /z_mnt/bar")
+		require.NoError(t, err)
+
+		_, err = console.ExpectString("BAR\r\n")
+		require.NoError(t, err)
+
+		_, err = console.ExpectString(prompt)
 		require.NoError(t, err)
 
 		_, err = console.SendLine("echo $COOLENV")
 		require.NoError(t, err)
 
-		err = console.ExpectLineRegex(ctx, "woo")
+		_, err = console.ExpectString("woo\r\n")
+		require.NoError(t, err)
+
+		_, err = console.ExpectString(prompt)
 		require.NoError(t, err)
 
 		_, err = console.SendLine("exit")
@@ -201,11 +259,11 @@ type Test struct {
 	`, alpineImage)), 0644)
 		require.NoError(t, err)
 
-		_, err = hostDaggerExec(ctx, t, modDir, "--debug", "init", "--source=.", "--name=test", "--sdk=go")
+		_, err = hostDaggerExec(ctx, t, modDir, "init", "--source=.", "--name=test", "--sdk=go")
 		require.NoError(t, err)
 
 		// cache the module load itself so there's less to wait for in the shell invocation below
-		_, err = hostDaggerExec(ctx, t, modDir, "--debug", "functions")
+		_, err = hostDaggerExec(ctx, t, modDir, "functions")
 		require.NoError(t, err)
 
 		// timeout for waiting for each expected line is very generous in case CI is under heavy load or something
@@ -229,19 +287,27 @@ type Test struct {
 		err = cmd.Start()
 		require.NoError(t, err)
 
-		_, err = console.ExpectString(" $ ")
+		prompt := fmt.Sprintf("/coolworkdir%s $ ", resetSeq)
+
+		_, err = console.ExpectString(prompt)
 		require.NoError(t, err)
 
 		_, err = console.SendLine("pwd")
 		require.NoError(t, err)
 
-		_, err = console.ExpectString("/coolworkdir")
+		_, err = console.ExpectString("/coolworkdir\r\n")
+		require.NoError(t, err)
+
+		_, err = console.ExpectString(prompt)
 		require.NoError(t, err)
 
 		_, err = console.SendLine("echo $COOLENV")
 		require.NoError(t, err)
 
-		err = console.ExpectLineRegex(ctx, "xoo")
+		_, err = console.ExpectString("xoo\r\n")
+		require.NoError(t, err)
+
+		_, err = console.ExpectString(prompt)
 		require.NoError(t, err)
 
 		_, err = console.SendLine("exit")
@@ -278,11 +344,11 @@ type Test struct {
 	`, alpineImage)), 0644)
 		require.NoError(t, err)
 
-		_, err = hostDaggerExec(ctx, t, modDir, "--debug", "init", "--source=.", "--name=test", "--sdk=go")
+		_, err = hostDaggerExec(ctx, t, modDir, "init", "--source=.", "--name=test", "--sdk=go")
 		require.NoError(t, err)
 
 		// cache the returned container so there's less to wait for in the shell invocation below
-		_, err = hostDaggerExec(ctx, t, modDir, "--debug", "call", "ctr", "sync")
+		_, err = hostDaggerExec(ctx, t, modDir, "call", "ctr", "sync")
 		require.NoError(t, err)
 
 		console, err := newTUIConsole(t, 60*time.Second)
@@ -314,7 +380,10 @@ type Test struct {
 		_, err = console.SendLine("os.environ['COOLENV']")
 		require.NoError(t, err)
 
-		err = console.ExpectLineRegex(ctx, "'woo'")
+		_, err = console.ExpectString("'woo'")
+		require.NoError(t, err)
+
+		_, err = console.ExpectString(">>> ")
 		require.NoError(t, err)
 
 		_, err = console.SendLine("exit()")
@@ -348,11 +417,11 @@ type Test struct {
 	 `), 0644)
 		require.NoError(t, err)
 
-		_, err = hostDaggerExec(ctx, t, modDir, "--debug", "init", "--source=.", "--name=test", "--sdk=go")
+		_, err = hostDaggerExec(ctx, t, modDir, "init", "--source=.", "--name=test", "--sdk=go")
 		require.NoError(t, err)
 
 		// cache the module load itself so there's less to wait for in the shell invocation below
-		_, err = hostDaggerExec(ctx, t, modDir, "--debug", "functions")
+		_, err = hostDaggerExec(ctx, t, modDir, "functions")
 		require.NoError(t, err)
 
 		thisRepoPath, err := filepath.Abs("../..")
@@ -428,7 +497,7 @@ func New(ctx context.Context) *Test {
 	return &Test{
 		Dir: dag.
 			Directory().
-			WithNewFile("test", "hello world"),
+			WithNewFile("test", "hello world\n"),
 	}
 }
 
@@ -438,11 +507,11 @@ type Test struct {
 `), 0644)
 		require.NoError(t, err)
 
-		_, err = hostDaggerExec(ctx, t, modDir, "--debug", "init", "--source=.", "--name=test", "--sdk=go")
+		_, err = hostDaggerExec(ctx, t, modDir, "init", "--source=.", "--name=test", "--sdk=go")
 		require.NoError(t, err)
 
 		// cache the module load itself so there's less to wait for in the shell invocation below
-		_, err = hostDaggerExec(ctx, t, modDir, "--debug", "functions")
+		_, err = hostDaggerExec(ctx, t, modDir, "functions")
 		require.NoError(t, err)
 
 		// timeout for waiting for each expected line is very generous in case CI is under heavy load or something
@@ -466,10 +535,18 @@ type Test struct {
 		err = cmd.Start()
 		require.NoError(t, err)
 
+		prompt := fmt.Sprintf("/src%s $ ", resetSeq)
+
+		_, err = console.ExpectString(prompt)
+		require.NoError(t, err)
+
 		_, err = console.SendLine("cat test")
 		require.NoError(t, err)
 
-		_, err = console.ExpectString("hello world")
+		_, err = console.ExpectString("hello world\r\n")
+		require.NoError(t, err)
+
+		_, err = console.ExpectString(prompt)
 		require.NoError(t, err)
 
 		_, err = console.SendLine("exit")
@@ -490,10 +567,18 @@ type Test struct {
 	)
 
 	func New(ctx context.Context) *Test {
+		d1 := dag.Directory().WithNewFile("foo", "FOO\n")
+		d2 := dag.Directory().WithNewFile("bar", "BAR\n")
+
 		return &Test{
 			Ctr: dag.Container().
 				From("%s").
-				WithExec([]string{"sh", "-c", "echo breakpoint > /fail && exit 42"}),
+				WithMountedDirectory("/a_mnt", d1).
+				WithMountedCache("/cachemnt", dag.CacheVolume("somethingoranother")).
+				WithMountedDirectory("/z_mnt", d2).
+				WithExec([]string{"sh", "-c", 
+					"echo breakpoint > /fail && echo FOOFOO > /a_mnt/foo && echo BARBAR > /z_mnt/bar && exit 42",
+				}),
 		}
 	}
 
@@ -503,11 +588,11 @@ type Test struct {
 	`, alpineImage)), 0644)
 		require.NoError(t, err)
 
-		_, err = hostDaggerExec(ctx, t, modDir, "--debug", "init", "--source=.", "--name=test", "--sdk=go")
+		_, err = hostDaggerExec(ctx, t, modDir, "init", "--source=.", "--name=test", "--sdk=go")
 		require.NoError(t, err)
 
 		// cache the module load itself so there's less to wait for in the shell invocation below
-		_, err = hostDaggerExec(ctx, t, modDir, "--debug", "functions")
+		_, err = hostDaggerExec(ctx, t, modDir, "functions")
 		require.NoError(t, err)
 
 		// timeout for waiting for each expected line is very generous in case CI is under heavy load or something
@@ -531,10 +616,45 @@ type Test struct {
 		err = cmd.Start()
 		require.NoError(t, err)
 
+		prompt := "/ # "
+
+		_, err = console.ExpectString(prompt)
+		require.NoError(t, err)
+
 		_, err = console.SendLine("cat /fail")
 		require.NoError(t, err)
 
-		err = console.ExpectLineRegex(ctx, "breakpoint")
+		_, err = console.ExpectString("breakpoint\r\n")
+		require.NoError(t, err)
+
+		_, err = console.ExpectString(prompt)
+		require.NoError(t, err)
+
+		_, err = console.SendLine("cat /a_mnt/foo")
+		require.NoError(t, err)
+
+		_, err = console.ExpectString("FOOFOO\r\n")
+		require.NoError(t, err)
+
+		_, err = console.ExpectString(prompt)
+		require.NoError(t, err)
+
+		_, err = console.SendLine("stat /cachemnt")
+		require.NoError(t, err)
+
+		_, err = console.ExpectString("File: /cachemnt\r\n")
+		require.NoError(t, err)
+
+		_, err = console.ExpectString(prompt)
+		require.NoError(t, err)
+
+		_, err = console.SendLine("cat /z_mnt/bar")
+		require.NoError(t, err)
+
+		_, err = console.ExpectString("BARBAR\r\n")
+		require.NoError(t, err)
+
+		_, err = console.ExpectString(prompt)
 		require.NoError(t, err)
 
 		_, err = console.SendLine("exit")
@@ -545,13 +665,25 @@ type Test struct {
 		err = cmd.Wait()
 		require.Error(t, err)
 
-		//  We try again with an invalid shell to confirm we replaced the default command
+		// We try again with an invalid shell to confirm we replaced the default command
+		// We have to set a TTY though or else the error will just be that the --interactive flag doesn't work without a terminal
+		console, err = newTUIConsole(t, 60*time.Second)
+		require.NoError(t, err)
+		defer console.Close()
+		tty = console.Tty()
+		err = pty.Setsize(tty, &pty.Winsize{Rows: 6, Cols: 16})
+		require.NoError(t, err)
 		cmd = hostDaggerCommand(ctx, t, modDir, "--interactive", "--interactive-command", "/bin/noexist", "call", "ctr")
+		cmd.Stdin = tty
+		cmd.Stdout = tty
+		cmd.Stderr = tty
 
 		err = cmd.Start()
 		require.NoError(t, err)
 
-		// We expect the command to fail
+		_, err = console.ExpectString("/bin/noexist: no such file or directory")
+		require.NoError(t, err)
+
 		err = cmd.Wait()
 		require.Error(t, err)
 	})
@@ -583,11 +715,6 @@ func newTUIConsole(t *testctx.T, expectLineTimeout time.Duration) (*tuiConsole, 
 		expectLineTimeout: expectLineTimeout,
 		output:            output,
 	}, nil
-}
-
-func (e *tuiConsole) ExpectLineRegex(ctx context.Context, pattern string) error {
-	_, _, err := e.MatchLine(ctx, pattern)
-	return err
 }
 
 func (e *tuiConsole) MatchLine(ctx context.Context, pattern string) (string, []string, error) {

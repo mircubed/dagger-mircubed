@@ -1,11 +1,13 @@
 {
   "name": "python-sdk-dev",
-  "engineVersion": "v0.13.7",
-  "sdk": "python",
-  "exclude": [
-    "**/.venv",
-    "**/__pycache__",
-    "**/.*cache"
+  "engineVersion": "v0.15.3",
+  "sdk": {
+    "source": "python"
+  },
+  "include": [
+    "!**/.venv",
+    "!**/__pycache__",
+    "!**/.*cache"
   ],
   "dependencies": [
     {
@@ -15,9 +17,7 @@
     },
     {
       "name": "wolfi",
-      "source": "../../../modules/wolfi",
-      "pin": ""
+      "source": "../../../modules/wolfi"
     }
-  ],
-  "source": "."
+  ]
 }

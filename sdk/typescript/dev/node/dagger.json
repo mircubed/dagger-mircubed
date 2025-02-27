@@ -1,5 +1,7 @@
 {
   "name": "node",
-  "sdk": "typescript",
-  "source": "."
+  "engineVersion": "v0.9.9",
+  "sdk": {
+    "source": "typescript"
+  }
 }

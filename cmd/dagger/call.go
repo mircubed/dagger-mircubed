@@ -62,7 +62,7 @@ available functions.
 	GroupID: moduleGroup.ID,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return withEngine(cmd.Context(), client.Params{}, func(ctx context.Context, engineClient *client.Client) (rerr error) {
-			mod, err := initializeModule(ctx, engineClient.Dagger(), true)
+			mod, err := initializeDefaultModule(ctx, engineClient.Dagger())
 			if err != nil {
 				return err
 			}
@@ -70,7 +70,7 @@ available functions.
 			// Walk the hypothetical function pipeline specified by the args
 			for _, field := range cmd.Flags().Args() {
 				// Lookup the next function in the specified pipeline
-				nextFunc, err := GetFunction(o, field)
+				nextFunc, err := GetSupportedFunction(mod, o, field)
 				if err != nil {
 					return err
 				}
@@ -92,13 +92,13 @@ available functions.
 				return fmt.Errorf("function %q returns type %q with no further functions available", field, nextType.Kind)
 			}
 
-			return functionListRun(o, cmd.OutOrStdout(), true)
+			return functionListRun(o, cmd.OutOrStdout())
 		})
 	},
 }
 
-func functionListRun(o functionProvider, writer io.Writer, skipUnsupported bool) error {
-	fns := o.GetFunctions()
+func functionListRun(o functionProvider, writer io.Writer) error {
+	fns, skipped := GetSupportedFunctions(o)
 
 	tw := tabwriter.NewWriter(writer, 0, 0, 3, ' ', tabwriter.DiscardEmptyColumns)
 	fmt.Fprintf(tw, "%s\t%s\n",
@@ -109,19 +109,10 @@ func functionListRun(o functionProvider, writer io.Writer, skipUnsupported bool)
 	sort.Slice(fns, func(i, j int) bool {
 		return fns[i].Name < fns[j].Name
 	})
-	skipped := make([]string, 0)
 	for _, fn := range fns {
-		if skipUnsupported && fn.IsUnsupported() {
-			skipped = append(skipped, fn.CmdName())
-			continue
-		}
-		desc := strings.SplitN(fn.Description, "\n", 2)[0]
-		if desc == "" {
-			desc = "-"
-		}
 		fmt.Fprintf(tw, "%s\t%s\n",
-			cliName(fn.Name),
-			desc,
+			fn.CmdName(),
+			fn.Short(),
 		)
 	}
 	if len(skipped) > 0 {

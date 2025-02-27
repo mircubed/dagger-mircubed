@@ -1,6 +1,7 @@
 ---
 slug: /api/module-structure
 ---
+
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 import DaggerModuleInit from '../partials/_dagger_module_init.mdx';
@@ -9,7 +10,9 @@ import DaggerModuleInit from '../partials/_dagger_module_init.mdx';
 
 <DaggerModuleInit />
 
-## Module layout
+## File layout
+
+### Multiple files
 
 <Tabs groupId="language">
 <TabItem value="Go">
@@ -58,7 +61,7 @@ func DoThing(client *dagger.Client) *dagger.Directory {
 
 </TabItem>
 <TabItem value="Python">
-The Dagger module's code in Python can be split into multiple files by making `main` a [package](https://docs.python.org/3/tutorial/modules.html#packages), and ensuring the *main object* is imported in `__init__.py`. All the other object types should already be imported from there.
+The Dagger module's code in Python can be split into multiple files by making a [package](https://docs.python.org/3/tutorial/modules.html#packages) and ensuring the *main object* is imported in `__init__.py`. All the other object types should already be imported from there.
 
 For example given this directory structure:
 
@@ -66,7 +69,7 @@ For example given this directory structure:
 .
 ├── dagger.json
 ├── src
-│   ├── main
+│   ├── my_module
 │   │   ├── __init__.py
 │   │   ├── main.py
 │   │   ├── test.py
@@ -76,7 +79,7 @@ For example given this directory structure:
 The `__init__.py` file should import the main object from `main.py`:
 
 ```python
-# src/main/__init__.py
+# src/my_module/__init__.py
 """My very own Dagger module"""
 from .main import MyModule as MyModule
 ```
@@ -84,11 +87,11 @@ from .main import MyModule as MyModule
 And the `main.py` file should import the other objects from their respective files:
 
 ```python
-# src/main/main.py
+# src/my_module/main.py
 import dagger
 
-from .test import Test  # in src/main/test.py
-from .lint import Lint  # in src/main/lint.py
+from .test import Test  # in src/my_module/test.py
+from .lint import Lint  # in src/my_module/lint.py
 
 @dagger.object_type
 class MyModule:
@@ -102,21 +105,24 @@ class MyModule:
 ```
 
 :::important
-Dagger expects that a Python Dagger module is structured like a [library](https://docs.astral.sh/uv/concepts/projects/#libraries), currently hardcoded with the name `main` (temporary limitation), so that the SDK is able to load the code with:
+Dagger expects that a Python Dagger module is structured like a [library](https://docs.astral.sh/uv/concepts/projects/#libraries), so that the SDK is able to load the code with an import, but it's up to the Python [build system](https://docs.astral.sh/uv/concepts/projects/#build-systems) to know where files are located in order to build and install the Python package correctly.
 
-```python
-import main
-```
-
-But it's up to the Python [build system](https://docs.astral.sh/uv/concepts/projects/#build-systems) to know where files are located in order to build and install the `main` package correctly.
-
-This affords a lot of flexibility in how Daggger Python modules can be structured, and which tools are supported.
+This affords a lot of flexibility in how Dagger Python modules can be structured, and which tools are supported.
 :::
 
 The default project template follows known conventions for structuring a Python library (src layout, package name matching project name), which allows Python [build backends](https://www.python.org/dev/peps/pep-0517/) to automatically recognize where the files are.
 
-However, it's possible to change the project's name and file structure with a bit of extra configuration, as long as the build backend correctly builds the code in a way that allows the SDK to `import main` after installation.
+However, it's possible to change the project's name and file structure with a bit of extra configuration, as long as the build backend correctly builds the code in a way that allows the SDK to import it after installation (i.e., must be installed in `site-packages`).
 
+:::note
+Build backends are independent from installers (or *build frontends*, see [PEP 517](https://www.python.org/dev/peps/pep-0517/)), even though some installers may provide both (as separate packages). For example, [hatch](https://pypi.org/project/hatch/) vs [hatchling](https://pypi.org/project/hatchling/), [poetry](https://pypi.org/project/poetry/) vs [poetry-core](https://pypi.org/project/poetry-core/).
+:::
+
+:::tip
+`dagger init` won't override existing `pyproject.toml` and `.py` files, so it's possible to use an external process to generate a different template, before calling `dagger init`.
+:::
+
+:::tip SINGLE FILE MODULE
 Here is an example of moving all the code into a single `main.py` [module](https://docs.python.org/3/tutorial/modules.html), resulting in the following structure:
 
 ```
@@ -165,12 +171,35 @@ py-modules = ["main"]
 </TabItem>
 </Tabs>
 
-:::note
-Build backends are independent from installers (or *build frontends*, see [PEP 517](https://www.python.org/dev/peps/pep-0517/)), even though some installers may provide both (as separate packages). For example, [hatch](https://pypi.org/project/hatch/) vs [hatchling](https://pypi.org/project/hatchling/), [poetry](https://pypi.org/project/poetry/) vs [poetry-core](https://pypi.org/project/poetry-core/).
 :::
 
-:::tip
-`dagger init` won't override existing `pyproject.toml` and `.py` files, so it's possible to use an external process to generate a different template, before calling `dagger init`.
+:::tip CUSTOMIZE IMPORT PACKAGE
+The Python SDK looks for the *main object* of the Dagger module in the Python [import package that is named after the distribution package name](https://packaging.python.org/en/latest/discussions/distribution-package-vs-import-package/#how-do-distribution-package-names-and-import-package-names-compare) (in particular, using underscores `_` as a word separator).
+
+If they are different, you must explicitly tell the Python SDK where the main object needs to be imported from, using the following entry point configuration in `pyproject.toml`:
+
+```toml
+[project.entry-points."dagger.mod"]
+main_object = "<import package>:<main object>"
+```
+
+For example, for a Dagger module named `my-module`:
+
+- Main object: `MyModule` (required to be the name in `dagger.json`, in PascalCase)
+- Default distribution package: `my-module` (in `pyproject.toml`; can be changed)
+- Default import package: `src/my_module` (normalized after distribution package name; can be changed)
+
+Then, the default `main_object` entry point that the Python SDK looks for is `my_module:MyModule`, with a fallback to `main:MyModule` for backwards compatibility.
+
+Thus, if you have the following configuration:
+
+```toml
+[project.entry-points."dagger.mod"]
+main_object = "my_module.main:MyModule"
+```
+
+Then the import in `__init__.py` is no longer needed since Dagger knows to import from `my_module.main` directly.
+
 :::
 
 </TabItem>
@@ -200,7 +229,126 @@ class MyModule {
 ```
 
 </TabItem>
+<TabItem value="PHP">
+
+Only functions from your main class (`MyModule.php`) can _initially_ be called by Dagger. However, it is possible to create other classes and access them from your main class:
+
+```php
+// src/MyModule.php
+<?php
+
+declare(strict_types=1);
+
+namespace DaggerModule;
+
+use Dagger\Attribute\{DaggerObject, DaggerFunction};
+use DaggerModule\Test; // in src/Test.php
+use DaggerModule\Lint; // in src/Lint.php
+
+use function Dagger\dag;
+
+#[DaggerObject]
+class MyModule
+{
+    #[DaggerFunction]
+    public function test(): Test
+    {
+        return new Test();
+    }
+
+    #[DaggerFunction]
+    public function lint(): Lint
+    {
+        return new Lint();
+    }
+}
+```
+
+</TabItem>
+<TabItem value="Java">
+The Dagger module's code in Java can be split into multiple classes, in multiple files. A few constraints apply:
+
+- The main Dagger object must be represented by a class using the same name as the module, in PascalCase. For instance if the module name is `my-module`, the main object's class must be named `MyModule`.
+- The exposed objects must be annotated with `@Object` and the exposed functions with `@Function`.
+
+:::note
+The package in which the main object exists is not important. By convention, the name is based on the module name, but any name may be used.
+:::
+
+The description of the module can be set in a `package-info.java` file, with the `@Module` annotation:
+
+```java
+/** My Dagger module */
+@Module
+package io.dagger.modules.mymodule;
+
+import io.dagger.module.annotation.Module;
+```
+
+:::note
+By default, the description will be read from the JavaDoc documentation of the package, class or function. To define a different
+description, use the `description` field in each `@Module`, `@Object` or `@Function` annotation.
+
+```java
+/**
+ * Returns the build container
+ *
+ * @param name The name of the container
+ * @return The container
+ */
+@Function(description = "Build container")
+public Container build(String name) {
+    //...
+}
+```
+
+```console
+$ dagger functions
+
+Name    Description
+build   Build container
+```
+:::
+</TabItem>
 </Tabs>
+
+### Monorepos
+
+A monorepo typically contains multiple independent projects, each of which has different test, build and deployment requirements. Managing these requirements in a single CI workflow or YAML file can be incredibly complex and time-consuming.
+
+Dagger modules provide a framework that you can use to break up this complexity and cleanly separate CI responsibilities in a monorepo without losing reusability or performance. There are two possible patterns you can follow:
+
+1. One top-level Dagger module per project, with sub-modules for the various CI workflows in that project. This pattern is suitable when there are significant differences between the projects in the monorepo (e.g. a monorepo with SDKs, CLIs, web applications, docs, all of which have different CI requirements).
+
+```mermaid
+graph TD
+    A[Top-level orchestrator module] --> B[Webapp frontend module]
+    A[Top-level orchestrator module] --> C[Webapp backend module]
+    A[Top-level orchestrator module] --> D[Utilities module]
+    A[Top-level orchestrator module] --> E[Docs module]
+```
+
+Benefits of this pattern include:
+
+- Easier debugging: Sub-modules provide a way to separate, and therefore easily debug, the business logic for different CI tasks.
+- Code reuse: There may be opportunities for sub-modules in different projects to import each other to reuse existing functionality.
+- Improved performance: The top-level module of a project can orchestrate the sub-modules using the language’s native concurrency features.
+
+2. A single, shared CI / automation module which all projects use and contribute to. This pattern is suitable when there are significant commonalities between the projects in the monorepo (e.g. a monorepo with only micro-services or only front-end applications).
+
+```mermaid
+graph TD
+    A[Shared module] --> B[Microservice 1]
+    A[Shared module] --> C[Microservice 2]
+    A[Shared module] --> D[Microservice 3]
+```
+
+Benefits of this pattern include:
+
+- Code reuse: This reduces code duplication and ensures a consistent CI environment for all projects. For example, the shared module could create a common build environment and leverage this for multiple projects in the monorepo.
+- Reduced onboarding friction: There is no need to create a new CI module when adding a new project or component. New projects can get started faster with their CI implementation.
+- Best practices: All projects benefit from the best practices implemented in the shared module.
+- Knowledge sharing: By contributing to a shared CI module, project teams can learn from each other's CI strategies.
 
 ## Runtime container
 
@@ -241,7 +389,7 @@ This can be useful to add a few requirements to the module's execution environme
 </TabItem>
 <TabItem value="TypeScript">
 
-The runtime container is currently hardcoded to run in Node.js 21.3 (although this may be configurable in future).
+The runtime container is currently hardcoded to run in Node.js 22.11.0, but it can be overridden by [setting an alternative base image](../configuration/modules.mdx#alternative-base-images).
 
 [Bun](https://bun.sh/) is experimentally supported and [work is in progress](https://github.com/dagger/dagger/issues/4368) to support [Deno](https://deno.com/).
 
@@ -267,6 +415,18 @@ This is why the initial `package.json` doesn't include any dependencies except a
 ```
 
 [^1]:
+</TabItem>
+<TabItem value="PHP">
+
+The runtime container is currently hardcoded to run in [php:8.3-cli-alpine](https://hub.docker.com/_/php/tags?name=8.3-cli-alpine) (although this may be configurable in future).
+
+</TabItem>
+<TabItem value="Java">
+
+Two containers are used by the runtime, one to build the module into a JAR file, one to run it.
+
+They are currently hardcoded to run in [maven:3.9.9-eclipse-temurin-17](https://hub.docker.com/_/maven/tags?name=3.9.9-eclipse-temurin-17) and [eclipse-temurin:23-jre-noble](https://hub.docker.com/_/eclipse-temurin/tags?name=23-jre-noble) respectively (although this may be configurable in future).
+
 </TabItem>
 </Tabs>
 
@@ -317,7 +477,7 @@ In this case, Dagger installs dependencies with:
 uv pip install -r requirements.lock -e ./sdk -e .
 ```
 
-Notice that the `./sdk` and `main` (in `.`) packages don't need to be in the `requirements.lock` file, only the third party dependencies.
+Notice that the `./sdk` and `.` packages don't need to be in the `requirements.lock` file, only the third party dependencies.
 
 This means module developers can use any tool they want to manage their virtual environment and install dependencies, but if third-party dependencies aren't pinned in a `requirements.lock` file, the developers may get different versions between the Dagger execution environment and their own local environment.
 
@@ -343,5 +503,39 @@ This means that so long as the project has a `package.json` file, it can be used
 
 Only production dependencies are installed, not packages defined in the `devDependencies` field.
 
+</TabItem>
+<TabItem value="PHP">
+Dagger modules in PHP are built to be installed, like libraries. The runtime container installs the module code with:
+
+```shell
+# executed by the runtime container
+composer install
+```
+
+This means that so long as the project has a `composer.json` file, it can be used as a library.
+
+</TabItem>
+<TabItem value="Java">
+Dagger modules in Java are built as JAR files, using Maven. The runtime container builds the module code with:
+
+```shell
+# executed by the runtime build container
+mvn clean package
+```
+
+The generated JAR file is then executed by the runtime container with:
+
+```shell
+# executed by the runtime run container
+java -jar module.jar
+```
+
+:::important
+This means you have to keep the `pom.xml` file and especially the `maven-compiler-plugin` and the `maven-shade-plugin` configurations.
+:::
+
+:::note
+Other build tools like Gradle might be supported in the future.
+:::
 </TabItem>
 </Tabs>

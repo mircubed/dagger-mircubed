@@ -37,7 +37,6 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 )
@@ -62,9 +61,9 @@ type ExecutionMetadata struct {
 	// Used when executing the module runtime itself.
 	Internal bool
 
-	// TODO: can rm EncodedModuleID now
 	CallID              *call.ID
 	EncodedModuleID     string
+	ModuleName          string
 	EncodedFunctionCall json.RawMessage
 	CallerClientID      string
 
@@ -98,12 +97,10 @@ type ExecutionMetadata struct {
 
 	EnabledGPUs []string
 
-	SpanContext propagation.MapCarrier
-
 	// Path to the SSH auth socket. Used for Dagger-in-Dagger support.
 	SSHAuthSocketPath string
 
-	// If true, skip injecting dumb-init into the container.
+	// If true, skip injecting dagger-init into the container.
 	NoInit bool
 }
 
@@ -162,7 +159,7 @@ func (w *Worker) Run(
 	state := newExecState(id, &procInfo, rootMount, mounts, started)
 	return nil, w.run(ctx, state,
 		w.setupNetwork,
-		w.injectDumbInit,
+		w.injectInit,
 		w.generateBaseSpec,
 		w.filterEnvs,
 		w.setupRootfs,
@@ -456,7 +453,7 @@ func (s *forwardIO) Stderr() io.ReadCloser {
 	return nil
 }
 
-// newRuncProcKiller returns an abstraction for sending SIGKILL to the
+// newRunProcKiller returns an abstraction for sending SIGKILL to the
 // process inside the container initiated from `runc run`.
 func newRunProcKiller(runC *runc.Runc, id string) procKiller {
 	return procKiller{runC: runC, id: id}

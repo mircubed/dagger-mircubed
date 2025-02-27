@@ -3,12 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/dagger/dagger/modules/gha/api"
 	"golang.org/x/mod/semver"
-	"mvdan.cc/sh/shell"
 )
 
 func (j *Job) checkoutStep() api.JobStep {
@@ -37,55 +35,53 @@ func (j *Job) warmEngineStep() api.JobStep {
 }
 
 func (j *Job) installDaggerSteps() []api.JobStep {
-	if v := j.DaggerVersion; (v == "latest") || (semver.IsValid(v)) {
+	if v := j.DaggerVersion; v == "" || v == "latest" || semver.IsValid(v) {
 		return []api.JobStep{
 			j.bashStep("install-dagger", map[string]string{"DAGGER_VERSION": v}),
 		}
 	}
+
 	// Interpret dagger version as a local source, and build it (dev engine)
+	engineCtr := "dagger-engine.dev-${{ github.run_id }}-${{ github.job }}"
+	engineImage := "localhost/dagger-engine.dev:${{ github.run_id }}-${{ github.job }}"
 	return []api.JobStep{
 		// Install latest dagger to bootstrap dev dagger
 		// FIXME: let's daggerize this, using dagger in dagger :)
-		j.bashStep("install-dagger", map[string]string{"DAGGER_VERSION": "latest"}),
-		{
-			Name: "Install go",
-			Uses: "actions/setup-go@v5",
-			With: map[string]string{
-				"go-version":            "1.23",
-				"cache-dependency-path": ".dagger/go.sum",
-			},
-		},
+		j.bashStep("install-dagger", map[string]string{"DAGGER_VERSION_FILE": "dagger.json"}),
 		j.bashStep("start-dev-dagger", map[string]string{
 			"DAGGER_SOURCE": j.DaggerVersion,
 			// create separate outputs and containers for each job run (to prevent
 			// collisions with shared docker containers).
-			"_EXPERIMENTAL_DAGGER_DEV_OUTPUT":    "./bin/dev-${{ github.run_id }}-${{ github.job }}",
-			"_EXPERIMENTAL_DAGGER_DEV_CONTAINER": "dagger-engine.dev-${{ github.run_id }}-${{ github.job }}",
+			"_EXPERIMENTAL_DAGGER_DEV_CONTAINER": engineCtr,
+			"_EXPERIMENTAL_DAGGER_DEV_IMAGE":     engineImage,
 		}),
 	}
 }
 
-// Analyze the pipeline command, and return a list of env variables it references
-func (j *Job) envLookups() []string {
-	var lookups = make(map[string]struct{})
-	_, err := shell.Expand(j.Command, func(name string) string {
-		lookups[name] = struct{}{}
-		return name
-	})
-	if err != nil {
-		// An error might mean an invalid command OR a bug or incomatibility in our parser,
-		// let's not surface it for now.
+func (j *Job) uploadEngineLogsStep() []api.JobStep {
+	if v := j.DaggerVersion; (v == "latest") || (semver.IsValid(v)) {
 		return nil
 	}
-	result := make([]string, 0, len(lookups))
-	for name := range lookups {
-		if name == "IFS" {
-			continue
-		}
-		result = append(result, name)
+
+	engineCtr := "dagger-engine.dev-${{ github.run_id }}-${{ github.job }}"
+	return []api.JobStep{
+		{
+			Name:  "Capture dev engine logs",
+			If:    "always()",
+			Shell: "bash",
+			Run:   `docker logs "` + engineCtr + `" &> /tmp/actions-call-engine.log`,
+		},
+		{
+			Name: "Upload dev engine logs",
+			If:   "always()",
+			Uses: "actions/upload-artifact@v4",
+			With: map[string]string{
+				"name":      "engine-logs-${{ runner.name }}-${{ github.job }}",
+				"path":      "/tmp/actions-call-engine.log",
+				"overwrite": "true",
+			},
+		},
 	}
-	sort.Strings(result)
-	return result
 }
 
 func (j *Job) callDaggerStep() api.JobStep {
@@ -111,17 +107,11 @@ func (j *Job) callDaggerStep() api.JobStep {
 		// For backwards compatibility with older engines
 		env["_EXPERIMENTAL_DAGGER_CLOUD_TOKEN"] = j.PublicToken
 	}
-	for _, key := range j.envLookups() {
-		if strings.HasPrefix(key, "GITHUB_") {
-			// Inject Github context keys
-			// github.ref becomes $GITHUB_REF, etc.
-			env[key] = fmt.Sprintf("${{ github.%s }}", strings.ToLower(key))
-		} else if strings.HasPrefix(key, "RUNNER_") {
-			// Inject Runner context keys
-			// runner.ref becomes $RUNNER_REF, etc.
-			env[key] = fmt.Sprintf("${{ runner.%s }}", strings.ToLower(key))
-		}
+
+	if j.UploadLogs {
+		env["NO_OUTPUT"] = "true"
 	}
+
 	return j.bashStep("exec", env)
 }
 
@@ -149,5 +139,21 @@ func (j *Job) bashStep(id string, env map[string]string) api.JobStep {
 		Shell: "bash",
 		Run:   script,
 		Env:   env,
+	}
+}
+
+func (j *Job) uploadJobOutputStep(target api.JobStep, output string) api.JobStep {
+	if target.ID == "" {
+		panic("target for uploading logs must have id")
+	}
+	return api.JobStep{
+		Name: "Upload call logs",
+		If:   "always()",
+		Uses: "actions/upload-artifact@v4",
+		With: map[string]string{
+			"name":      "call-logs-${{ runner.name }}-${{ github.job }}" + target.ID,
+			"path":      "${{ steps." + target.ID + ".outputs." + output + " }}",
+			"overwrite": "true",
+		},
 	}
 }

@@ -1,6 +1,9 @@
 package dagui
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 type FrontendOpts struct {
 	// Debug tells the frontend to show everything and do one big final render.
@@ -21,10 +24,6 @@ type FrontendOpts struct {
 	// Open web browser with the trace URL as soon as pipeline starts.
 	OpenWeb bool
 
-	// RevealAllSpans tells the frontend to show all spans, not just the spans
-	// beneath the primary span.
-	RevealAllSpans bool
-
 	// Leave the TUI running instead of exiting after completion.
 	NoExit bool
 
@@ -39,6 +38,19 @@ type FrontendOpts struct {
 
 	// DotShowInternal indicates whether to include internal steps in the DOT output
 	DotShowInternal bool
+
+	// ZoomedSpan configures a span to be zoomed in on, revealing
+	// its child spans.
+	ZoomedSpan SpanID
+
+	// FocusedSpan is the currently selected span, i.e. the cursor position.
+	FocusedSpan SpanID
+
+	// SpanVerbosity tracks per-span verbosity.
+	SpanVerbosity map[SpanID]int
+
+	// Filter is applied while constructing the tree.
+	Filter func(*Span) WalkDecision
 }
 
 const (
@@ -49,37 +61,110 @@ const (
 	ShowEncapsulatedVerbosity = 3
 	ShowSpammyVerbosity       = 4
 	ShowDigestsVerbosity      = 4
+	ShowMetricsVerbosity      = 3
 )
 
-func (opts FrontendOpts) ShouldShow(tree *TraceTree) bool {
+func (opts FrontendOpts) ShouldShow(db *DB, span *Span) bool {
+	verbosity := opts.Verbosity
+	if v, ok := opts.SpanVerbosity[span.ID]; ok {
+		verbosity = v
+	}
 	if opts.Debug {
 		// debug reveals all
 		return true
 	}
-	span := tree.Span
-	if span.IsInternal() && opts.Verbosity < ShowInternalVerbosity {
-		// internal steps are hidden by default
-		return false
-	}
-	if tree.Parent != nil && (span.Encapsulated || tree.Parent.Span.Encapsulate) && tree.Parent.Span.Err() == nil && opts.Verbosity < ShowEncapsulatedVerbosity {
-		// encapsulated steps are hidden (even on error) unless their parent errors
-		return false
-	}
-	if span.Err() != nil {
-		// show errors
+	if opts.FocusedSpan == span.ID {
+		// prevent focused span from disappearing
 		return true
 	}
-	if tree.IsRunningOrChildRunning {
-		// show running steps
-		return true
-	}
-	if tree.Parent != nil && (opts.TooFastThreshold > 0 && span.ActiveDuration(time.Now()) < opts.TooFastThreshold && opts.Verbosity < ShowSpammyVerbosity) {
-		// ignore fast steps; signal:noise is too poor
+	if span.Ignore {
+		// absolutely 100% boring spans, like 'id' and 'sync'
+		//
+		// this is ahead of failed check because 'sync' is often failed and is
+		// _still_ not interesting
 		return false
 	}
-	if opts.GCThreshold > 0 && time.Since(span.EndTime()) > opts.GCThreshold && opts.Verbosity < ShowCompletedVerbosity {
+	if span.IsFailedOrCausedFailure() {
+		// prioritize showing failed things, even if they're internal
+		return true
+	}
+	if span.Call() != nil {
+		if span.Call().ReceiverDigest == "" {
+			if ShouldSkipFunction("Query", span.Call().Field) {
+				return false
+			}
+		} else {
+			rcvr := db.MustCall(span.Call().ReceiverDigest)
+			if ShouldSkipFunction(rcvr.Type.NamedType, span.Call().Field) {
+				return false
+			}
+		}
+	}
+
+	if span.Hidden(opts) {
+		return false
+	}
+	if span.IsPending() {
+		// reveal pending spans so the user can see what's queued to run
+		return true
+	}
+	if span.IsRunningOrEffectsRunning() {
+		return true
+	}
+	// TODO: avoid breaking chains
+	// if opts.TooFastThreshold > 0 &&
+	// 	span.ActiveDuration(time.Now()) < opts.TooFastThreshold &&
+	// 	opts.Verbosity < ShowSpammyVerbosity {
+	// 	// ignore fast steps; signal:noise is too poor
+	// 	return false
+	// }
+	if opts.GCThreshold > 0 &&
+		time.Since(span.EndTime) > opts.GCThreshold &&
+		verbosity < ShowCompletedVerbosity {
 		// stop showing steps that ended after a given threshold
 		return false
 	}
 	return true
+}
+
+func ShouldSkipFunction(obj, field string) bool {
+	// TODO: make this configurable in the API but may not be easy to
+	// generalize because an "internal" field may still need to exist in
+	// codegen, for example. Could expose if internal via the TypeDefs though.
+	skip := map[string][]string{
+		"Query": {
+			// for SDKs only
+			"builtinContainer",
+			"generatedCode",
+			"currentFunctionCall",
+			"currentModule",
+			"typeDef",
+			"sourceMap",
+			"function",
+			// not useful until the CLI accepts ID inputs
+			"cacheVolume",
+			"setSecret",
+			// for tests only
+			"secret",
+			// deprecated
+			"pipeline",
+		},
+		// for SDKs only
+		"TypeDef":  nil,
+		"Function": nil,
+		"Module": {
+			"withDescription",
+			"withObject",
+			"withInterface",
+			"withEnum",
+		},
+	}
+	if fields, ok := skip[obj]; ok {
+		if fields == nil {
+			// if no sub-fields specified, skip all fields
+			return true
+		}
+		return slices.Contains(fields, field)
+	}
+	return false
 }

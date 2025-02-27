@@ -235,29 +235,24 @@ End of functions from https://github.com/client9/shlib
 ------------------------------------------------------------------------
 EOF
 
-uname_os() {
-  os=$(uname -s | tr '[:upper:]' '[:lower:]')
-  case "$os" in
-    cygwin_nt*) os="windows" ;;
-    mingw*) os="windows" ;;
-    msys_nt*) os="windows" ;;
-  esac
-  echo "$os"
-}
+help() {
+  cat <<EOF
+Usage: $0
 
-uname_arch() {
-  arch=$(uname -m)
-  case $arch in
-    x86_64) arch="amd64" ;;
-    x86) arch="386" ;;
-    i686) arch="386" ;;
-    i386) arch="386" ;;
-    aarch64) arch="arm64" ;;
-    armv5*) arch="armv5" ;;
-    armv6*) arch="armv6" ;;
-    armv7*) arch="armv7" ;;
-  esac
-  echo "$arch"
+Install:
+  $0
+
+Install to <path/to/dir>:
+  BIN_DIR=<path/to/dir> $0
+
+Install specified version <vX.Y.Z>:
+  DAGGER_VERSION=<vX.Y.Z> $0
+
+Install latest dev build:
+  DAGGER_COMMIT=head $0
+Install specified dev build <commit sha>:
+  DAGGER_COMMIT=<commit sha> $0
+EOF
 }
 
 latest_version() {
@@ -374,4 +369,9 @@ execute() {
   rm -rf "${tmpdir}"
 }
 
-execute
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+  help
+else
+  execute
+fi
+

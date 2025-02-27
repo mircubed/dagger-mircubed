@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"dagger.io/dagger/telemetry"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/pkg/transfer/archive"
@@ -22,13 +23,13 @@ import (
 	"github.com/moby/buildkit/exporter/containerimage/exptypes"
 	"github.com/moby/buildkit/frontend/dockerui"
 	bkgw "github.com/moby/buildkit/frontend/gateway/client"
-	"github.com/moby/buildkit/identity"
 	"github.com/moby/buildkit/solver/pb"
 	"github.com/moby/buildkit/util/leaseutil"
 	"github.com/opencontainers/go-digest"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/vektah/gqlparser/v2/ast"
+	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/dagger/dagger/dagql"
 	"github.com/dagger/dagger/dagql/call"
@@ -98,6 +99,9 @@ type Container struct {
 	// (Internal-only for now) Environment variables from the engine container, prefixed
 	// with a special value, that will be inherited by this container if set.
 	SystemEnvNames []string `json:"system_envs,omitempty"`
+
+	// DefaultArgs have been explicitly set by the user
+	DefaultArgs bool `json:"defaultArgs,omitempty"`
 }
 
 func (*Container) Type() *ast.Type {
@@ -305,7 +309,7 @@ func (container *Container) FromRefString(ctx context.Context, addr string) (*Co
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve image %s: %w", refName.String(), err)
+		return nil, fmt.Errorf("failed to resolve image %q (platform: %q): %w", refName.String(), platform.Format(), err)
 	}
 	canonRefName, err := reference.WithDigest(refName, digest)
 	if err != nil {
@@ -343,7 +347,7 @@ func (container *Container) FromCanonicalRef(
 			},
 		})
 		if err != nil {
-			return nil, fmt.Errorf("failed to resolve image %s: %w", refStr, err)
+			return nil, fmt.Errorf("failed to resolve image %q (platform: %q): %w", refStr, platform.Format(), err)
 		}
 	}
 
@@ -356,6 +360,8 @@ func (container *Container) FromCanonicalRef(
 		refStr,
 		llb.WithCustomNamef("pull %s", refStr),
 		resolveMode,
+		buildkit.WithTracePropagation(ctx),
+		buildkit.WithPassthrough(),
 	)
 
 	def, err := fsSt.Marshal(ctx, llb.Platform(platform.Spec()))
@@ -483,7 +489,31 @@ func (container *Container) Build(
 		return nil, err
 	}
 
-	container.FS = def.ToPB()
+	dag, err := buildkit.DefToDAG(def.ToPB())
+	if err != nil {
+		return nil, err
+	}
+	if err := dag.Walk(func(dag *buildkit.OpDAG) error {
+		// forcibly inject our trace context into each op, since st.Marshal
+		// isn't strong enough to do so
+		desc := dag.Metadata.Description
+		if desc == nil {
+			desc = map[string]string{}
+		}
+		if desc["traceparent"] == "" {
+			telemetry.Propagator.Inject(ctx,
+				propagation.MapCarrier(desc))
+		}
+		dag.Metadata.Description = desc
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("walk DAG: %w", err)
+	}
+	newDef, err := dag.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	container.FS = newDef
 	container.FS.Source = nil
 
 	cfgBytes, found := res.Metadata[exptypes.ExporterImageConfigKey]
@@ -548,13 +578,14 @@ func (container *Container) WithDirectory(ctx context.Context, subdir string, sr
 func (container *Container) WithFile(ctx context.Context, destPath string, src *File, permissions *int, owner string) (*Container, error) {
 	container = container.Clone()
 
-	return container.writeToPath(ctx, path.Dir(destPath), func(dir *Directory) (*Directory, error) {
+	dir, file := filepath.Split(filepath.Clean(destPath))
+	return container.writeToPath(ctx, dir, func(dir *Directory) (*Directory, error) {
 		ownership, err := container.ownership(ctx, owner)
 		if err != nil {
 			return nil, err
 		}
 
-		return dir.WithFile(ctx, path.Base(destPath), src, permissions, ownership)
+		return dir.WithFile(ctx, file, src, permissions, ownership)
 	})
 }
 
@@ -576,20 +607,21 @@ func (container *Container) WithoutPaths(ctx context.Context, destPaths ...strin
 func (container *Container) WithFiles(ctx context.Context, destDir string, src []*File, permissions *int, owner string) (*Container, error) {
 	container = container.Clone()
 
-	return container.writeToPath(ctx, path.Dir(destDir), func(dir *Directory) (*Directory, error) {
+	dir, file := filepath.Split(filepath.Clean(destDir))
+	return container.writeToPath(ctx, path.Dir(dir), func(dir *Directory) (*Directory, error) {
 		ownership, err := container.ownership(ctx, owner)
 		if err != nil {
 			return nil, err
 		}
 
-		return dir.WithFiles(ctx, path.Base(destDir), src, permissions, ownership)
+		return dir.WithFiles(ctx, file, src, permissions, ownership)
 	})
 }
 
 func (container *Container) WithNewFile(ctx context.Context, dest string, content []byte, permissions fs.FileMode, owner string) (*Container, error) {
 	container = container.Clone()
 
-	dir, file := filepath.Split(dest)
+	dir, file := filepath.Split(filepath.Clean(dest))
 	return container.writeToPath(ctx, dir, func(dir *Directory) (*Directory, error) {
 		ownership, err := container.ownership(ctx, owner)
 		if err != nil {
@@ -1352,97 +1384,6 @@ func (container *Container) Export(
 	return err
 }
 
-func (container *Container) AsTarball(
-	ctx context.Context,
-	platformVariants []*Container,
-	forcedCompression ImageLayerCompression,
-	mediaTypes ImageMediaTypes,
-) (*File, error) {
-	bk, err := container.Query.Buildkit(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get buildkit client: %w", err)
-	}
-	svcs, err := container.Query.Services(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get services: %w", err)
-	}
-	engineHostPlatform := container.Query.Platform()
-
-	if mediaTypes == "" {
-		mediaTypes = OCIMediaTypes
-	}
-
-	opts := map[string]string{
-		"tar":                           strconv.FormatBool(true),
-		string(exptypes.OptKeyOCITypes): strconv.FormatBool(mediaTypes == OCIMediaTypes),
-	}
-	if forcedCompression != "" {
-		opts[string(exptypes.OptKeyLayerCompression)] = strings.ToLower(string(forcedCompression))
-		opts[string(exptypes.OptKeyForceCompression)] = strconv.FormatBool(true)
-	}
-
-	inputByPlatform := map[string]buildkit.ContainerExport{}
-	services := ServiceBindings{}
-
-	variants := append([]*Container{container}, platformVariants...)
-	for _, variant := range variants {
-		if variant.FS == nil {
-			continue
-		}
-		st, err := variant.FSState()
-		if err != nil {
-			return nil, err
-		}
-
-		platformSpec := variant.Platform.Spec()
-		def, err := st.Marshal(ctx, llb.Platform(platformSpec))
-		if err != nil {
-			return nil, err
-		}
-
-		platformString := platforms.Format(variant.Platform.Spec())
-		if _, ok := inputByPlatform[platformString]; ok {
-			return nil, fmt.Errorf("duplicate platform %q", platformString)
-		}
-		inputByPlatform[platformString] = buildkit.ContainerExport{
-			Definition: def.ToPB(),
-			Config:     variant.Config,
-		}
-
-		if len(variants) == 1 {
-			// single platform case
-			for _, annotation := range variant.Annotations {
-				opts[exptypes.AnnotationManifestKey(nil, annotation.Key)] = annotation.Value
-				opts[exptypes.AnnotationManifestDescriptorKey(nil, annotation.Key)] = annotation.Value
-			}
-		} else {
-			// multi platform case
-			for _, annotation := range variant.Annotations {
-				opts[exptypes.AnnotationManifestKey(&platformSpec, annotation.Key)] = annotation.Value
-				opts[exptypes.AnnotationManifestDescriptorKey(&platformSpec, annotation.Key)] = annotation.Value
-			}
-		}
-
-		services.Merge(variant.Services)
-	}
-	if len(inputByPlatform) == 0 {
-		return nil, errors.New("no containers to export")
-	}
-
-	detach, _, err := svcs.StartBindings(ctx, services)
-	if err != nil {
-		return nil, err
-	}
-	defer detach()
-
-	fileName := identity.NewID() + ".tar"
-	pbDef, err := bk.ContainerImageToTarball(ctx, engineHostPlatform.Spec(), fileName, inputByPlatform, opts)
-	if err != nil {
-		return nil, fmt.Errorf("container image to tarball file conversion failed: %w", err)
-	}
-	return NewFile(container.Query, pbDef, fileName, engineHostPlatform, nil), nil
-}
-
 func (container *Container) Import(
 	ctx context.Context,
 	source *File,
@@ -1495,6 +1436,7 @@ func (container *Container) Import(
 		fmt.Sprintf("%s@%s", dummyRepo, manifestDesc.Digest),
 		llb.OCIStore("", buildkit.OCIStoreName),
 		llb.Platform(container.Platform.Spec()),
+		buildkit.WithTracePropagation(ctx),
 	)
 
 	execDef, err := st.Marshal(ctx, llb.Platform(container.Platform.Spec()))
@@ -1627,7 +1569,28 @@ func (container *Container) ImageRefOrErr(ctx context.Context) (string, error) {
 	return "", errors.Errorf("Image reference can only be retrieved immediately after the 'Container.From' call. Error in fetching imageRef as the container image is changed")
 }
 
-func (container *Container) Service(ctx context.Context) (*Service, error) {
+type ContainerAsServiceArgs struct {
+	// Command to run instead of the container's default command
+	Args []string `default:"[]"`
+
+	// If the container has an entrypoint, prepend it to this exec's args
+	UseEntrypoint bool `default:"false"`
+
+	// Provide the executed command access back to the Dagger API
+	ExperimentalPrivilegedNesting bool `default:"false"`
+
+	// Grant the process all root capabilities
+	InsecureRootCapabilities bool `default:"false"`
+
+	// Expand the environment variables in args
+	Expand bool `default:"false"`
+
+	// Skip the init process injected into containers by default so that the
+	// user's process is PID 1
+	NoInit bool `default:"false"`
+}
+
+func (container *Container) AsServiceLegacy(ctx context.Context) (*Service, error) {
 	if container.Meta == nil {
 		var err error
 		container, err = container.WithExec(ctx, ContainerExecOpts{
@@ -1637,6 +1600,41 @@ func (container *Container) Service(ctx context.Context) (*Service, error) {
 			return nil, err
 		}
 	}
+	return container.Query.NewContainerService(ctx, container), nil
+}
+
+func (container *Container) AsService(ctx context.Context, args ContainerAsServiceArgs) (*Service, error) {
+	if len(args.Args) == 0 &&
+		len(container.Config.Cmd) == 0 &&
+		len(container.Config.Entrypoint) == 0 {
+		return nil, ErrNoSvcCommand
+	}
+
+	useEntrypoint := args.UseEntrypoint
+	if len(container.Config.Entrypoint) > 0 && !container.DefaultArgs {
+		useEntrypoint = true
+	}
+
+	var cmdargs = container.Config.Cmd
+	if len(args.Args) > 0 {
+		cmdargs = args.Args
+		if !args.UseEntrypoint {
+			useEntrypoint = false
+		}
+	}
+
+	container, err := container.WithExec(ctx, ContainerExecOpts{
+		Args:                          cmdargs,
+		UseEntrypoint:                 useEntrypoint,
+		ExperimentalPrivilegedNesting: args.ExperimentalPrivilegedNesting,
+		InsecureRootCapabilities:      args.InsecureRootCapabilities,
+		Expand:                        args.Expand,
+		NoInit:                        args.NoInit,
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	return container.Query.NewContainerService(ctx, container), nil
 }
 
@@ -1845,21 +1843,21 @@ func (expect ReturnTypes) ToLiteral() call.Literal {
 
 // ReturnCodes gets the valid exit codes allowed for a specific return status
 //
-// NOTE: exit status codes above 127 are likely from exiting via a signal - we
+// NOTE: exit status codes above 128 are likely from exiting via a signal - we
 // shouldn't try and handle these.
 func (expect ReturnTypes) ReturnCodes() []int {
 	switch expect {
 	case ReturnSuccess:
 		return []int{0}
 	case ReturnFailure:
-		codes := make([]int, 0, 127)
-		for i := 1; i <= 127; i++ {
+		codes := make([]int, 0, 128)
+		for i := 1; i <= 128; i++ {
 			codes = append(codes, i)
 		}
 		return codes
 	case ReturnAny:
-		codes := make([]int, 0, 128)
-		for i := 0; i <= 127; i++ {
+		codes := make([]int, 0, 129)
+		for i := 0; i <= 128; i++ {
 			codes = append(codes, i)
 		}
 		return codes

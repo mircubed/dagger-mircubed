@@ -15,7 +15,7 @@ const (
 	sdkSrc           = "/sdk"
 	genDir           = "dagger_sdk"
 	schemaPath       = "/schema.json"
-	elixirImage      = "hexpm/elixir:1.17.2-erlang-27.0.1-alpine-3.20.2@sha256:7c8a13cbff321b7d6f54b4c9a21a10fc8b987974171231eaa77532b8e638b645"
+	elixirImage      = "hexpm/elixir:1.17.3-erlang-27.2-alpine-3.20.3@sha256:557156f12d23b0d2aa12d8955668cc3b9a981563690bb9ecabd7a5a951702afe"
 )
 
 func New(
@@ -29,15 +29,13 @@ func New(
 		return nil, fmt.Errorf("sdk source directory not provided")
 	}
 	return &ElixirSdk{
-		SdkSourceDir:  sdkSourceDir,
-		RequiredPaths: []string{},
-		Container:     dag.Container(),
+		SdkSourceDir: sdkSourceDir,
+		Container:    dag.Container(),
 	}, nil
 }
 
 type ElixirSdk struct {
-	SdkSourceDir  *dagger.Directory
-	RequiredPaths []string
+	SdkSourceDir *dagger.Directory
 
 	Container *dagger.Container
 	// An error during processing.
@@ -68,6 +66,8 @@ func (m *ElixirSdk) ModuleRuntime(
 	return ctr.
 		WithWorkdir(elixirApplication).
 		WithExec([]string{"mix", "deps.get", "--only", "dev"}).
+		WithExec([]string{"mix", "deps.compile"}).
+		WithExec([]string{"mix", "compile"}).
 		WithEntrypoint([]string{
 			"mix", "cmd",
 			"--cd", path.Join(ModSourceDirPath, subPath, elixirApplication),
@@ -183,10 +183,8 @@ func (m *ElixirSdk) GenerateCode(introspectionJSON *dagger.File) *dagger.Directo
 }
 
 func (m *ElixirSdk) baseContainer(ctr *dagger.Container) *dagger.Container {
-	mixCache := dag.CacheVolume(".mix")
 	return ctr.
 		From(elixirImage).
-		WithMountedCache("/root/.mix", mixCache).
 		WithExec([]string{"apk", "add", "--no-cache", "git"}).
 		WithExec([]string{"mix", "local.hex", "--force"}).
 		WithExec([]string{"mix", "local.rebar", "--force"})

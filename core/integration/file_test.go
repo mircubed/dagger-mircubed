@@ -19,13 +19,13 @@ import (
 	"github.com/dagger/dagger/engine/buildkit"
 	"github.com/dagger/dagger/engine/distconsts"
 	"github.com/dagger/dagger/internal/testutil"
-	"github.com/dagger/dagger/testctx"
+	"github.com/dagger/testctx"
 )
 
 type FileSuite struct{}
 
 func TestFile(t *testing.T) {
-	testctx.Run(testCtx, t, FileSuite{}, Middleware()...)
+	testctx.New(t, Middleware()...).RunTests(FileSuite{})
 }
 
 func (FileSuite) TestFile(ctx context.Context, t *testctx.T) {
@@ -163,6 +163,11 @@ func (FileSuite) TestName(ctx context.Context, t *testctx.T) {
 		name, err := c.Host().Directory("path").File("to/file.txt").Name(ctx)
 		require.NoError(t, err)
 		require.Equal(t, "file.txt", name)
+	})
+
+	t.Run("not found file", func(ctx context.Context, t *testctx.T) {
+		_, err := c.Directory().File("to/file.txt").Name(ctx)
+		requireErrOut(t, err, "no such file or directory")
 	})
 }
 
@@ -444,11 +449,11 @@ func (FileSuite) TestSync(ctx context.Context, t *testctx.T) {
 	t.Run("triggers error", func(ctx context.Context, t *testctx.T) {
 		_, err := c.Directory().File("baz").Sync(ctx)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "no such file")
+		requireErrOut(t, err, "no such file")
 
 		_, err = c.Container().From(alpineImage).File("/bar").Sync(ctx)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "no such file")
+		requireErrOut(t, err, "no such file")
 	})
 
 	t.Run("allows chaining", func(ctx context.Context, t *testctx.T) {

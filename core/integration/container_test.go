@@ -15,7 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strconv"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -33,13 +33,13 @@ import (
 	"github.com/dagger/dagger/engine/buildkit"
 	"github.com/dagger/dagger/engine/distconsts"
 	"github.com/dagger/dagger/internal/testutil"
-	"github.com/dagger/dagger/testctx"
+	"github.com/dagger/testctx"
 )
 
 type ContainerSuite struct{}
 
 func TestContainer(t *testing.T) {
-	testctx.Run(testCtx, t, ContainerSuite{}, Middleware()...)
+	testctx.New(t, Middleware()...).RunTests(ContainerSuite{})
 }
 
 func (ContainerSuite) TestScratch(ctx context.Context, t *testctx.T) {
@@ -95,7 +95,10 @@ func (ContainerSuite) TestFrom(ctx context.Context, t *testctx.T) {
 func (ContainerSuite) TestBuild(ctx context.Context, t *testctx.T) {
 	c := connect(ctx, t)
 
-	contextDir := c.Directory().
+	contextDir := c.Container().
+		From("golang:1.18.2-alpine").
+		WithWorkdir("/src").
+		WithExec([]string{"go", "mod", "init", "hello"}).
 		WithNewFile("main.go",
 			`package main
 import "fmt"
@@ -104,7 +107,8 @@ func main() {
 	for _, env := range os.Environ() {
 		fmt.Println(env)
 	}
-}`)
+}`).
+		Directory(".")
 
 	t.Run("default Dockerfile location", func(ctx context.Context, t *testctx.T) {
 		src := contextDir.
@@ -112,7 +116,6 @@ func main() {
 				`FROM golang:1.18.2-alpine
 WORKDIR /src
 COPY main.go .
-RUN go mod init hello
 RUN go build -o /usr/bin/goenv main.go
 ENV FOO=bar
 CMD goenv
@@ -130,7 +133,23 @@ CMD goenv
 FROM golang:1.18.2-alpine
 WORKDIR /src
 COPY main.go .
-RUN go mod init hello
+RUN go build -o /usr/bin/goenv main.go
+ENV FOO=bar
+CMD goenv
+`)
+
+		env, err := c.Container().Build(src).WithExec(nil).Stdout(ctx)
+		require.NoError(t, err)
+		require.Contains(t, env, "FOO=bar\n")
+	})
+
+	t.Run("with old syntax pragma", func(ctx context.Context, t *testctx.T) {
+		src := contextDir.
+			WithNewFile("Dockerfile",
+				`# syntax = docker/dockerfile:1.7
+FROM golang:1.18.2-alpine
+WORKDIR /src
+COPY main.go .
 RUN go build -o /usr/bin/goenv main.go
 ENV FOO=bar
 CMD goenv
@@ -147,7 +166,6 @@ CMD goenv
 				`FROM golang:1.18.2-alpine
 WORKDIR /src
 COPY main.go .
-RUN go mod init hello
 RUN go build -o /usr/bin/goenv main.go
 ENV FOO=bar
 CMD goenv
@@ -169,7 +187,6 @@ CMD goenv
 				`FROM golang:1.18.2-alpine
 WORKDIR /src
 COPY main.go .
-RUN go mod init hello
 RUN go build -o /usr/bin/goenv main.go
 ENV FOO=bar
 CMD goenv
@@ -188,7 +205,6 @@ CMD goenv
 				`FROM golang:1.18.2-alpine
 WORKDIR /src
 COPY main.go .
-RUN go mod init hello
 RUN go build -o /usr/bin/goenv main.go
 ENV FOO=bar
 CMD goenv
@@ -213,7 +229,6 @@ CMD goenv
 ARG FOOARG=bar
 WORKDIR /src
 COPY main.go .
-RUN go mod init hello
 RUN go build -o /usr/bin/goenv main.go
 ENV FOO=$FOOARG
 CMD goenv
@@ -416,7 +431,7 @@ func (ContainerSuite) TestExecSync(ctx context.Context, t *testctx.T) {
 				}
 			}
 		}`, nil, nil)
-	require.Contains(t, err.Error(), `process "false" did not complete successfully`)
+	requireErrOut(t, err, `process "false" did not complete successfully`)
 }
 
 func (ContainerSuite) TestExecStdoutStderr(ctx context.Context, t *testctx.T) {
@@ -444,14 +459,14 @@ func (ContainerSuite) TestExecStdoutStderr(ctx context.Context, t *testctx.T) {
 		_, err := c.Container().
 			From(alpineImage).
 			Stdout(ctx)
-		require.ErrorContains(t, err, "no command has been set")
+		requireErrOut(t, err, "no command has been set")
 	})
 
 	t.Run("stderr without exec", func(ctx context.Context, t *testctx.T) {
 		_, err := c.Container().
 			From(alpineImage).
 			Stderr(ctx)
-		require.ErrorContains(t, err, "no command has been set")
+		requireErrOut(t, err, "no command has been set")
 	})
 }
 
@@ -753,7 +768,7 @@ func (ContainerSuite) TestExecWithEntrypoint(ctx context.Context, t *testctx.T) 
 			UseEntrypoint: true,
 		}).Sync(ctx)
 		require.Error(t, err)
-		require.ErrorContains(t, err, "can't open 'sh'")
+		requireErrOut(t, err, "can't open 'sh'")
 	})
 
 	t.Run("skipped", func(ctx context.Context, t *testctx.T) {
@@ -820,7 +835,7 @@ func (ContainerSuite) TestExecWithoutEntrypoint(ctx context.Context, t *testctx.
 			WithDefaultArgs([]string{"echo", "-n", "foobar"}).
 			WithoutEntrypoint().
 			Stdout(ctx)
-		require.ErrorContains(t, err, "no command has been set")
+		requireErrOut(t, err, "no command has been set")
 		require.Empty(t, res)
 	})
 
@@ -1590,125 +1605,71 @@ func (ContainerSuite) TestWithMountedFile(ctx context.Context, t *testctx.T) {
 }
 
 func (ContainerSuite) TestWithMountedCache(ctx context.Context, t *testctx.T) {
-	cacheID := newCache(t)
+	c := connect(ctx, t)
 
-	execRes := struct {
-		Container struct {
-			From struct {
-				WithEnvVariable struct {
-					WithMountedCache struct {
-						WithExec struct {
-							Stdout string
-						}
-					}
-				}
-			}
-		}
-	}{}
+	cache := c.CacheVolume(t.Name())
 
-	query := `query Test($cache: CacheVolumeID!, $rand: String!) {
-			container {
-				from(address: "` + alpineImage + `") {
-					withEnvVariable(name: "RAND", value: $rand) {
-						withMountedCache(path: "/mnt/cache", cache: $cache) {
-							withExec(args: ["sh", "-c", "echo $RAND >> /mnt/cache/file; cat /mnt/cache/file"]) {
-								stdout
-							}
-						}
-					}
-				}
-			}
-		}`
+	wait := preventCacheMountPrune(ctx, t, c, cache)
 
 	rand1 := identity.NewID()
-	err := testutil.Query(t, query, &execRes, &testutil.QueryOptions{Variables: map[string]any{
-		"cache": cacheID,
-		"rand":  rand1,
-	}})
+	out1, err := c.Container().
+		From(alpineImage).
+		WithEnvVariable("RAND", rand1).
+		WithMountedCache("/mnt/cache", cache).
+		WithExec([]string{"sh", "-c", "echo $RAND >> /mnt/cache/sub-file; cat /mnt/cache/sub-file"}).
+		Stdout(ctx)
 	require.NoError(t, err)
-	require.Equal(t, rand1+"\n", execRes.Container.From.WithEnvVariable.WithMountedCache.WithExec.Stdout)
+	require.Equal(t, rand1+"\n", out1)
 
 	rand2 := identity.NewID()
-	err = testutil.Query(t, query, &execRes, &testutil.QueryOptions{Variables: map[string]any{
-		"cache": cacheID,
-		"rand":  rand2,
-	}})
+	out2, err := c.Container().
+		From(alpineImage).
+		WithEnvVariable("RAND", rand2).
+		WithMountedCache("/mnt/cache", cache).
+		WithExec([]string{"sh", "-c", "echo $RAND >> /mnt/cache/sub-file; cat /mnt/cache/sub-file"}).
+		Stdout(ctx)
 	require.NoError(t, err)
-	require.Equal(t, rand1+"\n"+rand2+"\n", execRes.Container.From.WithEnvVariable.WithMountedCache.WithExec.Stdout)
+	require.Equal(t, rand1+"\n"+rand2+"\n", out2)
+
+	require.NoError(t, wait())
 }
 
 func (ContainerSuite) TestWithMountedCacheFromDirectory(ctx context.Context, t *testctx.T) {
-	dirRes := struct {
-		Directory struct {
-			WithNewFile struct {
-				Directory struct {
-					ID core.DirectoryID
-				}
-			}
-		}
-	}{}
+	c := connect(ctx, t)
 
-	err := testutil.Query(t,
-		`{
-			directory {
-				withNewFile(path: "some-dir/sub-file", contents: "initial-content\n") {
-					directory(path: "some-dir") {
-						id
-					}
-				}
-			}
-		}`, &dirRes, nil)
-	require.NoError(t, err)
+	cache := c.CacheVolume(t.Name())
 
-	initialID := dirRes.Directory.WithNewFile.Directory.ID
+	srcDir := c.Directory().
+		WithNewFile("some-dir/sub-file", "initial-content\n").
+		Directory("some-dir")
 
-	cacheID := newCache(t)
-
-	execRes := struct {
-		Container struct {
-			From struct {
-				WithEnvVariable struct {
-					WithMountedCache struct {
-						WithExec struct {
-							Stdout string
-						}
-					}
-				}
-			}
-		}
-	}{}
-
-	query := `query Test($cache: CacheVolumeID!, $rand: String!, $init: DirectoryID!) {
-			container {
-				from(address: "` + alpineImage + `") {
-					withEnvVariable(name: "RAND", value: $rand) {
-						withMountedCache(path: "/mnt/cache", cache: $cache, source: $init) {
-							withExec(args: ["sh", "-c", "echo $RAND >> /mnt/cache/sub-file; cat /mnt/cache/sub-file"]) {
-								stdout
-							}
-						}
-					}
-				}
-			}
-		}`
+	wait := preventCacheMountPrune(ctx, t, c, cache, dagger.ContainerWithMountedCacheOpts{Source: srcDir})
 
 	rand1 := identity.NewID()
-	err = testutil.Query(t, query, &execRes, &testutil.QueryOptions{Variables: map[string]any{
-		"init":  initialID,
-		"rand":  rand1,
-		"cache": cacheID,
-	}})
+	out1, err := c.Container().
+		From(alpineImage).
+		WithEnvVariable("RAND", rand1).
+		WithMountedCache("/mnt/cache", cache, dagger.ContainerWithMountedCacheOpts{
+			Source: srcDir,
+		}).
+		WithExec([]string{"sh", "-c", "echo $RAND >> /mnt/cache/sub-file; cat /mnt/cache/sub-file"}).
+		Stdout(ctx)
 	require.NoError(t, err)
-	require.Equal(t, "initial-content\n"+rand1+"\n", execRes.Container.From.WithEnvVariable.WithMountedCache.WithExec.Stdout)
+	require.Equal(t, "initial-content\n"+rand1+"\n", out1)
 
 	rand2 := identity.NewID()
-	err = testutil.Query(t, query, &execRes, &testutil.QueryOptions{Variables: map[string]any{
-		"init":  initialID,
-		"rand":  rand2,
-		"cache": cacheID,
-	}})
+	out2, err := c.Container().
+		From(alpineImage).
+		WithEnvVariable("RAND", rand2).
+		WithMountedCache("/mnt/cache", cache, dagger.ContainerWithMountedCacheOpts{
+			Source: srcDir,
+		}).
+		WithExec([]string{"sh", "-c", "echo $RAND >> /mnt/cache/sub-file; cat /mnt/cache/sub-file"}).
+		Stdout(ctx)
 	require.NoError(t, err)
-	require.Equal(t, "initial-content\n"+rand1+"\n"+rand2+"\n", execRes.Container.From.WithEnvVariable.WithMountedCache.WithExec.Stdout)
+	require.Equal(t, "initial-content\n"+rand1+"\n"+rand2+"\n", out2)
+
+	require.NoError(t, wait())
 }
 
 func (ContainerSuite) TestWithMountedTemp(ctx context.Context, t *testctx.T) {
@@ -1934,19 +1895,31 @@ func (ContainerSuite) TestWithFiles(ctx context.Context, t *testctx.T) {
 		File("second-file")
 	files := []*dagger.File{file1, file2}
 
-	ctr := c.Container().
-		From(alpineImage).
-		WithFiles("myfiles", files)
+	check := func(ctx context.Context, t *testctx.T, ctr *dagger.Container) {
+		contents, err := ctr.WithExec([]string{"cat", "/myfiles/first-file"}).
+			Stdout(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "file1 content", contents)
 
-	contents, err := ctr.WithExec([]string{"cat", "/myfiles/first-file"}).
-		Stdout(ctx)
-	require.NoError(t, err)
-	require.Equal(t, "file1 content", contents)
+		contents, err = ctr.WithExec([]string{"cat", "/myfiles/second-file"}).
+			Stdout(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "file2 content", contents)
+	}
 
-	contents, err = ctr.WithExec([]string{"cat", "/myfiles/second-file"}).
-		Stdout(ctx)
-	require.NoError(t, err)
-	require.Equal(t, "file2 content", contents)
+	t.Run("no trailing slash", func(ctx context.Context, t *testctx.T) {
+		ctr := c.Container().
+			From(alpineImage).
+			WithFiles("myfiles", files)
+		check(ctx, t, ctr)
+	})
+
+	t.Run("trailing slash", func(ctx context.Context, t *testctx.T) {
+		ctr := c.Container().
+			From(alpineImage).
+			WithFiles("myfiles/", files)
+		check(ctx, t, ctr)
+	})
 }
 
 func (ContainerSuite) TestWithFilesAbsolute(ctx context.Context, t *testctx.T) {
@@ -2284,7 +2257,7 @@ func (ContainerSuite) TestDirectoryErrors(ctx context.Context, t *testctx.T) {
 			"id": id,
 		}})
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "path /mnt/dir/some-file is a file, not a directory")
+	requireErrOut(t, err, "path /mnt/dir/some-file is a file, not a directory")
 
 	err = testutil.Query(t,
 		`query Test($id: DirectoryID!) {
@@ -2301,7 +2274,7 @@ func (ContainerSuite) TestDirectoryErrors(ctx context.Context, t *testctx.T) {
 			"id": id,
 		}})
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "bogus: no such file or directory")
+	requireErrOut(t, err, "bogus: no such file or directory")
 
 	err = testutil.Query(t,
 		`{
@@ -2316,7 +2289,7 @@ func (ContainerSuite) TestDirectoryErrors(ctx context.Context, t *testctx.T) {
 			}
 		}`, nil, nil)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "bogus: cannot retrieve path from tmpfs")
+	requireErrOut(t, err, "bogus: cannot retrieve path from tmpfs")
 
 	cacheID := newCache(t)
 	err = testutil.Query(t,
@@ -2334,7 +2307,7 @@ func (ContainerSuite) TestDirectoryErrors(ctx context.Context, t *testctx.T) {
 			"cache": cacheID,
 		}})
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "bogus: cannot retrieve path from cache")
+	requireErrOut(t, err, "bogus: cannot retrieve path from cache")
 }
 
 func (ContainerSuite) TestDirectorySourcePath(ctx context.Context, t *testctx.T) {
@@ -2514,7 +2487,7 @@ func (ContainerSuite) TestFileErrors(ctx context.Context, t *testctx.T) {
 				"id": id,
 			}})
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "bogus: no such file or directory")
+		requireErrOut(t, err, "bogus: no such file or directory")
 	})
 
 	t.Run("get directory as file", func(ctx context.Context, t *testctx.T) {
@@ -2533,7 +2506,7 @@ func (ContainerSuite) TestFileErrors(ctx context.Context, t *testctx.T) {
 				"id": id,
 			}})
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "path /mnt/dir is a directory, not a file")
+		requireErrOut(t, err, "path /mnt/dir is a directory, not a file")
 	})
 
 	t.Run("get path under tmpfs", func(ctx context.Context, t *testctx.T) {
@@ -2550,7 +2523,7 @@ func (ContainerSuite) TestFileErrors(ctx context.Context, t *testctx.T) {
 			}
 		}`, nil, nil)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "bogus: cannot retrieve path from tmpfs")
+		requireErrOut(t, err, "bogus: cannot retrieve path from tmpfs")
 	})
 
 	t.Run("get path under cache", func(ctx context.Context, t *testctx.T) {
@@ -2570,7 +2543,7 @@ func (ContainerSuite) TestFileErrors(ctx context.Context, t *testctx.T) {
 				"cache": cacheID,
 			}})
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "bogus: cannot retrieve path from cache")
+		requireErrOut(t, err, "bogus: cannot retrieve path from cache")
 	})
 
 	t.Run("get secret mount contents", func(ctx context.Context, t *testctx.T) {
@@ -2589,7 +2562,7 @@ func (ContainerSuite) TestFileErrors(ctx context.Context, t *testctx.T) {
 				"secret": "some-secret",
 			}})
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "sekret: no such file or directory")
+		requireErrOut(t, err, "sekret: no such file or directory")
 	})
 }
 
@@ -3230,9 +3203,19 @@ func (ContainerSuite) TestImport(ctx context.Context, t *testctx.T) {
 func (ContainerSuite) TestFromImagePlatform(ctx context.Context, t *testctx.T) {
 	c := connect(ctx, t)
 
-	var desiredPlatform dagger.Platform = "linux/arm64"
+	imageRef := alpineAmd
+	var desiredPlatform dagger.Platform = "linux/amd64"
+	targetPlatform := desiredPlatform
+	if runtime.GOARCH == "amd64" {
+		// need a platform that doesn't match the host
+		imageRef = alpineArm
+		desiredPlatform = "linux/arm64"
+		targetPlatform = "linux/arm64/v8"
+	}
 
-	ctr := c.Container().From(alpineArm)
+	ctr := c.Container(dagger.ContainerOpts{
+		Platform: targetPlatform,
+	}).From(imageRef)
 	ctrPlatform, err := ctr.Platform(ctx)
 	require.NoError(t, err)
 	require.Equal(t, desiredPlatform, ctrPlatform)
@@ -3566,7 +3549,7 @@ func (ContainerSuite) TestImageRef(ctx context.Context, t *testctx.T) {
 				}
 			}`, &res, nil)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "Image reference can only be retrieved immediately after the 'Container.From' call. Error in fetching imageRef as the container image is changed")
+		requireErrOut(t, err, "Image reference can only be retrieved immediately after the 'Container.From' call. Error in fetching imageRef as the container image is changed")
 	})
 
 	t.Run("should throw error after the container image modification with exec", func(ctx context.Context, t *testctx.T) {
@@ -3589,7 +3572,7 @@ func (ContainerSuite) TestImageRef(ctx context.Context, t *testctx.T) {
 				}
 			}`, &res, nil)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "Image reference can only be retrieved immediately after the 'Container.From' call. Error in fetching imageRef as the container image is changed")
+		requireErrOut(t, err, "Image reference can only be retrieved immediately after the 'Container.From' call. Error in fetching imageRef as the container image is changed")
 	})
 
 	t.Run("should throw error after the container image modification with directory", func(ctx context.Context, t *testctx.T) {
@@ -3608,7 +3591,7 @@ func (ContainerSuite) TestImageRef(ctx context.Context, t *testctx.T) {
 		_, err := ctr.ImageRef(ctx)
 
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "Image reference can only be retrieved immediately after the 'Container.From' call. Error in fetching imageRef as the container image is changed")
+		requireErrOut(t, err, "Image reference can only be retrieved immediately after the 'Container.From' call. Error in fetching imageRef as the container image is changed")
 	})
 }
 
@@ -3622,7 +3605,7 @@ func (ContainerSuite) TestBuildNilContextError(ctx context.Context, t *testctx.T
 				}
 			}
 		}`, &map[any]any{}, nil)
-	require.ErrorContains(t, err, "cannot decode empty string as ID")
+	requireErrOut(t, err, "cannot decode empty string as ID")
 }
 
 func (ContainerSuite) TestInsecureRootCapabilites(ctx context.Context, t *testctx.T) {
@@ -3668,34 +3651,16 @@ func (ContainerSuite) TestInsecureRootCapabilites(ctx context.Context, t *testct
 func (ContainerSuite) TestInsecureRootCapabilitesWithService(ctx context.Context, t *testctx.T) {
 	c := connect(ctx, t)
 
+	middleware := func(ctr *dagger.Container) *dagger.Container {
+		return ctr.WithMountedCache("/tmp", c.CacheVolume("share-tmp"))
+	}
+
 	// verify the root capabilities setting works by executing dockerd with it and
 	// testing it can startup, create containers and bind mount from its filesystem to
 	// them.
-	dockerd := c.Container().From("docker:23.0.1-dind").
-		WithMountedCache("/var/lib/docker", c.CacheVolume("docker-lib"), dagger.ContainerWithMountedCacheOpts{
-			Sharing: dagger.Private,
-		}).
-		WithMountedCache("/tmp", c.CacheVolume("share-tmp")).
-		WithExposedPort(2375).
-		WithExec([]string{
-			"dockerd",
-			"--host=tcp://0.0.0.0:2375",
-			"--tls=false",
-		}, dagger.ContainerWithExecOpts{
-			InsecureRootCapabilities: true,
-		}).AsService()
-
-	dockerHost, err := dockerd.Endpoint(ctx, dagger.ServiceEndpointOpts{
-		Scheme: "tcp",
-	})
-	require.NoError(t, err)
-
 	randID := identity.NewID()
-	out, err := c.Container().From("docker:23.0.1-cli").
-		WithMountedCache("/tmp", c.CacheVolume("share-tmp")).
-		WithServiceBinding("docker", dockerd).
-		WithEnvVariable("DOCKER_HOST", dockerHost).
-		With(mountDockerConfig(c)).
+	dockerc := dockerSetup(ctx, t, t.Name(), c, "23.0.1", middleware)
+	out, err := dockerc.
 		WithExec([]string{"sh", "-e", "-c", strings.Join([]string{
 			fmt.Sprintf("echo %s-from-outside > /tmp/from-outside", randID),
 			"docker run --rm -v /tmp:/tmp alpine cat /tmp/from-outside",
@@ -4218,7 +4183,7 @@ EXPOSE 8080
 
 	// random order since ImageConfig.ExposedPorts is a map
 	for _, p := range res.Container.ExposedPorts {
-		require.Equal(t, core.NetworkProtocolTCP, p.Protocol)
+		require.Equalf(t, core.NetworkProtocolTCP, p.Protocol, "unexpected protocol for port %d", p.Port)
 		switch p.Port {
 		case 8080:
 			require.Nil(t, p.Description)
@@ -4274,27 +4239,8 @@ func (ContainerSuite) TestFromMergesWithParent(ctx context.Context, t *testctx.T
 func (ContainerSuite) TestImageLoadCompatibility(ctx context.Context, t *testctx.T) {
 	c := connect(ctx, t)
 
-	for i, dockerVersion := range []string{"20.10", "23.0", "24.0"} {
-		dockerVersion := dockerVersion
-		port := 2375 + i
-		dockerd := c.Container().From(fmt.Sprintf("docker:%s-dind", dockerVersion)).
-			WithMountedCache("/var/lib/docker", c.CacheVolume(t.Name()+"-"+dockerVersion+"-docker-lib"), dagger.ContainerWithMountedCacheOpts{
-				Sharing: dagger.Private,
-			}).
-			WithExposedPort(port).
-			WithExec([]string{
-				"dockerd",
-				"--host=tcp://0.0.0.0:" + strconv.Itoa(port),
-				"--tls=false",
-			}, dagger.ContainerWithExecOpts{
-				InsecureRootCapabilities: true,
-			}).
-			AsService()
-
-		dockerHost, err := dockerd.Endpoint(ctx, dagger.ServiceEndpointOpts{
-			Scheme: "tcp",
-		})
-		require.NoError(t, err)
+	for _, dockerVersion := range []string{"20.10", "23.0", "24.0"} {
+		dockerc := dockerSetup(ctx, t, t.Name(), c, dockerVersion, nil)
 
 		for _, mediaType := range []dagger.ImageMediaTypes{dagger.ImageMediaTypesOcimediaTypes, dagger.ImageMediaTypesDockerMediaTypes} {
 			mediaType := mediaType
@@ -4312,11 +4258,7 @@ func (ContainerSuite) TestImageLoadCompatibility(ctx context.Context, t *testctx
 						})
 					require.NoError(t, err)
 
-					randID := identity.NewID()
-					ctr := c.Container().From(fmt.Sprintf("docker:%s-cli", dockerVersion)).
-						WithEnvVariable("CACHEBUST", randID).
-						WithServiceBinding("docker", dockerd).
-						WithEnvVariable("DOCKER_HOST", dockerHost).
+					ctr := dockerc.
 						WithMountedFile(path.Join("/", path.Base(tmpfile)), c.Host().File(tmpfile)).
 						WithExec([]string{"docker", "load", "-i", "/" + path.Base(tmpfile)})
 
@@ -4369,7 +4311,7 @@ func (ContainerSuite) TestNestedExec(ctx context.Context, t *testctx.T) {
 		_, err := c.Container().From(alpineImage).
 			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
 			WithNewFile("/query.graphql", `{ defaultPlatform }`). // arbitrary valid query
-			WithExec([]string{"dagger", "query", "--debug", "--doc", "/query.graphql"}, dagger.ContainerWithExecOpts{
+			WithExec([]string{"dagger", "query", "--doc", "/query.graphql"}, dagger.ContainerWithExecOpts{
 				ExperimentalPrivilegedNesting: true,
 			}).
 			Sync(ctx)
@@ -4514,7 +4456,7 @@ func (ContainerSuite) TestExecExpect(ctx context.Context, t *testctx.T) {
 				}
 			}
 		}`, &res, nil)
-		require.ErrorContains(t, err, "exit code: 1")
+		requireErrOut(t, err, "exit code: 1")
 	})
 
 	t.Run("failure", func(ctx context.Context, t *testctx.T) {
@@ -4538,7 +4480,7 @@ func (ContainerSuite) TestExecExpect(ctx context.Context, t *testctx.T) {
 				}
 			}
 		}`, &res, nil)
-		require.ErrorContains(t, err, "exit code: 0")
+		requireErrOut(t, err, "exit code: 0")
 
 		err = testutil.Query(t,
 			`{
@@ -4553,25 +4495,6 @@ func (ContainerSuite) TestExecExpect(ctx context.Context, t *testctx.T) {
 		require.NoError(t, err)
 		require.Equal(t, 1, res.Container.From.WithExec.ExitCode)
 	})
-}
-
-// mountDockerConfig is a helper for mounting the host's docker config if it exists
-func mountDockerConfig(dag *dagger.Client) dagger.WithContainerFunc {
-	return func(ctr *dagger.Container) *dagger.Container {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return ctr
-		}
-		content, err := os.ReadFile(filepath.Join(home, ".docker/config.json"))
-		if err != nil {
-			return ctr
-		}
-
-		return ctr.WithMountedSecret(
-			"/root/.docker/config.json",
-			dag.SetSecret("docker-config-"+identity.NewID(), string(content)),
-		)
-	}
 }
 
 func (ContainerSuite) TestEnvExpand(ctx context.Context, t *testctx.T) {
@@ -4694,7 +4617,7 @@ func (ContainerSuite) TestEnvExpand(ctx context.Context, t *testctx.T) {
 			).
 			WithExec([]string{"ls", "/some-path/bar"}).Stdout(ctx)
 
-		require.ErrorContains(t, err, "ls: /some-path/bar: No such file or directory")
+		requireErrOut(t, err, "ls: /some-path/bar: No such file or directory")
 	})
 
 	t.Run("env variable is expanded in WithoutFile", func(ctx context.Context, t *testctx.T) {
@@ -4708,7 +4631,7 @@ func (ContainerSuite) TestEnvExpand(ctx context.Context, t *testctx.T) {
 			WithoutFile("/some-path/${foo}/some-file.txt", dagger.ContainerWithoutFileOpts{Expand: true}).
 			WithExec([]string{"ls", "/some-path/bar/some-file.txt"}).Stdout(ctx)
 
-		require.ErrorContains(t, err, "ls: /some-path/bar/some-file.txt: No such file or directory")
+		requireErrOut(t, err, "ls: /some-path/bar/some-file.txt: No such file or directory")
 	})
 
 	t.Run("env variable is expanded in WithoutFiles", func(ctx context.Context, t *testctx.T) {
@@ -4722,7 +4645,7 @@ func (ContainerSuite) TestEnvExpand(ctx context.Context, t *testctx.T) {
 			WithoutFiles([]string{"/some-path/${foo}/some-file.txt"}, dagger.ContainerWithoutFilesOpts{Expand: true}).
 			WithExec([]string{"ls", "/some-path/bar/some-file.txt"}).Stdout(ctx)
 
-		require.ErrorContains(t, err, "ls: /some-path/bar/some-file.txt: No such file or directory")
+		requireErrOut(t, err, "ls: /some-path/bar/some-file.txt: No such file or directory")
 	})
 
 	t.Run("env variable is expanded in WithExec", func(ctx context.Context, t *testctx.T) {
@@ -4746,7 +4669,7 @@ func (ContainerSuite) TestEnvExpand(ctx context.Context, t *testctx.T) {
 			Stdout(ctx)
 
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "ls: /mnt/bar: No such file or directory")
+		requireErrOut(t, err, "ls: /mnt/bar: No such file or directory")
 	})
 
 	t.Run("env variable is expanded in WithUnixSocket", func(ctx context.Context, t *testctx.T) {
@@ -4787,7 +4710,7 @@ func (ContainerSuite) TestEnvExpand(ctx context.Context, t *testctx.T) {
 			Stdout(ctx)
 
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "ls: /opt/bar.sock: No such file or directory")
+		requireErrOut(t, err, "ls: /opt/bar.sock: No such file or directory")
 	})
 
 	t.Run("env variable is expanded in WithMountedSecret", func(ctx context.Context, t *testctx.T) {
@@ -4834,7 +4757,7 @@ func (ContainerSuite) TestEnvExpand(ctx context.Context, t *testctx.T) {
 			WithExec([]string{"sh", "-c", "test ${GITEA_TOKEN} = \"password\""}, dagger.ContainerWithExecOpts{Expand: true}).
 			Sync(ctx)
 
-		require.ErrorContains(t, err, "expand cannot be used with secret env variable \"GITEA_TOKEN\"")
+		requireErrOut(t, err, "expand cannot be used with secret env variable \"GITEA_TOKEN\"")
 	})
 
 	t.Run("env variable is expanded in Export", func(ctx context.Context, t *testctx.T) {
@@ -4883,5 +4806,120 @@ func (ContainerSuite) TestExecInit(ctx context.Context, t *testctx.T) {
 			Stdout(ctx)
 		require.NoError(t, err)
 		require.Contains(t, out, "1 ps")
+	})
+}
+
+func (ContainerSuite) TestContainerAsService(ctx context.Context, t *testctx.T) {
+	c := connect(ctx, t)
+	maingo := `package main
+
+import (
+	"fmt"
+	"net/http"
+	"os"
+	"strings"
+)
+
+func main() {
+	http.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "args: %s", strings.Join(os.Args, ","))
+	})
+
+	fmt.Println(http.ListenAndServe(":8080", nil))
+}`
+	buildctr := c.Container().
+		From(golangImage).
+		WithWorkdir("/work").
+		WithNewFile("/work/main.go", maingo).
+		WithExec([]string{"go", "build", "-o=app", "main.go"})
+
+	binctr := c.Container().
+		From(alpineImage).
+		WithFile("/bin/app", buildctr.File("/work/app")).
+		WithEntrypoint([]string{"/bin/app", "via-entrypoint"}).
+		WithDefaultArgs([]string{"/bin/app", "via-default-args"}).
+		WithExposedPort(8080)
+
+	curlctr := c.Container().
+		From(alpineImage).
+		WithExec([]string{"sh", "-c", "apk add curl"})
+
+	t.Run("use default args and entrypoint by default", func(ctx context.Context, t *testctx.T) {
+		// create new container with default values
+		defaultBin := c.Container().Import(binctr.AsTarball())
+
+		output, err := curlctr.
+			WithServiceBinding("myapp", defaultBin.AsService()).
+			WithExec([]string{"sh", "-c", "curl -vXGET 'http://myapp:8080/hello'"}).
+			Stdout(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "args: /bin/app,via-entrypoint,/bin/app,via-default-args", output)
+	})
+
+	t.Run("can override default args", func(ctx context.Context, t *testctx.T) {
+		withargsOverwritten := binctr.
+			AsService(dagger.ContainerAsServiceOpts{Args: []string{"sh", "-c", "/bin/app via-service-override"}})
+
+		output, err := curlctr.
+			WithServiceBinding("myapp", withargsOverwritten).
+			WithExec([]string{"sh", "-c", "curl -vXGET 'http://myapp:8080/hello'"}).
+			Stdout(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "args: /bin/app,via-service-override", output)
+	})
+
+	t.Run("can enable entrypoint", func(ctx context.Context, t *testctx.T) {
+		withargsOverwritten := binctr.
+			AsService(dagger.ContainerAsServiceOpts{
+				UseEntrypoint: true,
+			})
+
+		output, err := curlctr.
+			WithServiceBinding("myapp", withargsOverwritten).
+			WithExec([]string{"sh", "-c", "curl -vXGET 'http://myapp:8080/hello'"}).
+			Stdout(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "args: /bin/app,via-entrypoint,/bin/app,via-default-args", output)
+	})
+
+	t.Run("use both args and entrypoint", func(ctx context.Context, t *testctx.T) {
+		withargsOverwritten := binctr.
+			AsService(dagger.ContainerAsServiceOpts{
+				UseEntrypoint: true,
+				Args:          []string{"/bin/app via-service-override"},
+			})
+
+		output, err := curlctr.
+			WithServiceBinding("myapp", withargsOverwritten).
+			WithExec([]string{"sh", "-c", "curl -vXGET 'http://myapp:8080/hello'"}).
+			Stdout(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "args: /bin/app,via-entrypoint,/bin/app via-service-override", output)
+	})
+
+	t.Run("error when no cmd and entrypoint is set", func(ctx context.Context, t *testctx.T) {
+		withargsOverwritten := binctr.
+			WithoutEntrypoint().
+			WithoutDefaultArgs().
+			AsService()
+
+		_, err := curlctr.
+			WithServiceBinding("myapp", withargsOverwritten).
+			WithExec([]string{"sh", "-c", "curl -vXGET 'http://myapp:8080/hello'"}).
+			Stdout(ctx)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), core.ErrNoSvcCommand.Error())
+	})
+	t.Run("default args no entrypoint", func(ctx context.Context, t *testctx.T) {
+		withargsOverwritten := binctr.
+			WithDefaultArgs([]string{"sh", "-c", "/bin/app via-override-args"}).
+			AsService()
+
+		output, err := curlctr.
+			WithServiceBinding("myapp", withargsOverwritten).
+			WithExec([]string{"sh", "-c", "curl -vXGET 'http://myapp:8080/hello'"}).
+			Stdout(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "args: /bin/app,via-override-args", output)
 	})
 }

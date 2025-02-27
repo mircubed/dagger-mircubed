@@ -2,12 +2,11 @@ package core
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
-	"github.com/dagger/dagger/testctx"
+	"github.com/dagger/testctx"
 	"github.com/moby/buildkit/identity"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,7 +18,7 @@ import (
 type PlatformSuite struct{}
 
 func TestPlatform(t *testing.T) {
-	testctx.Run(testCtx, t, PlatformSuite{}, Middleware()...)
+	testctx.New(t, Middleware()...).RunTests(PlatformSuite{})
 }
 
 var platformToUname = map[dagger.Platform]string{
@@ -164,26 +163,7 @@ func (PlatformSuite) TestCacheMounts(ctx context.Context, t *testctx.T) {
 
 	cache := c.CacheVolume("test-platform-cache-mount")
 
-	// ensure the cache mount doesn't get pruned in the middle of the test by having a container
-	// run throughout with the cache mounted
-	ctx, cancel := context.WithCancelCause(ctx)
-	cancelErr := errors.New("test done")
-	t.Cleanup(func() {
-		cancel(cancelErr)
-	})
-	defer cancel(cancelErr)
-	var eg errgroup.Group
-	eg.Go(func() error {
-		_, err := c.Container().
-			From(alpineImage).
-			WithMountedCache("/cache", cache).
-			WithExec([]string{"sh", "-c", "sleep 9999"}).
-			Sync(ctx)
-		if errors.Is(err, cancelErr) {
-			return nil
-		}
-		return err
-	})
+	wait := preventCacheMountPrune(ctx, t, c, cache)
 
 	// make sure cache mounts are inherently platform-agnostic
 	cmds := make([]string, 0, len(platformToUname))
@@ -207,15 +187,14 @@ func (PlatformSuite) TestCacheMounts(ctx context.Context, t *testctx.T) {
 		Sync(ctx)
 	require.NoError(t, err)
 
-	cancel(cancelErr)
-	require.NoError(t, eg.Wait())
+	require.NoError(t, wait())
 }
 
 func (PlatformSuite) TestInvalid(ctx context.Context, t *testctx.T) {
 	c := connect(ctx, t)
 
 	_, err := c.Container(dagger.ContainerOpts{Platform: "windows98"}).ID(ctx)
-	require.ErrorContains(t, err, "unknown operating system or architecture")
+	requireErrOut(t, err, "unknown operating system or architecture")
 }
 
 func (PlatformSuite) TestWindows(ctx context.Context, t *testctx.T) {

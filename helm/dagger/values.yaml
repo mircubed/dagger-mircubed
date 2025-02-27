@@ -14,7 +14,15 @@ engine:
   #     mirrors = ["mirror.gcr.io"]
   #   [log]
   #     format = "json"
+
+  annotations: {}
+
   labels: {}
+
+  ### `DaemonSet` guarantees a single Engine per K8s node (default behaviour)
+  #
+  # Set to `StatefulSet` for running multiple Engines per K8s node
+  kind: DaemonSet
 
   ### Customize Dagger Engine start args
   #
@@ -37,6 +45,12 @@ engine:
     #
     # ref: registry.dagger.io/engine:main
     pullPolicy: IfNotPresent
+
+  ### Image pull secret to use for registry authentication.
+  imagePullSecrets: []
+  # imagePullSecrets:
+  #   - name: image-pull-secret
+
 
   ### Set taints & tolerations for this workload
   #

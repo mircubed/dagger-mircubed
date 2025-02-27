@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path"
 	"strings"
 
 	"github.com/containerd/platforms"
 	bkcache "github.com/moby/buildkit/cache"
 	bkclient "github.com/moby/buildkit/client"
+	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/exporter/containerimage/exptypes"
 	bkgw "github.com/moby/buildkit/frontend/gateway/client"
 	bksolverpb "github.com/moby/buildkit/solver/pb"
@@ -31,7 +31,7 @@ func (c *Client) PublishContainerImage(
 	inputByPlatform map[string]ContainerExport,
 	opts map[string]string, // TODO: make this an actual type, this leaks too much untyped buildkit api
 ) (map[string]string, error) {
-	ctx = buildkitTelemetryContext(ctx)
+	ctx = buildkitTelemetryProvider(ctx)
 	ctx, cancel, err := c.withClientCloseCancel(ctx)
 	if err != nil {
 		return nil, err
@@ -69,7 +69,7 @@ func (c *Client) ExportContainerImage(
 	destPath string,
 	opts map[string]string, // TODO: make this an actual type, this leaks too much untyped buildkit api
 ) (map[string]string, error) {
-	ctx = buildkitTelemetryContext(ctx)
+	ctx = buildkitTelemetryProvider(ctx)
 	ctx, cancel, err := c.withClientCloseCancel(ctx)
 	if err != nil {
 		return nil, err
@@ -124,11 +124,12 @@ func (c *Client) ExportContainerImage(
 func (c *Client) ContainerImageToTarball(
 	ctx context.Context,
 	engineHostPlatform specs.Platform,
+	tmpDir string,
 	fileName string,
 	inputByPlatform map[string]ContainerExport,
 	opts map[string]string,
 ) (*bksolverpb.Definition, error) {
-	ctx = buildkitTelemetryContext(ctx)
+	ctx = buildkitTelemetryProvider(ctx)
 	ctx, cancel, err := c.withClientCloseCancel(ctx)
 	if err != nil {
 		return nil, err
@@ -155,11 +156,6 @@ func (c *Client) ContainerImageToTarball(
 		return nil, fmt.Errorf("failed to resolve exporter: %w", err)
 	}
 
-	tmpDir, err := os.MkdirTemp("", "dagger-tarball")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create temp dir for tarball export: %w", err)
-	}
-	defer os.RemoveAll(tmpDir)
 	destPath := path.Join(tmpDir, fileName)
 
 	ctx = engine.LocalExportOpts{
@@ -175,11 +171,18 @@ func (c *Client) ContainerImageToTarball(
 		defer descRef.Release()
 	}
 
-	pbDef, _, err := c.EngineContainerLocalImport(ctx, engineHostPlatform, tmpDir, nil, []string{fileName})
+	localDef, err := llb.Local(tmpDir,
+		llb.SessionID(c.ID()), // see engine/server/bk_session.go, we have a special session that points to our engine host
+		llb.SharedKeyHint(c.ID()),
+		llb.IncludePatterns([]string{fileName}),
+		llb.WithCustomName(fmt.Sprintf("container-image-to-tarball-%s", fileName)),
+		WithTracePropagation(ctx),
+	).Marshal(ctx, llb.Platform(engineHostPlatform))
 	if err != nil {
-		return nil, fmt.Errorf("failed to import container tarball from engine container filesystem: %w", err)
+		return nil, fmt.Errorf("failed to create llb definition for container image to tarball: %w", err)
 	}
-	return pbDef, nil
+
+	return localDef.ToPB(), nil
 }
 
 func (c *Client) getContainerResult(

@@ -18,9 +18,33 @@ class Container extends Client\AbstractObject implements Client\IdAble
      *
      * Be sure to set any exposed ports before this conversion.
      */
-    public function asService(): Service
-    {
+    public function asService(
+        ?array $args = null,
+        ?bool $useEntrypoint = false,
+        ?bool $experimentalPrivilegedNesting = false,
+        ?bool $insecureRootCapabilities = false,
+        ?bool $expand = false,
+        ?bool $noInit = false,
+    ): Service {
         $innerQueryBuilder = new \Dagger\Client\QueryBuilder('asService');
+        if (null !== $args) {
+        $innerQueryBuilder->setArgument('args', $args);
+        }
+        if (null !== $useEntrypoint) {
+        $innerQueryBuilder->setArgument('useEntrypoint', $useEntrypoint);
+        }
+        if (null !== $experimentalPrivilegedNesting) {
+        $innerQueryBuilder->setArgument('experimentalPrivilegedNesting', $experimentalPrivilegedNesting);
+        }
+        if (null !== $insecureRootCapabilities) {
+        $innerQueryBuilder->setArgument('insecureRootCapabilities', $insecureRootCapabilities);
+        }
+        if (null !== $expand) {
+        $innerQueryBuilder->setArgument('expand', $expand);
+        }
+        if (null !== $noInit) {
+        $innerQueryBuilder->setArgument('noInit', $noInit);
+        }
         return new \Dagger\Service($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
     }
 
@@ -390,14 +414,40 @@ class Container extends Client\AbstractObject implements Client\IdAble
      *
      * Be sure to set any exposed ports before calling this api.
      */
-    public function up(?array $ports = null, ?bool $random = false): void
-    {
+    public function up(
+        ?array $ports = null,
+        ?bool $random = false,
+        ?array $args = null,
+        ?bool $useEntrypoint = false,
+        ?bool $experimentalPrivilegedNesting = false,
+        ?bool $insecureRootCapabilities = false,
+        ?bool $expand = false,
+        ?bool $noInit = false,
+    ): void {
         $leafQueryBuilder = new \Dagger\Client\QueryBuilder('up');
         if (null !== $ports) {
         $leafQueryBuilder->setArgument('ports', $ports);
         }
         if (null !== $random) {
         $leafQueryBuilder->setArgument('random', $random);
+        }
+        if (null !== $args) {
+        $leafQueryBuilder->setArgument('args', $args);
+        }
+        if (null !== $useEntrypoint) {
+        $leafQueryBuilder->setArgument('useEntrypoint', $useEntrypoint);
+        }
+        if (null !== $experimentalPrivilegedNesting) {
+        $leafQueryBuilder->setArgument('experimentalPrivilegedNesting', $experimentalPrivilegedNesting);
+        }
+        if (null !== $insecureRootCapabilities) {
+        $leafQueryBuilder->setArgument('insecureRootCapabilities', $insecureRootCapabilities);
+        }
+        if (null !== $expand) {
+        $leafQueryBuilder->setArgument('expand', $expand);
+        }
+        if (null !== $noInit) {
+        $leafQueryBuilder->setArgument('noInit', $noInit);
         }
         $this->queryLeaf($leafQueryBuilder, 'up');
     }

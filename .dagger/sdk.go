@@ -3,14 +3,15 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
-	"net/url"
 	"strings"
+
+	"github.com/moby/buildkit/identity"
 
 	"github.com/dagger/dagger/.dagger/build"
 	"github.com/dagger/dagger/.dagger/consts"
 	"github.com/dagger/dagger/.dagger/internal/dagger"
-	"github.com/moby/buildkit/identity"
 )
 
 // A dev environment for the official Dagger SDKs
@@ -30,6 +31,8 @@ type SDK struct {
 	PHP *PHPSDK
 	// Develop the Dagger Java SDK (experimental)
 	Java *JavaSDK
+	// Develop the Dagger Dotnet SDK (experimental)
+	Dotnet *DotnetSDK
 }
 
 func (sdk *SDK) All() *AllSDK {
@@ -54,8 +57,8 @@ func (sdk *SDK) allSDKs() []sdkBase {
 		sdk.Elixir,
 		sdk.Rust,
 		sdk.PHP,
-		// java isn't properly integrated to our release process yet
-		// sdk.Java,
+		sdk.Java,
+		sdk.Dotnet,
 	}
 }
 
@@ -65,10 +68,7 @@ func (dev *DaggerDev) installer(ctx context.Context, name string) (func(*dagger.
 		return nil, err
 	}
 
-	cliBinary, err := dev.CLI().Binary(ctx, "")
-	if err != nil {
-		return nil, err
-	}
+	cliBinary := dag.DaggerCli().Binary()
 	cliBinaryPath := "/.dagger-cli"
 
 	return func(ctr *dagger.Container) *dagger.Container {
@@ -179,10 +179,13 @@ func gitPublish(ctx context.Context, git *dagger.VersionGit, opts gitPublishOpts
 			WithExec([]string{"git", "rev-parse", "HEAD"}).
 			Stdout(ctx)
 		if err != nil {
-			if strings.Contains(err.Error(), "invalid reference: "+opts.destTag) {
-				// this is a ref that only exists in the source, and not in the
-				// dest, so no overwriting will occur
-				return nil
+			var execErr *dagger.ExecError
+			if errors.As(err, &execErr) {
+				if strings.Contains(execErr.Stderr, "invalid reference: "+opts.destTag) {
+					// this is a ref that only exists in the source, and not in the
+					// dest, so no overwriting will occur
+					return nil
+				}
 			}
 			return err
 		}
@@ -196,71 +199,4 @@ func gitPublish(ctx context.Context, git *dagger.VersionGit, opts gitPublishOpts
 
 	_, err := result.Sync(ctx)
 	return err
-}
-
-type githubReleaseOpts struct {
-	tag    string
-	target string
-	notes  *dagger.File
-
-	gitRepo     string
-	githubToken *dagger.Secret
-
-	dryRun bool
-}
-
-func githubRelease(ctx context.Context, git *dagger.VersionGit, opts githubReleaseOpts) error {
-	u, err := url.Parse(opts.gitRepo)
-	if err != nil {
-		return err
-	}
-	if u.Host != "github.com" {
-		return fmt.Errorf("git repo must be on github.com")
-	}
-	githubRepo := strings.TrimPrefix(strings.TrimSuffix(u.Path, ".git"), "/")
-
-	commit, err := git.Commit(opts.target).Commit(ctx)
-	if err != nil {
-		return err
-	}
-
-	if opts.dryRun {
-		// sanity check target commit is in target repo
-		_, err = dag.
-			Git(fmt.Sprintf("https://github.com/%s", githubRepo)).
-			Commit(commit).
-			Tree().
-			Sync(ctx)
-		if err != nil {
-			return err
-		}
-
-		// sanity check notes file exists
-		notes, err := opts.notes.Contents(ctx)
-		if err != nil {
-			return err
-		}
-		fmt.Println(notes)
-
-		return nil
-	}
-
-	gh := dag.Gh(dagger.GhOpts{
-		Repo:  githubRepo,
-		Token: opts.githubToken,
-	})
-	return gh.Release().Create(
-		ctx,
-		opts.tag,
-		opts.tag,
-		dagger.GhReleaseCreateOpts{
-			Target:    commit,
-			NotesFile: opts.notes,
-			Latest:    dagger.GhLatestFalse,
-		},
-	)
-}
-
-func changeNotes(src *dagger.Directory, path string, version string) *dagger.File {
-	return src.File(fmt.Sprintf("%s/.changes/%s.md", path, version))
 }

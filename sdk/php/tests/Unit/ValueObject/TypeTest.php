@@ -26,14 +26,6 @@ use ReflectionType;
 class TypeTest extends TestCase
 {
     #[Test]
-    public function itCannotSupportFloat(): void
-    {
-        self::expectException(Dagger\Exception\UnsupportedType::class);
-
-        new Type('float');
-    }
-
-    #[Test]
     public function itShouldNotBeConstructedForArrays(): void
     {
         self::expectException(\DomainException::class);
@@ -106,6 +98,16 @@ class TypeTest extends TestCase
         yield 'nullable bool' =>  [
             new Type('bool', true),
             $reflectReturnType(fn(): ?bool => false),
+        ];
+
+        yield 'float' =>  [
+            new Type('float', false),
+            $reflectReturnType(fn(): float => 3.14),
+        ];
+
+        yield 'nullable float' =>  [
+            new Type('float', true),
+            $reflectReturnType(fn(): ?float => 3.14),
         ];
 
         yield 'int' =>  [
@@ -236,7 +238,6 @@ class TypeTest extends TestCase
             Dagger\FunctionCall::class,
             Dagger\FunctionCallArgValue::class,
             Dagger\GeneratedCode::class,
-            Dagger\GitModuleSource::class,
             Dagger\GitRef::class,
             Dagger\GitRepository::class,
 //            Dagger\Host::class, //Host has deprecated code
@@ -244,11 +245,8 @@ class TypeTest extends TestCase
             Dagger\InterfaceTypeDef::class,
             Dagger\Label::class,
             Dagger\ListTypeDef::class,
-            Dagger\LocalModuleSource::class,
             Dagger\Module::class,
-            Dagger\ModuleDependency::class,
             Dagger\ModuleSource::class,
-            Dagger\ModuleSourceView::class,
             Dagger\ObjectTypeDef::class,
             Dagger\Port::class,
             Dagger\ScalarTypeDef::class,

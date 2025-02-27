@@ -73,7 +73,7 @@ Install the Java module from the Daggerverse:
 dagger install github.com/jcsirot/daggerverse/java@c591e9e0b99def2fc8a67bb090fca5cd06cf6a1d
 ```
 
-Update the generated `dagger/src/main/__init__.py` file with the following code:
+Update the generated `dagger/src/my_module/main.py` file with the following code:
 
 ```python file=./snippets/java/python/main.py
 ```
@@ -114,7 +114,7 @@ dagger call publish \
   --version=0.1 \
   --registry-address=docker.io \
   --registry-username=DOCKER-HUB-USERNAME \
-  --registry-password=env:REGISTRY_PASSWORD \
+  --registry-password=env://REGISTRY_PASSWORD \
   --image-name=my-java-app
 ```
 

@@ -27,6 +27,7 @@ linters:
     - unparam
     - whitespace
     - gomodguard
+    - nilerr
 
 issues:
   exclude-rules:
@@ -63,6 +64,8 @@ linters-settings:
 
   govet:
     enable:
+    disable:
+      - lostcancel
 
   errorlint:
     errorf: true

@@ -9,7 +9,6 @@ import (
 	"github.com/dagger/dagger/engine/distconsts"
 	"github.com/moby/buildkit/identity"
 	"go.opentelemetry.io/otel/codes"
-	"golang.org/x/mod/semver"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/dagger/dagger/.dagger/build"
@@ -19,44 +18,37 @@ import (
 type Distro string
 
 const (
-	DistroAlpine = "alpine"
-	DistroWolfi  = "wolfi"
-	DistroUbuntu = "ubuntu"
+	DistroAlpine Distro = "alpine"
+	DistroWolfi  Distro = "wolfi"
+	DistroUbuntu Distro = "ubuntu"
 )
 
-type Engine struct {
+type DaggerEngine struct {
 	Dagger *DaggerDev // +private
 
-	Args   []string // +private
-	Config []string // +private
-
-	Trace bool // +private
+	BuildkitConfig []string // +private
+	LogLevel       string   // +private
 
 	Race bool // +private
 }
 
-func (e *Engine) WithConfig(key, value string) *Engine {
-	e.Config = append(e.Config, key+"="+value)
+func (e *DaggerEngine) WithBuildkitConfig(key, value string) *DaggerEngine {
+	e.BuildkitConfig = append(e.BuildkitConfig, key+"="+value)
 	return e
 }
 
-func (e *Engine) WithArg(key, value string) *Engine {
-	e.Args = append(e.Args, key+"="+value)
-	return e
-}
-
-func (e *Engine) WithRace() *Engine {
+func (e *DaggerEngine) WithRace() *DaggerEngine {
 	e.Race = true
 	return e
 }
 
-func (e *Engine) WithTrace() *Engine {
-	e.Trace = true
+func (e *DaggerEngine) WithLogLevel(level string) *DaggerEngine {
+	e.LogLevel = level
 	return e
 }
 
 // Build the engine container
-func (e *Engine) Container(
+func (e *DaggerEngine) Container(
 	ctx context.Context,
 
 	// +optional
@@ -66,11 +58,15 @@ func (e *Engine) Container(
 	// +optional
 	gpuSupport bool,
 ) (*dagger.Container, error) {
-	cfg, err := generateConfig(e.Trace, e.Config)
+	cfg, err := generateConfig(e.LogLevel)
 	if err != nil {
 		return nil, err
 	}
-	entrypoint, err := generateEntrypoint(e.Args)
+	bkcfg, err := generateBKConfig(e.BuildkitConfig)
+	if err != nil {
+		return nil, err
+	}
+	entrypoint, err := generateEntrypoint()
 	if err != nil {
 		return nil, err
 	}
@@ -107,14 +103,14 @@ func (e *Engine) Container(
 		return nil, err
 	}
 	ctr = ctr.
-		WithFile(engineTomlPath, cfg).
+		WithFile(engineJSONPath, cfg).
+		WithFile(engineTOMLPath, bkcfg).
 		WithFile(engineEntrypointPath, entrypoint).
 		WithEntrypoint([]string{filepath.Base(engineEntrypointPath)})
 
-	cli, err := builder.CLI(ctx)
-	if err != nil {
-		return nil, err
-	}
+	cli := dag.DaggerCli().Binary(dagger.DaggerCliBinaryOpts{
+		Platform: platform,
+	})
 	ctr = ctr.
 		WithFile(cliPath, cli).
 		WithEnvVariable("_EXPERIMENTAL_DAGGER_RUNNER_HOST", "unix://"+engineUnixSocketPath)
@@ -123,7 +119,7 @@ func (e *Engine) Container(
 }
 
 // Create a test engine service
-func (e *Engine) Service(
+func (e *DaggerEngine) Service(
 	ctx context.Context,
 	name string,
 	// +optional
@@ -149,10 +145,6 @@ func (e *Engine) Service(
 		}
 	}
 
-	e = e.
-		WithConfig("grpc", `address=["unix:///var/run/buildkit/buildkitd.sock", "tcp://0.0.0.0:1234"]`).
-		WithArg(`network-name`, `dagger-dev`).
-		WithArg(`network-cidr`, `10.88.0.0/16`)
 	devEngine, err := e.Container(ctx, "", image, gpuSupport)
 	if err != nil {
 		return nil, err
@@ -163,36 +155,45 @@ func (e *Engine) Service(
 			// only one engine can run off it's local state dir at a time; Private means that we will attempt to re-use
 			// these cache volumes if they are not already locked to another running engine but otherwise will create a new
 			// one, which gets us best-effort cache re-use for these nested engine services
-			Sharing: dagger.Private,
-		}).
-		WithExec(nil, dagger.ContainerWithExecOpts{
-			UseEntrypoint:            true,
-			InsecureRootCapabilities: true,
+			Sharing: dagger.CacheSharingModePrivate,
 		})
 
-	return devEngine.AsService(), nil
+	return devEngine.AsService(dagger.ContainerAsServiceOpts{
+		Args: []string{
+			"--addr", "tcp://0.0.0.0:1234",
+			"--network-name", "dagger-dev",
+			"--network-cidr", "10.88.0.0/16",
+		},
+		UseEntrypoint:            true,
+		InsecureRootCapabilities: true,
+	}), nil
 }
 
 // Lint the engine
-func (e *Engine) Lint(
+func (e *DaggerEngine) Lint(
 	ctx context.Context,
+	pkgs []string, // +optional
 ) error {
-	eg, ctx := errgroup.WithContext(ctx)
+	eg := errgroup.Group{}
 	eg.Go(func() error {
-		allPkgs, err := e.Dagger.containing(ctx, "go.mod")
-		if err != nil {
-			return err
-		}
+		if len(pkgs) == 0 {
+			allPkgs, err := e.Dagger.containing(ctx, "go.mod")
+			if err != nil {
+				return err
+			}
 
-		var pkgs []string
-		for _, pkg := range allPkgs {
-			if strings.HasPrefix(pkg, "docs/") {
-				continue
+			for _, pkg := range allPkgs {
+				if strings.HasPrefix(pkg, "docs/") {
+					continue
+				}
+				if strings.HasPrefix(pkg, "core/integration/") {
+					continue
+				}
+				if strings.HasPrefix(pkg, "dagql/idtui/viztest/broken/") {
+					continue
+				}
+				pkgs = append(pkgs, pkg)
 			}
-			if strings.HasPrefix(pkg, "core/integration/") {
-				continue
-			}
-			pkgs = append(pkgs, pkg)
 		}
 
 		return dag.
@@ -208,9 +209,10 @@ func (e *Engine) Lint(
 
 // Generate any engine-related files
 // Note: this is codegen of the 'go generate' variety, not 'dagger develop'
-func (e *Engine) Generate() *dagger.Directory {
+func (e *DaggerEngine) Generate() *dagger.Directory {
 	generated := e.Dagger.Go().Env().
 		WithoutDirectory("sdk") // sdk generation happens separately
+	original := generated.Directory(".")
 
 	// protobuf dependencies
 	generated = generated.
@@ -221,13 +223,13 @@ func (e *Engine) Generate() *dagger.Directory {
 	generated = generated.
 		WithExec([]string{"go", "generate", "-v", "./..."})
 
-	return generated.Directory(".")
+	return original.Diff(generated.Directory("."))
 }
 
 // Lint any generated engine-related files
-func (e *Engine) LintGenerate(ctx context.Context) error {
+func (e *DaggerEngine) LintGenerate(ctx context.Context) error {
 	before := e.Dagger.Go().Env().WithoutDirectory("sdk").Directory(".")
-	after := e.Generate()
+	after := before.WithDirectory(".", e.Generate())
 	return dag.Dirdiff().AssertEqual(ctx, before, after, []string{"."})
 }
 
@@ -267,10 +269,11 @@ var targets = []struct {
 }
 
 // Publish all engine images to a registry
-func (e *Engine) Publish(
+func (e *DaggerEngine) Publish(
 	ctx context.Context,
 
 	// Image target to push to
+	// +default="ghcr.io/dagger/engine"
 	image string,
 	// List of tags to use
 	tag []string,
@@ -279,26 +282,17 @@ func (e *Engine) Publish(
 	dryRun bool,
 
 	// +optional
-	registry *string,
-	// +optional
 	registryUsername *string,
 	// +optional
 	registryPassword *dagger.Secret,
 ) error {
-	for _, t := range tag {
-		if semver.IsValid(t) {
-			tag = append(tag, "latest")
-			break
-		}
-	}
-
 	// collect all the targets that we are trying to build together, along with
 	// where they need to go to
 	targetResults := make([]struct {
 		Platforms []*dagger.Container
 		Tags      []string
 	}, len(targets))
-	eg, egCtx := errgroup.WithContext(ctx)
+	eg := errgroup.Group{}
 	for i, target := range targets {
 		// determine the target tags
 		for _, tag := range tag {
@@ -308,7 +302,7 @@ func (e *Engine) Publish(
 		// build all the target platforms
 		targetResults[i].Platforms = make([]*dagger.Container, len(target.Platforms))
 		for j, platform := range target.Platforms {
-			egCtx, span := Tracer().Start(egCtx, fmt.Sprintf("building %s [%s]", target.Name, platform))
+			egCtx, span := Tracer().Start(ctx, fmt.Sprintf("building %s [%s]", target.Name, platform))
 			eg.Go(func() (rerr error) {
 				defer func() {
 					if rerr != nil {
@@ -341,8 +335,9 @@ func (e *Engine) Publish(
 
 	// push all the targets
 	ctr := dag.Container()
-	if registry != nil && registryUsername != nil && registryPassword != nil {
-		ctr = ctr.WithRegistryAuth(*registry, *registryUsername, registryPassword)
+	if registryUsername != nil && registryPassword != nil {
+		registry, _, _ := strings.Cut(image, "/")
+		ctr = ctr.WithRegistryAuth(registry, *registryUsername, registryPassword)
 	}
 	for i, target := range targets {
 		result := targetResults[i]
@@ -375,7 +370,7 @@ func (e *Engine) Publish(
 	return nil
 }
 
-func (e *Engine) Scan(ctx context.Context) error {
+func (e *DaggerEngine) Scan(ctx context.Context) error {
 	ignoreFiles := dag.Directory().WithDirectory("/", e.Dagger.Source(), dagger.DirectoryWithDirectoryOpts{
 		Include: []string{
 			".trivyignore",
@@ -405,7 +400,7 @@ func (e *Engine) Scan(ctx context.Context) error {
 		commonArgs = append(commonArgs, "--ignorefile=/mnt/ignores/"+ignoreFileNames[0])
 	}
 
-	eg, ctx := errgroup.WithContext(ctx)
+	eg := errgroup.Group{}
 
 	eg.Go(func() error {
 		// scan the source code
@@ -420,8 +415,11 @@ func (e *Engine) Scan(ctx context.Context) error {
 
 		// HACK: filter out directories that present occasional issues
 		src := e.Dagger.Source()
-		src = src.WithoutDirectory("docs")
-		src = src.WithoutDirectory("sdk/rust/crates/dagger-sdk/examples")
+		src = src.
+			WithoutDirectory("docs").
+			WithoutDirectory("sdk/rust/crates/dagger-sdk/examples").
+			WithoutDirectory("core/integration/testdata").
+			WithoutDirectory("dagql/idtui/viztest")
 
 		_, err := ctr.
 			WithMountedDirectory("/mnt/src", src).

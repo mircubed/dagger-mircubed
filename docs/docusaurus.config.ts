@@ -1,8 +1,10 @@
 import type { Config } from "@docusaurus/types";
 import type * as Preset from "@docusaurus/preset-classic";
-import path from "path";
 import { themes as prismThemes } from "prism-react-renderer";
 import remarkCodeImport from "remark-code-import";
+import remarkTemplate from "./plugins/remark-template";
+
+import { daggerVersion } from './current_docs/partials/version';
 
 const config: Config = {
   title: "Dagger",
@@ -32,6 +34,12 @@ const config: Config = {
   markdown: {
     mermaid: true,
   },
+  scripts: [
+    {
+      src: '/js/commonroom.js',
+      async: true,
+    },
+  ],
   presets: [
     [
       "classic",
@@ -44,6 +52,7 @@ const config: Config = {
           editUrl: "https://github.com/dagger/dagger/edit/main/docs",
           remarkPlugins: [
             [remarkCodeImport, { allowImportingFromOutside: true }],
+            [remarkTemplate, { version: daggerVersion }],
           ],
         },
         blog: false,
@@ -82,9 +91,9 @@ const config: Config = {
         id: "current-generation",
         plugin: ["typedoc-plugin-markdown", "typedoc-plugin-frontmatter"],
         entryPoints: [
-          "../sdk/typescript/connect.ts",
-          "../sdk/typescript/api/client.gen.ts",
-          "../sdk/typescript/common/errors/index.ts",
+          "../sdk/typescript/src/connect.ts",
+          "../sdk/typescript/src/api/client.gen.ts",
+          "../sdk/typescript/src/common/errors/index.ts",
         ],
         tsconfig: "../sdk/typescript/tsconfig.json",
         out: "current_docs/reference/typescript/",
@@ -111,7 +120,7 @@ const config: Config = {
     sidebarCollapsed: false,
     metadata: [{ name: "og:image", content: "/img/favicon.png" }],
     prism: {
-      additionalLanguages: ["php", "rust", "elixir", "bash", "toml", "powershell"],
+      additionalLanguages: ["php", "rust", "elixir", "bash", "toml", "powershell", "java"],
       theme: prismThemes.dracula,
     },
     navbar: {

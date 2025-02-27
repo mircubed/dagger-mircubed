@@ -12,174 +12,93 @@ on:
       - ready_for_review
     paths:
       # run tests in a PR when an SDK is modified...
-      - ./sdk
+      - sdk
       # ...or when we are
-      - ./.github/workflows/engine-and-cli-publish.yml
+      - .github/workflows/publish.yml
 
 jobs:
   publish:
     if: ${{ github.repository == 'dagger/dagger' && github.event_name == 'push' }}
-    runs-on: dagger-g2-v0-13-7-16c
+    runs-on: dagger-g3-v0-16-1-16c
     steps:
       - uses: actions/checkout@v4
-      - name: "Publish Engine"
+      - name: "Publish"
         uses: ./.github/actions/call
         with:
+          module: ./releaser
           function: |-
-            engine \
             publish \
-            --tag="${{ github.ref_name }}" --tag="${{ github.sha }}" \
-            --image="$DAGGER_ENGINE_IMAGE" \
-            --registry="$DAGGER_ENGINE_IMAGE_REGISTRY" \
+            --tag="${{ github.ref_name }}" --commit="${{ github.sha }}" \
+            --registry-image="$DAGGER_ENGINE_IMAGE" \
             --registry-username="$DAGGER_ENGINE_IMAGE_USERNAME" \
-            --registry-password=env:DAGGER_ENGINE_IMAGE_PASSWORD
-        env:
-          DAGGER_ENGINE_IMAGE: ${{ vars.RELEASE_DAGGER_ENGINE_IMAGE }}
-          DAGGER_ENGINE_IMAGE_REGISTRY: ghcr.io
-          DAGGER_ENGINE_IMAGE_USERNAME: ${{ github.actor }}
-          DAGGER_ENGINE_IMAGE_PASSWORD: ${{ secrets.RELEASE_DAGGER_CI_TOKEN }}
-      - name: "Publish CLI"
-        uses: ./.github/actions/call
-        with:
-          function: |-
-            cli \
-            publish \
-            --github-org-name="$GH_ORG_NAME" \
-            --github-token=env:GITHUB_TOKEN \
+            --registry-password=env:DAGGER_ENGINE_IMAGE_PASSWORD \
             --goreleaser-key=env:GORELEASER_KEY \
+            --github-token=env:GITHUB_TOKEN \
+            --github-org-name="$GITHUB_ORG_NAME" \
+            --netlify-token=env:NETLIFY_TOKEN \
+            --pypi-token=env:PYPI_TOKEN \
+            --pypi-repo="$PYPI_REPO" \
+            --npm-token=env:NPM_TOKEN \
+            --hex-apikey=env:HEX_API_KEY \
+            --cargo-registry-token=env:CARGO_REGISTRY_TOKEN \
             --aws-access-key-id=env:AWS_ACCESS_KEY_ID \
             --aws-secret-access-key=env:AWS_SECRET_ACCESS_KEY \
-            --aws-region=env:AWS_REGION \
-            --aws-bucket=env:AWS_BUCKET \
-            --artefacts-fqdn="$ARTEFACTS_FQDN"
+            --aws-region="$AWS_REGION" \
+            --aws-bucket="$AWS_BUCKET" \
+            --aws-cloudfront-distribution="$AWS_CLOUDFRONT_DISTRIBUTION" \
+            --artefacts-fqdn="$ARTEFACTS_FQDN" \
+            --discord-webhook=env:DISCORD_WEBHOOK \
+            markdown
+          redirect: /tmp/release-report
         env:
-          GH_ORG_NAME: ${{ vars.GH_ORG_NAME }}
+          DAGGER_ENGINE_IMAGE: ${{ vars.RELEASE_DAGGER_ENGINE_IMAGE }}
+          DAGGER_ENGINE_IMAGE_USERNAME: ${{ github.actor }}
+          DAGGER_ENGINE_IMAGE_PASSWORD: ${{ secrets.RELEASE_DAGGER_CI_TOKEN }}
+
+          GORELEASER_KEY: ${{ secrets.GORELEASER_PRO_LICENSE_KEY }}
+
           GITHUB_TOKEN: ${{ secrets.RELEASE_DAGGER_CI_TOKEN }}
+          GITHUB_ORG_NAME: ${{ vars.GH_ORG_NAME }}
+
+          NETLIFY_TOKEN: ${{ secrets.NETLIFY_TOKEN }}
+          PYPI_TOKEN: ${{ secrets.RELEASE_PYPI_TOKEN }}
+          PYPI_REPO: ${{ secrets.RELEASE_PYPI_REPO }}
+          NPM_TOKEN: ${{ secrets.RELEASE_NPM_TOKEN }}
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
           AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: ${{ secrets.RELEASE_AWS_REGION }}
-          AWS_BUCKET: ${{ secrets.RELEASE_AWS_BUCKET }}
+          AWS_REGION: ${{ vars.RELEASE_AWS_REGION }}
+          AWS_BUCKET: ${{ vars.RELEASE_AWS_BUCKET }}
+          AWS_CLOUDFRONT_DISTRIBUTION: ${{ vars.RELEASE_AWS_CLOUDFRONT_DISTRIBUTION }}
           ARTEFACTS_FQDN: ${{ vars.RELEASE_FQDN }}
-          GORELEASER_KEY: ${{ secrets.GORELEASER_PRO_LICENSE_KEY }}
-      - name: "Notify"
-        uses: ./.github/actions/notify
-        if: github.ref_name != 'main'
-        with:
-          message: "🚙 Engine + 🚗 CLI: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
-          discord-webhook: ${{ secrets.NEW_RELEASE_DISCORD_WEBHOOK }}
 
-  publish-sdk-go:
-    needs: publish
-    runs-on: "${{ github.repository == 'dagger/dagger' && 'dagger-g2-v0-13-7-4c' || 'ubuntu-latest' }}"
-    steps:
-      - uses: actions/checkout@v4
-      - name: "go publish"
-        uses: ./.github/actions/call
-        env:
-          RELEASE_DAGGER_CI_TOKEN: ${{ secrets.RELEASE_DAGGER_CI_TOKEN }}
-        with:
-          function: sdk go publish --tag="${{ github.ref_name }}" --github-token=env:RELEASE_DAGGER_CI_TOKEN
-      - name: "notify"
-        if: github.ref_name != 'main'
-        uses: ./.github/actions/notify
-        with:
-          message: "🐹 Go SDK: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
-          discord-webhook: ${{ secrets.NEW_RELEASE_DISCORD_WEBHOOK }}
+          DISCORD_WEBHOOK: ${{ secrets.NEW_RELEASE_DISCORD_WEBHOOK }}
+      - name: "Report"
+        if: always()
+        run: |
+          REPORT="/tmp/release-report"
+          cat $REPORT | tee $GITHUB_STEP_SUMMARY
+          if grep -q '\[!CAUTION\]' "$REPORT"; then
+            # workaround for https://github.com/dagger/dagger/issues/8421
+            exit 1
+          fi
 
-  publish-sdk-php:
-    needs: publish
-    runs-on: "${{ github.repository == 'dagger/dagger' && 'dagger-g2-v0-13-7-4c' || 'ubuntu-latest' }}"
-    steps:
-      - uses: actions/checkout@v4
-      - name: "php publish"
-        uses: ./.github/actions/call
-        env:
-          RELEASE_DAGGER_CI_TOKEN: ${{ secrets.RELEASE_DAGGER_CI_TOKEN }}
-        with:
-          function: sdk php publish --tag="${{ github.ref_name }}" --github-token=env:RELEASE_DAGGER_CI_TOKEN
-      - name: "notify"
-        if: github.ref_name != 'main'
-        uses: ./.github/actions/notify
-        with:
-          message: "🐘 PHP SDK: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
-          discord-webhook: ${{ secrets.NEW_RELEASE_DISCORD_WEBHOOK }}
-
-  publish-sdk-python:
+  # TODO: move this into Publish above
+  daggerverse-bump-dagger:
     needs: publish
     if: github.ref_name != 'main'
-    runs-on: "${{ github.repository == 'dagger/dagger' && 'dagger-g2-v0-13-7-4c' || 'ubuntu-latest' }}"
+    runs-on: dagger-g3-v0-16-1-4c
     steps:
       - uses: actions/checkout@v4
-      - name: "python publish"
-        uses: ./.github/actions/call
-        env:
-          RELEASE_DAGGER_CI_TOKEN: ${{ secrets.RELEASE_DAGGER_CI_TOKEN }}
-          RELEASE_PYPI_TOKEN: ${{ secrets.RELEASE_PYPI_TOKEN }}
-          RELEASE_PYPI_REPO: ${{ secrets.RELEASE_PYPI_REPO }}
-        with:
-          function: sdk python publish --tag="${{ github.ref_name }}" --github-token=env:RELEASE_DAGGER_CI_TOKEN --pypi-repo="$RELEASE_PYPI_REPO" --pypi-token=env:RELEASE_PYPI_TOKEN
-      - name: "notify"
-        uses: ./.github/actions/notify
-        with:
-          message: "🐍 Python SDK: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
-          discord-webhook: ${{ secrets.NEW_RELEASE_DISCORD_WEBHOOK }}
-
-  publish-sdk-typescript:
-    needs: publish
-    if: github.ref_name != 'main'
-    runs-on: "${{ github.repository == 'dagger/dagger' && 'dagger-g2-v0-13-7-4c' || 'ubuntu-latest' }}"
-    steps:
-      - uses: actions/checkout@v4
-      - name: "typescript publish"
-        uses: ./.github/actions/call
-        env:
-          RELEASE_DAGGER_CI_TOKEN: ${{ secrets.RELEASE_DAGGER_CI_TOKEN }}
-          RELEASE_NPM_TOKEN: ${{ secrets.RELEASE_NPM_TOKEN }}
-        with:
-          function: sdk typescript publish --tag="${{ github.ref_name }}" --github-token=env:RELEASE_DAGGER_CI_TOKEN --npm-token=env:RELEASE_NPM_TOKEN
-      - name: "notify"
-        uses: ./.github/actions/notify
-        with:
-          message: "⬢ TypeScript SDK: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
-          discord-webhook: ${{ secrets.NEW_RELEASE_DISCORD_WEBHOOK }}
-
-
-  publish-sdk-elixir:
-    needs: publish
-    if: github.ref_name != 'main'
-    runs-on: "${{ github.repository == 'dagger/dagger' && 'dagger-g2-v0-13-7-4c' || 'ubuntu-latest' }}"
-    steps:
-      - uses: actions/checkout@v4
-      - name: "elixir publish"
-        uses: ./.github/actions/call
-        env:
-          RELEASE_DAGGER_CI_TOKEN: ${{ secrets.RELEASE_DAGGER_CI_TOKEN }}
-          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
-        with:
-          function: sdk elixir publish --tag="${{ github.ref_name }}" --github-token=env:RELEASE_DAGGER_CI_TOKEN --hex-apikey=env:HEX_API_KEY
-      - name: "notify"
-        uses: ./.github/actions/notify
-        with:
-          message: "🧪 Elixir SDK: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
-          discord-webhook: ${{ secrets.NEW_RELEASE_DISCORD_WEBHOOK }}
-
-  publish-helm:
-    needs: publish
-    if: github.ref_name != 'main'
-    runs-on: "${{ github.repository == 'dagger/dagger' && 'dagger-g2-v0-13-7-4c' || 'ubuntu-latest' }}"
-    steps:
-      - uses: actions/checkout@v4
-      - name: "helm publish"
+      - name: "Bump Dagger version in Daggerverse"
         uses: ./.github/actions/call
         env:
           RELEASE_DAGGER_CI_TOKEN: ${{ secrets.RELEASE_DAGGER_CI_TOKEN }}
         with:
-          function: helm publish --tag=${{ github.ref_name }} --github-token=env:RELEASE_DAGGER_CI_TOKEN
-      - name: "notify"
-        uses: ./.github/actions/notify
-        with:
-          message: "☸️ Helm Chart: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
-          discord-webhook: ${{ secrets.NEW_RELEASE_DISCORD_WEBHOOK }}
+          function: --github-token=env:RELEASE_DAGGER_CI_TOKEN bump-dagger-version --to=${{ github.ref_name }} --github-assignee=${{ github.actor }}
+          module: ./modules/daggerverse
 
   # TODO: daggerize provisioning tests
   test-provision-macos:
@@ -224,7 +143,7 @@ jobs:
         shell: bash
 
       - name: "Install Docker"
-        uses: douglascamata/setup-docker-macos-action@v1-alpha.14
+        uses: douglascamata/setup-docker-macos-action@v1-alpha.16
         env:
           HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
       - uses: docker/setup-qemu-action@v3
@@ -269,8 +188,8 @@ jobs:
         run: docker logs $(docker ps -q --filter name=dagger-engine)
 
   # TODO: daggerize provisioning tests
-  test-provision-go-linux:
-    name: "Test SDK Provision / go / linux"
+  test-provision-go-linux-x86:
+    name: "Test SDK Provision / go / linux / x86_64"
     needs: publish
     if: |
       always() &&
@@ -313,13 +232,65 @@ jobs:
         run: |
           cd sdk/go
           go test -v -run TestProvision ./...
+      - name: "Test Go SDK Module Load"
+        run: |
+          # verify we can load a go module (the dagger-dev module has multiple go modules)
+          curl -sL $_INTERNAL_DAGGER_TEST_CLI_URL | tar -xz dagger
+          ./dagger call --help
       - name: "ALWAYS print engine logs - especially useful on failure"
         if: always()
         run: docker logs $(docker ps -q --filter name=dagger-engine)
 
   # TODO: daggerize provisioning tests
-  test-provision-python-linux:
-    name: "Test SDK Provision / python / linux"
+  test-provision-go-linux-arm64:
+    name: "Test SDK Provision / go / linux / arm64"
+    needs: publish
+    if: |
+      always() &&
+      github.repository == 'dagger/dagger' &&
+      (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: "Set CLI Test URL"
+        run: |
+          if [ ${{ github.event_name }} == 'push' ]; then
+            BASE_URL="https://${{ vars.RELEASE_FQDN }}/dagger"
+            if [ $GITHUB_REF_NAME == 'main' ]; then
+              # this is a push to the main branch
+              ARCHIVE_URL="${BASE_URL}/main/${GITHUB_SHA}/dagger_${GITHUB_SHA}_linux_arm64.tar.gz"
+              CHECKSUMS_URL="${BASE_URL}/main/${GITHUB_SHA}/checksums.txt"
+              RUNNER_HOST="docker-image://${{ vars.RELEASE_DAGGER_ENGINE_IMAGE }}:${GITHUB_SHA}"
+            else
+              # this is a tag push
+              ARCHIVE_URL="${BASE_URL}/releases/${GITHUB_REF_NAME:1}/dagger_${GITHUB_REF_NAME}_linux_arm64.tar.gz"
+              CHECKSUMS_URL="${BASE_URL}/releases/${GITHUB_REF_NAME:1}/checksums.txt"
+              RUNNER_HOST="docker-image://${{ vars.RELEASE_DAGGER_ENGINE_IMAGE }}:${GITHUB_REF_NAME}"
+            fi
+          else
+            BASE_URL="https://dl.dagger.io/dagger"
+
+            # this is a pr, just default to main artifacts
+            ARCHIVE_URL="${BASE_URL}/main/head/dagger_head_linux_arm64.tar.gz"
+            CHECKSUMS_URL="${BASE_URL}/main/head/checksums.txt"
+            RUNNER_HOST="docker-image://registry.dagger.io/engine:main"
+          fi
+          echo "_INTERNAL_DAGGER_TEST_CLI_URL=${ARCHIVE_URL}" >> $GITHUB_ENV
+          echo "_INTERNAL_DAGGER_TEST_CLI_CHECKSUMS_URL=${CHECKSUMS_URL}" >> $GITHUB_ENV
+          echo "_EXPERIMENTAL_DAGGER_RUNNER_HOST=${RUNNER_HOST}" >> $GITHUB_ENV
+        shell: bash
+      - name: "Test Go SDK Module Load"
+        run: |
+          # verify we can load a go module (the dagger-dev module has multiple go modules)
+          curl -sL $_INTERNAL_DAGGER_TEST_CLI_URL | tar -xz dagger
+          ./dagger call --help
+      - name: "ALWAYS print engine logs - especially useful on failure"
+        if: always()
+        run: docker logs $(docker ps -q --filter name=dagger-engine)
+
+  # TODO: daggerize provisioning tests
+  test-provision-python-linux-x86:
+    name: "Test SDK Provision / python / linux / x86_64"
     needs: publish
     if: |
       always() &&
@@ -362,13 +333,62 @@ jobs:
         run: |
           cd sdk/python
           uv run pytest -xm provision
+      - name: "Test Python SDK Module Load"
+        run: |
+          curl -sL $_INTERNAL_DAGGER_TEST_CLI_URL | tar -xz dagger
+          ./dagger -m sdk/python/dev call --help
+      - name: "ALWAYS print engine logs - especially useful on failure"
+        if: always()
+        run: docker logs $(docker ps -q --filter name=dagger-engine)
+
+  test-provision-python-linux-arm64:
+    name: "Test SDK Provision / python / linux / arm64"
+    needs: publish
+    if: |
+      always() &&
+      github.repository == 'dagger/dagger' &&
+      (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: "Set CLI Test URL"
+        run: |
+          if [ ${{ github.event_name }} == 'push' ]; then
+            BASE_URL="https://${{ vars.RELEASE_FQDN }}/dagger"
+            if [ $GITHUB_REF_NAME == 'main' ]; then
+              # this is a push to the main branch
+              ARCHIVE_URL="${BASE_URL}/main/${GITHUB_SHA}/dagger_${GITHUB_SHA}_linux_arm64.tar.gz"
+              CHECKSUMS_URL="${BASE_URL}/main/${GITHUB_SHA}/checksums.txt"
+              RUNNER_HOST="docker-image://${{ vars.RELEASE_DAGGER_ENGINE_IMAGE }}:${GITHUB_SHA}"
+            else
+              # this is a tag push
+              ARCHIVE_URL="${BASE_URL}/releases/${GITHUB_REF_NAME:1}/dagger_${GITHUB_REF_NAME}_linux_arm64.tar.gz"
+              CHECKSUMS_URL="${BASE_URL}/releases/${GITHUB_REF_NAME:1}/checksums.txt"
+              RUNNER_HOST="docker-image://${{ vars.RELEASE_DAGGER_ENGINE_IMAGE }}:${GITHUB_REF_NAME}"
+            fi
+          else
+            BASE_URL="https://dl.dagger.io/dagger"
+
+            # this is a pr, just default to main artifacts
+            ARCHIVE_URL="${BASE_URL}/main/head/dagger_head_linux_arm64.tar.gz"
+            CHECKSUMS_URL="${BASE_URL}/main/head/checksums.txt"
+            RUNNER_HOST="docker-image://registry.dagger.io/engine:main"
+          fi
+          echo "_INTERNAL_DAGGER_TEST_CLI_URL=${ARCHIVE_URL}" >> $GITHUB_ENV
+          echo "_INTERNAL_DAGGER_TEST_CLI_CHECKSUMS_URL=${CHECKSUMS_URL}" >> $GITHUB_ENV
+          echo "_EXPERIMENTAL_DAGGER_RUNNER_HOST=${RUNNER_HOST}" >> $GITHUB_ENV
+        shell: bash
+      - name: "Test Python SDK Module Load"
+        run: |
+          curl -sL $_INTERNAL_DAGGER_TEST_CLI_URL | tar -xz dagger
+          ./dagger -m sdk/python/dev call --help
       - name: "ALWAYS print engine logs - especially useful on failure"
         if: always()
         run: docker logs $(docker ps -q --filter name=dagger-engine)
 
   # TODO: daggerize provisioning tests
-  test-provision-typescript-linux:
-    name: "Test SDK Provision / TypeScript / linux"
+  test-provision-typescript-linux-x86:
+    name: "Test SDK Provision / TypeScript / linux / x86_64"
     needs: publish
     if: |
       always() &&
@@ -420,6 +440,55 @@ jobs:
           cd sdk/typescript
           yarn install
           yarn test:bun -g 'Automatic Provisioned CLI Binary'
+      - name: "Test TypeScript SDK Module Load"
+        run: |
+          curl -sL $_INTERNAL_DAGGER_TEST_CLI_URL | tar -xz dagger
+          ./dagger -m sdk/typescript/dev call --help
+      - name: "ALWAYS print engine logs - especially useful on failure"
+        if: always()
+        run: docker logs $(docker ps -q --filter name=dagger-engine)
+
+  test-provision-typescript-linux-arm64:
+    name: "Test SDK Provision / TypeScript / linux / arm64"
+    needs: publish
+    if: |
+      always() &&
+      github.repository == 'dagger/dagger' &&
+      (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: "Set CLI Test URL"
+        run: |
+          if [ ${{ github.event_name }} == 'push' ]; then
+            BASE_URL="https://${{ vars.RELEASE_FQDN }}/dagger"
+            if [ $GITHUB_REF_NAME == 'main' ]; then
+              # this is a push to the main branch
+              ARCHIVE_URL="${BASE_URL}/main/${GITHUB_SHA}/dagger_${GITHUB_SHA}_linux_arm64.tar.gz"
+              CHECKSUMS_URL="${BASE_URL}/main/${GITHUB_SHA}/checksums.txt"
+              RUNNER_HOST="docker-image://${{ vars.RELEASE_DAGGER_ENGINE_IMAGE }}:${GITHUB_SHA}"
+            else
+              # this is a tag push
+              ARCHIVE_URL="${BASE_URL}/releases/${GITHUB_REF_NAME:1}/dagger_${GITHUB_REF_NAME}_linux_arm64.tar.gz"
+              CHECKSUMS_URL="${BASE_URL}/releases/${GITHUB_REF_NAME:1}/checksums.txt"
+              RUNNER_HOST="docker-image://${{ vars.RELEASE_DAGGER_ENGINE_IMAGE }}:${GITHUB_REF_NAME}"
+            fi
+          else
+            BASE_URL="https://dl.dagger.io/dagger"
+
+            # this is a pr, just default to main artifacts
+            ARCHIVE_URL="${BASE_URL}/main/head/dagger_head_linux_arm64.tar.gz"
+            CHECKSUMS_URL="${BASE_URL}/main/head/checksums.txt"
+            RUNNER_HOST="docker-image://registry.dagger.io/engine:main"
+          fi
+          echo "_INTERNAL_DAGGER_TEST_CLI_URL=${ARCHIVE_URL}" >> $GITHUB_ENV
+          echo "_INTERNAL_DAGGER_TEST_CLI_CHECKSUMS_URL=${CHECKSUMS_URL}" >> $GITHUB_ENV
+          echo "_EXPERIMENTAL_DAGGER_RUNNER_HOST=${RUNNER_HOST}" >> $GITHUB_ENV
+        shell: bash
+      - name: "Test TypeScript SDK Module Load"
+        run: |
+          curl -sL $_INTERNAL_DAGGER_TEST_CLI_URL | tar -xz dagger
+          ./dagger -m sdk/typescript/dev call --help
       - name: "ALWAYS print engine logs - especially useful on failure"
         if: always()
         run: docker logs $(docker ps -q --filter name=dagger-engine)

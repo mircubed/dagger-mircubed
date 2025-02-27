@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -14,13 +15,13 @@ import (
 	"dagger.io/dagger"
 	"github.com/dagger/dagger/core"
 	"github.com/dagger/dagger/internal/testutil"
-	"github.com/dagger/dagger/testctx"
+	"github.com/dagger/testctx"
 )
 
 type DirectorySuite struct{}
 
 func TestDirectory(t *testing.T) {
-	testctx.Run(testCtx, t, DirectorySuite{}, Middleware()...)
+	testctx.New(t, Middleware()...).RunTests(DirectorySuite{})
 }
 
 func (DirectorySuite) TestEmpty(ctx context.Context, t *testctx.T) {
@@ -395,28 +396,34 @@ func (DirectorySuite) TestWithFiles(ctx context.Context, t *testctx.T) {
 		WithNewFile("second-file", "file2 content").
 		File("second-file")
 	files := []*dagger.File{file1, file2}
-	dir := c.Directory().
-		WithFiles("/", files)
 
-	// check file1 contents
-	content, err := dir.File("/first-file").Contents(ctx)
-	require.Equal(t, "file1 content", content)
-	require.NoError(t, err)
+	check := func(ctx context.Context, t *testctx.T, dir *dagger.Directory, path string) {
+		contents, err := dir.File(filepath.Join(path, "first-file")).Contents(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "file1 content", contents)
 
-	// check file2 contents
-	content, err = dir.File("/second-file").Contents(ctx)
-	require.Equal(t, "file2 content", content)
-	require.NoError(t, err)
+		contents, err = dir.File(filepath.Join(path, "second-file")).Contents(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "file2 content", contents)
+	}
 
-	_, err = dir.File("/some-other-file").Contents(ctx)
-	require.Error(t, err)
+	t.Run("root", func(ctx context.Context, t *testctx.T) {
+		path := "/"
+		dir := c.Directory().WithFiles(path, files)
+		check(ctx, t, dir, path)
+	})
 
-	// test sub directory
-	subDir := c.Directory().
-		WithFiles("/a/b/c", files)
-	content, err = subDir.File("/a/b/c/first-file").Contents(ctx)
-	require.Equal(t, "file1 content", content)
-	require.NoError(t, err)
+	t.Run("sub", func(ctx context.Context, t *testctx.T) {
+		path := "/a/b/c"
+		dir := c.Directory().WithFiles(path, files)
+		check(ctx, t, dir, path)
+	})
+
+	t.Run("sub trailing", func(ctx context.Context, t *testctx.T) {
+		path := "/a/b/c/"
+		dir := c.Directory().WithFiles(path, files)
+		check(ctx, t, dir, path)
+	})
 
 	t.Run("respects permissions", func(ctx context.Context, t *testctx.T) {
 		file1 := c.Directory().
@@ -896,7 +903,7 @@ func (DirectorySuite) TestWithNewFileExceedingLength(ctx context.Context, t *tes
 			}
 		}`, &res, nil)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "File name length exceeds the maximum supported 255 characters")
+	requireErrOut(t, err, "File name length exceeds the maximum supported 255 characters")
 }
 
 func (DirectorySuite) TestWithFileExceedingLength(ctx context.Context, t *testctx.T) {
@@ -921,7 +928,7 @@ func (DirectorySuite) TestWithFileExceedingLength(ctx context.Context, t *testct
 			}
 		}`, &res, nil)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "File name length exceeds the maximum supported 255 characters")
+	requireErrOut(t, err, "File name length exceeds the maximum supported 255 characters")
 }
 
 func (DirectorySuite) TestDirectMerge(ctx context.Context, t *testctx.T) {
@@ -1008,11 +1015,11 @@ func (DirectorySuite) TestSync(ctx context.Context, t *testctx.T) {
 	t.Run("triggers error", func(ctx context.Context, t *testctx.T) {
 		_, err := c.Directory().Directory("/foo").Sync(ctx)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "no such file or directory")
+		requireErrOut(t, err, "no such file or directory")
 
 		_, err = c.Container().From(alpineImage).Directory("/bar").Sync(ctx)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "no such file or directory")
+		requireErrOut(t, err, "no such file or directory")
 	})
 
 	t.Run("allows chaining", func(ctx context.Context, t *testctx.T) {
@@ -1158,7 +1165,7 @@ func (DirectorySuite) TestGlob(ctx context.Context, t *testctx.T) {
 
 	t.Run("directory doesn't exist", func(ctx context.Context, t *testctx.T) {
 		_, err := c.Directory().Directory("foo").Glob(ctx, "**/*")
-		require.ErrorContains(t, err, "no such file or directory")
+		requireErrOut(t, err, "no such file or directory")
 	})
 }
 
@@ -1205,5 +1212,64 @@ func (DirectorySuite) TestDigest(ctx context.Context, t *testctx.T) {
 		digest, err := dir.Digest(ctx)
 		require.NoError(t, err)
 		require.Equal(t, "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", digest)
+	})
+}
+
+func (DirectorySuite) TestDirectoryName(ctx context.Context, t *testctx.T) {
+	c := connect(ctx, t)
+
+	t.Run("empty directory name", func(ctx context.Context, t *testctx.T) {
+		name, err := c.Directory().Name(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "/", name)
+	})
+
+	t.Run("not found directory", func(ctx context.Context, t *testctx.T) {
+		_, err := c.Directory().Directory("foo").Name(ctx)
+		requireErrOut(t, err, "no such file or directory")
+	})
+
+	t.Run("structured directory", func(ctx context.Context, t *testctx.T) {
+		dir := c.Directory().WithDirectory("nested", c.Directory()).WithDirectory("very/nested", c.Directory())
+
+		t.Run("root directory", func(ctx context.Context, t *testctx.T) {
+			rootName, err := dir.Name(ctx)
+			require.NoError(t, err)
+			require.Equal(t, "/", rootName)
+		})
+
+		t.Run("nested directory", func(ctx context.Context, t *testctx.T) {
+			nestedName, err := dir.Directory("nested").Name(ctx)
+			require.NoError(t, err)
+			require.Equal(t, "nested", nestedName)
+		})
+
+		t.Run("very nested directory", func(ctx context.Context, t *testctx.T) {
+			veryNestedName, err := dir.Directory("very/nested").Name(ctx)
+			require.NoError(t, err)
+			require.Equal(t, "nested", veryNestedName)
+		})
+	})
+
+	t.Run("git directory", func(ctx context.Context, t *testctx.T) {
+		dir := c.Git("https://github.com/dagger/dagger#ee32df913f57c876e067bd5ecc159561510b6f50").Head().Tree()
+
+		t.Run("root directory", func(ctx context.Context, t *testctx.T) {
+			rootName, err := dir.Name(ctx)
+			require.NoError(t, err)
+			require.Equal(t, ".", rootName)
+		})
+
+		t.Run("nested hidden directory", func(ctx context.Context, t *testctx.T) {
+			nestedName, err := dir.Directory(".dagger").Name(ctx)
+			require.NoError(t, err)
+			require.Equal(t, ".dagger", nestedName)
+		})
+
+		t.Run("nested directory", func(ctx context.Context, t *testctx.T) {
+			nestedName, err := dir.Directory("sdk").Directory("go").Name(ctx)
+			require.NoError(t, err)
+			require.Equal(t, "go", nestedName)
+		})
 	})
 }

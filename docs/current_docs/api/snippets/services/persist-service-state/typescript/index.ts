@@ -13,7 +13,7 @@ class MyModule {
       .withExposedPort(6379)
       .withMountedCache("/data", dag.cacheVolume("my-redis"))
       .withWorkdir("/data")
-      .asService()
+      .asService({ useEntrypoint: true })
 
     const redisCLI = dag
       .container()
@@ -54,7 +54,6 @@ class MyModule {
      */
     key: string,
   ): Promise<string> {
-    // set and save value
     return await this.redis()
       .withExec(["get", key], { useEntrypoint: true })
       .stdout()

@@ -1,12 +1,13 @@
 {
   "name": "ps-analyzer",
-  "sdk": "go",
+  "engineVersion": "v0.12.4",
+  "sdk": {
+    "source": "go"
+  },
   "dependencies": [
     {
       "name": "wolfi",
       "source": "../wolfi"
     }
-  ],
-  "source": ".",
-  "engineVersion": "v0.12.4"
+  ]
 }

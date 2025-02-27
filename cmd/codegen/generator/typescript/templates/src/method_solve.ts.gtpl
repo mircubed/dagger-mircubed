@@ -23,11 +23,13 @@
 	{{- if $optionals }}
 		{{- /* Insert a comma if there was previous required arguments. */ -}}
 		{{- if $required }}, {{ end }}
-		{{- "" }}opts?: {{ $parentName | PascalCase }}{{ .Name | PascalCase }}Opts
+    opts?: {{ $parentName | PascalCase }}{{ .Name | PascalCase }}Opts {{- with .Directives.SourceMap }} // {{ .Module }} ({{ .Filelink | ModuleRelPath }}) 
+    {{ "" }} 
+    {{- end }}
 	{{- end }}
 
 	{{- /* Write return type */ -}}
-	{{- "" }}): Promise<{{ if .TypeRef.IsVoid }}void{{ else }}{{ . | FormatReturnType }}{{ end }}> => {
+	{{- "" }}): Promise<{{ if .TypeRef.IsVoid }}void{{ else }}{{ . | FormatReturnType }}{{ end }}> => { {{- with .Directives.SourceMap }} // {{ .Module }} ({{ .Filelink | ModuleRelPath }}) {{- end }}
 
     {{- /* If it's a scalar, make possible to return its already filled value */ -}}
     {{- if and (.TypeRef.IsScalar) (ne .ParentObject.Name "Query") (not $convertID) }}
@@ -56,7 +58,7 @@
 
 	{{- $enums := GetEnumValues .Args }}
 	{{- if gt (len $enums) 0 }}
-	const metadata: Metadata = {
+	const metadata = {
 	    {{- range $v := $enums }}
 	    {{ $v.Name | FormatName -}}: { is_enum: true },
 	    {{- end }}
@@ -66,15 +68,11 @@
 	{{- end }}
 
 	{{- if .TypeRef }}
-    {{ if not .TypeRef.IsVoid }}const response: Awaited<{{ if $convertID }}{{ .TypeRef | FormatOutputType }}{{ else }}{{ $promiseRetType }}{{ end }}> = {{ end }}await computeQuery(
-      [
-        ...this._queryTree,
-        {
-          operation: "{{ .Name }}",
-
-		{{- /* Insert arguments. */ -}}
+    const ctx = this._ctx.select(
+      "{{ .Name }}",
+      {{- /* Insert arguments. */ -}}
 		{{- if or $required $optionals }}
-          args: { {{""}}
+      { {{""}}
       		{{- with $required }}
 				{{- template "call_args" $required }}
 			{{- end }}
@@ -84,47 +82,19 @@
 				{{- "" }}...opts
 			{{- end }}
       {{- if gt (len $enums) 0 -}}, __metadata: metadata{{- end -}}
-{{- "" }} },
+{{- "" }}},
 		{{- end }}
-        },
-        {{- /* Add subfields */ -}}
-        {{- if and .TypeRef.IsList (IsListOfObject .TypeRef) }}
-        {
-          operation: "{{- range $i, $v := . | GetArrayField }}{{if $i }} {{ end }}{{ $v.Name | ToLowerCase }}{{- end }}"
-        },
-        {{- end }}
-      ],
-      await this._ctx.connection()
-    )
+    ){{- /* Add subfields */ -}}
+      {{- if and .TypeRef.IsList (IsListOfObject .TypeRef) }}.select("{{- range $i, $v := . | GetArrayField }}{{if $i }} {{ end }}{{ $v.Name | ToLowerCase }}{{- end }}")
+      {{- end }}
+
+    {{ if not .TypeRef.IsVoid }}const response: Awaited<{{ if $convertID }}{{ .TypeRef | FormatOutputType }}{{ else }}{{ $promiseRetType }}{{ end }}> = {{ end }}await ctx.execute()
 
     {{ if $convertID -}}
-    return new {{ $promiseRetType }}({
-      queryTree: [
-        {
-          operation: "load{{ $promiseRetType }}FromID",
-          args: { id: response },
-        },
-      ],
-      ctx: this._ctx,
-    })
+    return new Client(ctx.copy()).load{{ $promiseRetType | FormatProtected }}FromID(response)
     {{- else if not .TypeRef.IsVoid -}}
         {{- if and .TypeRef.IsList (IsListOfObject .TypeRef) }}
-    return response.map(
-      (r) => new {{ . | FormatReturnType | ToSingleType }}(
-      {
-        queryTree: [
-          {
-            operation: "load{{. | FormatReturnType | ToSingleType}}FromID",
-            args: { id: r.id }
-          }
-        ],
-        ctx: this._ctx
-      },
-        {{- range $v := . | GetArrayField }}
-        r.{{ $v.Name | ToLowerCase }},
-        {{- end }}
-      )
-    )
+    return response.map((r) => new Client(ctx.copy()).load{{ . | FormatReturnType | ToSingleType | FormatProtected }}FromID(r.id))
         {{- else }}
     return response
         {{- end }}

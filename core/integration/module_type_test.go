@@ -6,15 +6,17 @@ import (
 	"testing"
 
 	"github.com/dagger/dagger/dagql/call"
-	"github.com/dagger/dagger/testctx"
+	"github.com/dagger/testctx"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
+
+	"dagger.io/dagger"
 )
 
 type TypeSuite struct{}
 
 func TestType(t *testing.T) {
-	testctx.Run(testCtx, t, TypeSuite{}, Middleware()...)
+	testctx.New(t, Middleware()...).RunTests(TypeSuite{})
 }
 
 func (TypeSuite) TestCustomTypes(ctx context.Context, t *testctx.T) {
@@ -844,7 +846,7 @@ export class Test {
 			var idp call.ID
 			err = idp.Decode(id)
 			require.NoError(t, err)
-			require.Equal(t, idp.Display(), `test.sayHello(name: "world"): TestMessage!`)
+			require.Equal(t, `test.sayHello(name: "world"): TestMessage!`, idp.Display())
 
 			out, err = modGen.With(daggerQuery(`{test{upper(msg:"%s"){content}}}`, id)).Stdout(ctx)
 			require.NoError(t, err)
@@ -855,6 +857,40 @@ export class Test {
 			require.JSONEq(t, `{"test":{"uppers":[{"content": "HELLO WORLD"}, {"content": "HELLO WORLD"}]}}`, out)
 		})
 	}
+}
+
+func (TypeSuite) TestArgNull(ctx context.Context, t *testctx.T) {
+	src := `package main
+
+import "strings"
+
+type Test struct {}
+
+func (m *Test) UpperOpt(
+	a string, // +optional
+) string {
+	return strings.ToUpper(a)
+}
+
+func (m *Test) UpperReq(
+	a string,
+) string {
+	return strings.ToUpper(a)
+}
+`
+
+	var logs safeBuffer
+	c := connect(ctx, t, dagger.WithLogOutput(&logs))
+	modGen := modInit(t, c, "go", src)
+
+	out, err := modGen.With(daggerQuery(`{test{upperOpt(a: null)}}`)).Stdout(ctx)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"test":{"upperOpt":""}}`, out)
+
+	_, err = modGen.With(daggerQuery(`{test{upperReq(a: null)}}`)).Stdout(ctx)
+	require.Error(t, err)
+	require.NoError(t, c.Close())
+	require.Contains(t, logs.String(), "cannot create String from <nil>")
 }
 
 func (TypeSuite) TestScalarType(ctx context.Context, t *testctx.T) {
@@ -959,27 +995,27 @@ export class Test {
 			require.NoError(t, err)
 			require.Equal(t, "linux/amd64", gjson.Get(out, "test.fromPlatform").String())
 			_, err = modGen.With(daggerQuery(`{test{fromPlatform(platform: "invalid")}}`)).Stdout(ctx)
-			require.ErrorContains(t, err, "unknown operating system or architecture")
+			requireErrOut(t, err, "unknown operating system or architecture")
 
 			out, err = modGen.With(daggerQuery(`{test{toPlatform(platform: "linux/amd64")}}`)).Stdout(ctx)
 			require.NoError(t, err)
 			require.Equal(t, "linux/amd64", gjson.Get(out, "test.toPlatform").String())
 			_, err = modGen.With(daggerQuery(`{test{toPlatform(platform: "invalid")}}`)).Sync(ctx)
-			require.ErrorContains(t, err, "unknown operating system or architecture")
+			requireErrOut(t, err, "unknown operating system or architecture")
 
 			out, err = modGen.With(daggerQuery(`{test{fromPlatforms(platform: ["linux/amd64"])}}`)).Stdout(ctx)
 			require.NoError(t, err)
 			require.Equal(t, 1, len(gjson.Get(out, "test.fromPlatforms").Array()))
 			require.Equal(t, "linux/amd64", gjson.Get(out, "test.fromPlatforms.0").String())
 			_, err = modGen.With(daggerQuery(`{test{fromPlatforms(platform: ["invalid"])}}`)).Stdout(ctx)
-			require.ErrorContains(t, err, "unknown operating system or architecture")
+			requireErrOut(t, err, "unknown operating system or architecture")
 
 			out, err = modGen.With(daggerQuery(`{test{toPlatforms(platform: ["linux/amd64"])}}`)).Stdout(ctx)
 			require.NoError(t, err)
 			require.Equal(t, 1, len(gjson.Get(out, "test.toPlatforms.0").Array()))
 			require.Equal(t, "linux/amd64", gjson.Get(out, "test.toPlatforms.0").String())
 			_, err = modGen.With(daggerQuery(`{test{toPlatforms(platform: ["invalid"])}}`)).Sync(ctx)
-			require.ErrorContains(t, err, "unknown operating system or architecture")
+			requireErrOut(t, err, "unknown operating system or architecture")
 		})
 	}
 }
@@ -1061,14 +1097,14 @@ export class Test {
 			require.Equal(t, "TCP", gjson.Get(out, "test.fromProto").String())
 
 			_, err = modGen.With(daggerQuery(`{test{fromProto(proto: "INVALID")}}`)).Stdout(ctx)
-			require.ErrorContains(t, err, "invalid enum value")
+			requireErrOut(t, err, "invalid enum value")
 
 			out, err = modGen.With(daggerQuery(`{test{toProto(proto: "TCP")}}`)).Stdout(ctx)
 			require.NoError(t, err)
 			require.Equal(t, "TCP", gjson.Get(out, "test.toProto").String())
 
 			_, err = modGen.With(daggerQuery(`{test{toProto(proto: "INVALID")}}`)).Sync(ctx)
-			require.ErrorContains(t, err, "invalid enum value")
+			requireErrOut(t, err, "invalid enum value")
 		})
 	}
 }
@@ -1224,7 +1260,7 @@ export class Test {
 				require.Equal(t, "INACTIVE", gjson.Get(out, "test.status").String())
 
 				_, err = modGen.With(daggerQuery(`{test{fromStatus(status: "INVALID")}}`)).Stdout(ctx)
-				require.ErrorContains(t, err, "invalid enum value")
+				requireErrOut(t, err, "invalid enum value")
 
 				// fromStatusOpt
 				out, err = modGen.With(daggerQuery(`{test{fromStatusOpt}}`)).Stdout(ctx)
@@ -1236,7 +1272,7 @@ export class Test {
 				require.Equal(t, "ACTIVE", gjson.Get(out, "test.fromStatusOpt").String())
 
 				_, err = modGen.With(daggerQuery(`{test{fromStatusOpt(status: "INVALID")}}`)).Stdout(ctx)
-				require.ErrorContains(t, err, "invalid enum value")
+				requireErrOut(t, err, "invalid enum value")
 
 				// toStatus
 				out, err = modGen.With(daggerQuery(`{test{toStatus(status: "INACTIVE")}}`)).Stdout(ctx)
@@ -1244,7 +1280,7 @@ export class Test {
 				require.Equal(t, "INACTIVE", gjson.Get(out, "test.toStatus").String())
 
 				_, err = modGen.With(daggerQuery(`{test{toStatus(status: "INVALID")}}`)).Sync(ctx)
-				require.ErrorContains(t, err, "invalid enum value")
+				requireErrOut(t, err, "invalid enum value")
 
 				// introspection
 				mod := inspectModule(ctx, t, modGen)
@@ -1402,14 +1438,7 @@ func (m *Dep) Thing(f MyEnum) MyEnum {
 }
 `
 
-		type testCase struct {
-			sdk    string
-			source string
-		}
-		for _, tc := range []testCase{
-			{
-				sdk: "go",
-				source: `package main
+		src := `package main
 
 import (
 	"context"
@@ -1419,37 +1448,49 @@ import (
 
 type Test struct{}
 
-func (m *Test) Test(ctx context.Context) (string, error) {
+func (m *Test) TestBool(ctx context.Context) (string, error) {
 	f, err := dag.Dep().Thing(ctx, dagger.DepMyEnumFalse)
 	if err != nil {
 		return "", err
 	}
-	t, err := dag.Dep().Thing(ctx, dagger.DepMyEnumTrue)
-	if err != nil {
-		return "", err
-	}
-	n, err := dag.Dep().Thing(ctx, dagger.DepMyEnumNull)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprint(f, t, n), nil
+	return fmt.Sprint(f), nil
 }
-`,
-			},
-		} {
-			tc := tc
 
-			t.Run(tc.sdk, func(ctx context.Context, t *testctx.T) {
-				c := connect(ctx, t)
+func (m *Test) TestNull(ctx context.Context) (string, error) {
+	f, err := dag.Dep().Thing(ctx, dagger.DepMyEnumNull)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprint(f), nil
+}
+`
 
-				modGen := modInit(t, c, tc.sdk, tc.source).
-					With(withModInitAt("./dep", "go", depSrc)).
-					With(daggerExec("install", "./dep"))
+		t.Run("bool", func(ctx context.Context, t *testctx.T) {
+			var logs safeBuffer
+			c := connect(ctx, t, dagger.WithLogOutput(&logs))
 
-				out, err := modGen.With(daggerQuery(`{test{test}}`)).Stdout(ctx)
-				require.NoError(t, err)
-				require.Equal(t, "falsetruenull", gjson.Get(out, "test.test").String())
-			})
-		}
+			modGen := modInit(t, c, "go", src).
+				With(withModInitAt("./dep", "go", depSrc)).
+				With(daggerExec("install", "./dep"))
+
+			_, err := modGen.With(daggerQuery(`{test{testBool}}`)).Stdout(ctx)
+			require.Error(t, err)
+			require.NoError(t, c.Close())
+			require.Contains(t, logs.String(), "invalid enum value false")
+		})
+
+		t.Run("null", func(ctx context.Context, t *testctx.T) {
+			var logs safeBuffer
+			c := connect(ctx, t, dagger.WithLogOutput(&logs))
+
+			modGen := modInit(t, c, "go", src).
+				With(withModInitAt("./dep", "go", depSrc)).
+				With(daggerExec("install", "./dep"))
+
+			_, err := modGen.With(daggerQuery(`{test{testNull}}`)).Stdout(ctx)
+			require.Error(t, err)
+			require.NoError(t, c.Close())
+			require.Contains(t, logs.String(), "invalid enum value null")
+		})
 	})
 }

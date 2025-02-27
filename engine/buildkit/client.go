@@ -25,6 +25,7 @@ import (
 	"github.com/moby/buildkit/util/entitlements"
 	bkworker "github.com/moby/buildkit/worker"
 	"github.com/opencontainers/go-digest"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc/metadata"
 
@@ -33,8 +34,6 @@ import (
 )
 
 const (
-	InternalPrefix = "[internal] "
-
 	// from buildkit, cannot change
 	EntitlementsJobKey = "llb.entitlements"
 
@@ -79,6 +78,14 @@ type Client struct {
 	cancel   context.CancelCauseFunc
 	closeMu  sync.RWMutex
 	execMap  sync.Map
+
+	ops   map[digest.Digest]opCtx
+	opsmu sync.RWMutex
+}
+
+type opCtx struct {
+	od  *OpDAG
+	ctx trace.SpanContext
 }
 
 func NewClient(ctx context.Context, opts *Opts) (*Client, error) {
@@ -89,6 +96,7 @@ func NewClient(ctx context.Context, opts *Opts) (*Client, error) {
 		closeCtx: ctx,
 		cancel:   cancel,
 		execMap:  sync.Map{},
+		ops:      make(map[digest.Digest]opCtx),
 	}
 
 	return client, nil
@@ -125,6 +133,34 @@ func (c *Client) Solve(ctx context.Context, req bkgw.SolveRequest) (_ *Result, r
 	defer cancel(errors.New("solve done"))
 	ctx = withOutgoingContext(ctx)
 
+	recordOp := func(def *bksolverpb.Definition) error {
+		dag, err := DefToDAG(def)
+		if err != nil {
+			return err
+		}
+		spanCtx := trace.SpanContextFromContext(ctx)
+		c.opsmu.Lock()
+		_ = dag.Walk(func(od *OpDAG) error {
+			c.ops[*od.OpDigest] = opCtx{
+				od:  od,
+				ctx: spanCtx,
+			}
+			return nil
+		})
+		c.opsmu.Unlock()
+		return nil
+	}
+	if req.Definition != nil {
+		if err := recordOp(req.Definition); err != nil {
+			return nil, fmt.Errorf("record def ops: %w", err)
+		}
+	}
+	for name, def := range req.FrontendInputs {
+		if err := recordOp(def); err != nil {
+			return nil, fmt.Errorf("record frontend input %s ops: %w", name, err)
+		}
+	}
+
 	// include upstream cache imports, if any
 	req.CacheImports = c.UpstreamCacheImports
 
@@ -135,7 +171,7 @@ func (c *Client) Solve(ctx context.Context, req bkgw.SolveRequest) (_ *Result, r
 	}
 	llbRes, err := gw.Solve(ctx, req, c.ID())
 	if err != nil {
-		return nil, wrapError(ctx, err, c)
+		return nil, WrapError(ctx, err, c)
 	}
 
 	res, err := solverresult.ConvertResult(llbRes, func(rp bksolver.ResultProxy) (*ref, error) {
@@ -157,6 +193,13 @@ func (c *Client) Solve(ctx context.Context, req bkgw.SolveRequest) (_ *Result, r
 		c.Refs[rf] = struct{}{}
 	}
 	return res, nil
+}
+
+func (c *Client) LookupOp(vertex digest.Digest) (*OpDAG, trace.SpanContext, bool) {
+	c.opsmu.Lock()
+	opCtx, ok := c.ops[vertex]
+	c.opsmu.Unlock()
+	return opCtx.od, opCtx.ctx, ok
 }
 
 func (c *Client) ResolveImageConfig(ctx context.Context, ref string, opt sourceresolver.Opt) (string, digest.Digest, []byte, error) {
@@ -265,7 +308,10 @@ func (c *Client) NewContainer(ctx context.Context, req NewContainerRequest) (*Co
 	ctr, err := bkcontainer.NewContainer(
 		context.WithoutCancel(ctx),
 		c.Worker.CacheManager(),
-		c.Worker.withExecMD(req.ExecutionMetadata), // also implements Executor
+		c.Worker.execWorker(
+			trace.SpanContextFromContext(ctx),
+			req.ExecutionMetadata,
+		), // also implements Executor
 		c.SessionManager,
 		bksession.NewGroup(c.ID()),
 		ctrReq,
@@ -580,6 +626,31 @@ func (c *Client) ListenHostToContainer(
 	}, nil
 }
 
+func (c *Client) GetCredential(ctx context.Context, protocol, host, path string) (*session.CredentialInfo, error) {
+	caller, err := c.GetMainClientCaller()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get main client caller: %w", err)
+	}
+
+	response, err := session.NewGitCredentialClient(caller.Conn()).GetCredential(ctx, &session.GitCredentialRequest{
+		Protocol: protocol,
+		Host:     host,
+		Path:     path,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query credentials: %w", err)
+	}
+
+	switch result := response.Result.(type) {
+	case *session.GitCredentialResponse_Credential:
+		return result.Credential, nil
+	case *session.GitCredentialResponse_Error:
+		return nil, fmt.Errorf("git credential error: %s", result.Error.Message)
+	default:
+		return nil, fmt.Errorf("unexpected response type")
+	}
+}
+
 type TerminalClient struct {
 	Stdin    io.ReadCloser
 	Stdout   io.WriteCloser
@@ -609,12 +680,13 @@ func (c *Client) OpenTerminal(
 		stdinR, stdinW   = io.Pipe()
 	)
 
-	forwardFD := func(r io.Reader, fn func([]byte) *session.SessionRequest) error {
+	forwardFD := func(r io.ReadCloser, fn func([]byte) *session.SessionRequest) error {
+		defer r.Close()
+		b := make([]byte, 2048)
 		for {
-			b := make([]byte, 2048)
 			n, err := r.Read(b)
 			if err != nil {
-				if err == io.EOF || err == io.ErrClosedPipe {
+				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
 					return nil
 				}
 				return fmt.Errorf("error reading fd: %w", err)
@@ -638,9 +710,10 @@ func (c *Client) OpenTerminal(
 		}
 	})
 
-	errCh := make(chan error)
+	errCh := make(chan error, 1)
 	resizeCh := make(chan bkgw.WinSize)
 	go func() {
+		defer stdinW.Close()
 		defer close(errCh)
 		defer close(resizeCh)
 		for {
@@ -675,8 +748,10 @@ func (c *Client) OpenTerminal(
 		Stderr:   stderrW,
 		ErrCh:    errCh,
 		ResizeCh: resizeCh,
-		Close: func(exitCode int) error {
-			defer stdinW.Close()
+		Close: onceValueWithArg(func(exitCode int) error {
+			defer stdinR.Close()
+			defer stdoutW.Close()
+			defer stderrW.Close()
 			defer term.CloseSend()
 
 			err := term.Send(&session.SessionRequest{
@@ -686,8 +761,37 @@ func (c *Client) OpenTerminal(
 				return fmt.Errorf("failed to close terminal: %w", err)
 			}
 			return nil
-		},
+		}),
 	}, nil
+}
+
+// like sync.OnceValue but accepts an arg
+func onceValueWithArg[A any, R any](f func(A) R) func(A) R {
+	var (
+		once   sync.Once
+		valid  bool
+		p      any
+		result R
+	)
+	g := func(a A) {
+		defer func() {
+			p = recover()
+			if !valid {
+				panic(p)
+			}
+		}()
+		result = f(a)
+		valid = true
+	}
+	return func(a A) R {
+		once.Do(func() {
+			g(a)
+		})
+		if !valid {
+			panic(p)
+		}
+		return result
+	}
 }
 
 func withOutgoingContext(ctx context.Context) context.Context {
@@ -695,7 +799,7 @@ func withOutgoingContext(ctx context.Context) context.Context {
 	if ok {
 		ctx = metadata.NewOutgoingContext(ctx, md)
 	}
-	ctx = buildkitTelemetryContext(ctx)
+	ctx = buildkitTelemetryProvider(ctx)
 	return ctx
 }
 

@@ -14,6 +14,7 @@ import (
 	sessioncontent "github.com/moby/buildkit/session/content"
 	"github.com/moby/buildkit/session/secrets/secretsprovider"
 	"github.com/moby/buildkit/util/bklog"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/dagger/dagger/engine/buildkit"
 	"github.com/dagger/dagger/engine/client"
@@ -40,7 +41,7 @@ func (srv *Server) newBuildkitSession(ctx context.Context, c *daggerClient) (*bk
 		"oci:" + buildkit.BuiltinContentOCIStoreName: builtinStore,
 	}))
 
-	filesyncer, err := client.NewFilesyncer("", "", nil, nil)
+	filesyncer, err := client.NewFilesyncer()
 	if err != nil {
 		return nil, fmt.Errorf("new filesyncer: %w", err)
 	}
@@ -51,6 +52,11 @@ func (srv *Server) newBuildkitSession(ctx context.Context, c *daggerClient) (*bk
 	dialer := func(ctx context.Context, proto string, meta map[string][]string) (net.Conn, error) { //nolint: unparam
 		go func() {
 			defer serverConn.Close()
+
+			// Disable collecting otel metrics on these grpc connections for now. We don't use them and
+			// they add noticeable memory allocation overhead, especially for heavy filesync use cases.
+			ctx = trace.ContextWithSpan(ctx, trace.SpanFromContext(nil)) //nolint:staticcheck // we have to provide a nil context...
+
 			err := srv.bkSessionManager.HandleConn(ctx, serverConn, meta)
 			if err != nil {
 				lg := bklog.G(ctx).WithError(err)

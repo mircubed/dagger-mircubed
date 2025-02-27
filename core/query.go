@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"sync"
 
 	"github.com/containerd/containerd/content"
 	bkclient "github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/util/leaseutil"
 	"github.com/vektah/gqlparser/v2/ast"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/dagger/dagger/auth"
 	"github.com/dagger/dagger/dagql"
@@ -90,11 +90,7 @@ type Server interface {
 	PruneEngineLocalCacheEntries(context.Context) (*EngineCacheEntrySet, error)
 
 	// The default local cache policy to use for automatic local cache GC.
-	EngineLocalCachePolicy() bkclient.PruneInfo
-
-	// A map of unique IDs for the result of a given cache entry set query, allowing further queries on the result
-	// to operate on a stable result rather than the live state.
-	EngineCacheEntrySetMap(context.Context) (*sync.Map, error)
+	EngineLocalCachePolicy() *bkclient.PruneInfo
 
 	// The nearest ancestor client that is not a module (either a caller from the host like the CLI
 	// or a nested exec). Useful for figuring out where local sources should be resolved from through
@@ -145,16 +141,16 @@ func (q *Query) NewModule() *Module {
 }
 
 func (q *Query) NewContainerService(ctx context.Context, ctr *Container) *Service {
-	connectServiceEffect(ctx)
 	return &Service{
+		Creator:   trace.SpanContextFromContext(ctx),
 		Query:     q,
 		Container: ctr,
 	}
 }
 
 func (q *Query) NewTunnelService(ctx context.Context, upstream dagql.Instance[*Service], ports []PortForward) *Service {
-	connectServiceEffect(ctx)
 	return &Service{
+		Creator:        trace.SpanContextFromContext(ctx),
 		Query:          q,
 		TunnelUpstream: &upstream,
 		TunnelPorts:    ports,
@@ -162,8 +158,8 @@ func (q *Query) NewTunnelService(ctx context.Context, upstream dagql.Instance[*S
 }
 
 func (q *Query) NewHostService(ctx context.Context, socks []*Socket) *Service {
-	connectServiceEffect(ctx)
 	return &Service{
+		Creator:     trace.SpanContextFromContext(ctx),
 		Query:       q,
 		HostSockets: socks,
 	}

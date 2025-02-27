@@ -18,13 +18,13 @@ import (
 
 	"dagger.io/dagger"
 	"github.com/dagger/dagger/internal/testutil"
-	"github.com/dagger/dagger/testctx"
+	"github.com/dagger/testctx"
 )
 
 type GitSuite struct{}
 
 func TestGit(t *testing.T) {
-	testctx.Run(testCtx, t, GitSuite{}, Middleware()...)
+	testctx.New(t, Middleware()...).RunTests(GitSuite{})
 }
 
 func (GitSuite) TestGit(ctx context.Context, t *testctx.T) {
@@ -254,7 +254,7 @@ sleep infinity
 	sshSvc := hostKeyGen.
 		WithMountedFile("/root/start.sh", setupScript).
 		WithExposedPort(sshPort).
-		WithExec([]string{"sh", "/root/start.sh"}).
+		WithDefaultArgs([]string{"sh", "/root/start.sh"}).
 		AsService()
 
 	sshHost, err := sshSvc.Hostname(ctx)
@@ -295,7 +295,7 @@ func (GitSuite) TestGitTagsSSH(ctx context.Context, t *testctx.T) {
 	t.Run("without SSH auth", func(ctx context.Context, t *testctx.T) {
 		_, err := c.Git(repoURL).Tags(ctx)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "Permission denied (publickey)")
+		requireErrOut(t, err, "Permission denied (publickey)")
 	})
 }
 
@@ -374,8 +374,8 @@ func (GitSuite) TestAuthProviders(ctx context.Context, t *testctx.T) {
 			File("README.md").
 			Contents(ctx)
 		require.Error(t, err)
-		require.ErrorContains(t, err, "git error")
-		require.ErrorContains(t, err, "Authentication failed for 'https://github.com/grouville/daggerverse-private.git/'")
+		requireErrOut(t, err, "git error")
+		requireErrOut(t, err, "Authentication failed for 'https://github.com/grouville/daggerverse-private.git/'")
 	})
 }
 
@@ -389,8 +389,8 @@ func (GitSuite) TestAuth(ctx context.Context, t *testctx.T) {
 			Tree().
 			File("README.md").
 			Contents(ctx)
-		require.ErrorContains(t, err, "git error")
-		require.ErrorContains(t, err, "failed to fetch remote")
+		requireErrOut(t, err, "git error")
+		requireErrOut(t, err, "failed to fetch remote")
 	})
 
 	t.Run("incorrect auth", func(ctx context.Context, t *testctx.T) {
@@ -400,8 +400,8 @@ func (GitSuite) TestAuth(ctx context.Context, t *testctx.T) {
 			Tree().
 			File("README.md").
 			Contents(ctx)
-		require.ErrorContains(t, err, "git error")
-		require.ErrorContains(t, err, "failed to fetch remote")
+		requireErrOut(t, err, "git error")
+		requireErrOut(t, err, "failed to fetch remote")
 	})
 
 	t.Run("token auth", func(ctx context.Context, t *testctx.T) {
@@ -438,6 +438,7 @@ func (GitSuite) TestServiceStableDigest(ctx context.Context, t *testctx.T) {
 			WithMountedDirectory("/repo", c.Git(url, dagger.GitOpts{
 				ExperimentalServiceHost: svc,
 			}).Branch("main").Tree()).
+			WithDefaultArgs([]string{"sleep"}).
 			AsService().
 			Hostname(ctx)
 		require.NoError(t, err)

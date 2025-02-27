@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"dagger.io/dagger/telemetry"
-	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/Khan/genqlient/graphql"
 	"github.com/containerd/containerd/content"
 	"github.com/koron-go/prefixw"
@@ -89,8 +88,7 @@ type daggerSession struct {
 	containers   map[bkgw.Container]struct{}
 	containersMu sync.Mutex
 
-	dagqlCache       dagql.Cache
-	cacheEntrySetMap *sync.Map
+	dagqlCache dagql.Cache
 
 	interactive        bool
 	interactiveCommand []string
@@ -132,6 +130,10 @@ type daggerClient struct {
 
 	// if the client is coming from a module, this is that module
 	mod *core.Module
+	// during module initialization, we don't have a full module yet but need to call
+	// a function to get the module typedefs. In this case mod is nil but modName
+	// will be set to allow SDKs to get the module name during that call if needed.
+	modName string
 
 	// the DAG of modules being served to this client
 	deps *core.ModDeps
@@ -174,6 +176,13 @@ func (client *daggerClient) FlushTelemetry(ctx context.Context) error {
 	var errs error
 	if client.tracerProvider != nil {
 		slog.ExtraDebug("force flushing client traces")
+		// FIXME: mitigation for goroutine leak fixed upstream in
+		// https://github.com/open-telemetry/opentelemetry-go/pull/6363
+		// Just give this context a real generous timeout for now so if we
+		// are canceled we don't leak
+		// Can undo this once we've picked up the upstream fix.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+		defer cancel()
 		errs = errors.Join(errs, client.tracerProvider.ForceFlush(ctx))
 	}
 	if client.loggerProvider != nil {
@@ -236,7 +245,6 @@ func (srv *Server) initializeDaggerSession(
 	sess.refs = map[buildkit.Reference]struct{}{}
 	sess.containers = map[bkgw.Container]struct{}{}
 	sess.dagqlCache = dagql.NewCache()
-	sess.cacheEntrySetMap = &sync.Map{}
 	sess.telemetryPubSub = srv.telemetryPubSub
 	sess.interactive = clientMetadata.Interactive
 	sess.interactiveCommand = clientMetadata.InteractiveCommand
@@ -407,6 +415,11 @@ type ClientInitOpts struct {
 	// that this client should have access to due to being set in the parent
 	// object.
 	ParentIDs map[digest.Digest]*resource.ID
+
+	// corner case: when initializing a module by calling it to get its typedefs, we don't actually
+	// have a full EncodedModuleID yet, but some SDKs still call CurrentModule.name then. For this
+	// case we just provide the ModuleName and use that to support CurrentModule.name.
+	ModuleName string
 }
 
 // requires that client.stateMu is held
@@ -417,7 +430,7 @@ func (srv *Server) initializeDaggerClient(
 	opts *ClientInitOpts,
 ) error {
 	// initialize all the buildkit+session attachable state for the client
-	client.secretStore = core.NewSecretStore()
+	client.secretStore = core.NewSecretStore(srv.bkSessionManager)
 	client.socketStore = core.NewSocketStore(srv.bkSessionManager)
 	if opts.CallID != nil {
 		if opts.CallerClientID == "" {
@@ -436,7 +449,7 @@ func (srv *Server) initializeDaggerClient(
 		// of the caller
 		for _, id := range opts.ParentIDs {
 			if err := srv.addClientResourcesFromID(ctx, client, id, opts.CallerClientID, false); err != nil {
-				return fmt.Errorf("failed to add client resources from ID: %w", err)
+				return fmt.Errorf("failed to add parent client resources from ID: %w", err)
 			}
 		}
 	}
@@ -558,6 +571,8 @@ func (srv *Server) initializeDaggerClient(
 	}
 	client.defaultDeps = core.NewModDeps(client.dagqlRoot, []core.Mod{coreMod})
 
+	client.modName = opts.ModuleName
+
 	if opts.EncodedModuleID == "" {
 		client.deps = core.NewModDeps(client.dagqlRoot, []core.Mod{coreMod})
 		coreMod.Dag.View = engine.BaseVersion(engine.NormalizeVersion(client.clientVersion))
@@ -574,10 +589,7 @@ func (srv *Server) initializeDaggerClient(
 
 		// this is needed to set the view of the core api as compatible
 		// with the module we're currently calling from
-		engineVersion, err := client.mod.Source.Self.ModuleEngineVersion(ctx)
-		if err != nil {
-			return err
-		}
+		engineVersion := client.mod.Source.Self.EngineVersion
 		coreMod.Dag.View = engine.BaseVersion(engine.NormalizeVersion(engineVersion))
 
 		// NOTE: *technically* we should reload the module here, so that we can
@@ -610,7 +622,9 @@ func (srv *Server) initializeDaggerClient(
 	tracerOpts := []sdktrace.TracerProviderOption{
 		// install a span processor that modifies spans created by Buildkit to
 		// fit our ideal format
-		sdktrace.WithSpanProcessor(buildkit.SpanProcessor{}),
+		sdktrace.WithSpanProcessor(buildkit.NewSpanProcessor(
+			client.bkClient,
+		)),
 		// save to our own client's DB
 		sdktrace.WithSpanProcessor(telemetry.NewLiveSpanProcessor(
 			srv.telemetryPubSub.Spans(client),
@@ -627,14 +641,12 @@ func (srv *Server) initializeDaggerClient(
 	}
 
 	const metricReaderInterval = 1 * time.Second
-	const metricReaderTimeout = 1 * time.Second
 
 	meterOpts := []sdkmetric.Option{
 		sdkmetric.WithResource(telemetry.Resource),
 		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(
 			srv.telemetryPubSub.Metrics(client),
 			sdkmetric.WithInterval(metricReaderInterval),
-			sdkmetric.WithTimeout(metricReaderTimeout),
 		)),
 	}
 
@@ -655,7 +667,6 @@ func (srv *Server) initializeDaggerClient(
 			sdkmetric.NewPeriodicReader(
 				srv.telemetryPubSub.Metrics(parent),
 				sdkmetric.WithInterval(metricReaderInterval),
-				sdkmetric.WithTimeout(metricReaderTimeout),
 			),
 		))
 	}
@@ -908,6 +919,7 @@ func (srv *Server) ServeHTTPToNestedClient(w http.ResponseWriter, r *http.Reques
 		EncodedModuleID:     execMD.EncodedModuleID,
 		EncodedFunctionCall: execMD.EncodedFunctionCall,
 		ParentIDs:           execMD.ParentIDs,
+		ModuleName:          execMD.ModuleName,
 	}).ServeHTTP(w, r)
 }
 
@@ -977,6 +989,7 @@ func (srv *Server) serveHTTPToClient(w http.ResponseWriter, r *http.Request, opt
 
 		mux.Handle(engine.SessionAttachablesEndpoint, httpHandlerFunc(srv.serveSessionAttachables, client))
 		mux.Handle(engine.QueryEndpoint, httpHandlerFunc(srv.serveQuery, client))
+		mux.Handle(engine.InitEndpoint, httpHandlerFunc(srv.serveInit, client))
 		mux.Handle(engine.ShutdownEndpoint, httpHandlerFunc(srv.serveShutdown, client))
 		sess.endpointMu.RLock()
 		for path, handler := range sess.endpoints {
@@ -1046,6 +1059,11 @@ func (srv *Server) serveSessionAttachables(w http.ResponseWriter, r *http.Reques
 	}
 
 	ctx = client.daggerSession.withShutdownCancel(ctx)
+
+	// Disable collecting otel metrics on these grpc connections for now. We don't use them and
+	// they add noticeable memory allocation overhead, especially for heavy filesync use cases.
+	ctx = trace.ContextWithSpan(ctx, trace.SpanFromContext(nil)) //nolint:staticcheck // we have to provide a nil context...
+
 	err = srv.bkSessionManager.HandleConn(ctx, conn, map[string][]string{
 		engine.SessionIDMetaKey:         {client.clientID},
 		engine.SessionNameMetaKey:       {client.clientID},
@@ -1087,7 +1105,7 @@ func (srv *Server) serveQuery(w http.ResponseWriter, r *http.Request, client *da
 		return gqlErr(fmt.Errorf("failed to get schema: %w", err), http.StatusBadRequest)
 	}
 
-	gqlSrv := handler.NewDefaultServer(schema)
+	gqlSrv := dagql.NewDefaultHandler(schema)
 	// NB: break glass when needed:
 	// gqlSrv.AroundResponses(func(ctx context.Context, next graphql.ResponseHandler) *graphql.Response {
 	// 	res := next(ctx)
@@ -1115,6 +1133,22 @@ func (srv *Server) serveQuery(w http.ResponseWriter, r *http.Request, client *da
 	return nil
 }
 
+func (srv *Server) serveInit(w http.ResponseWriter, _ *http.Request, client *daggerClient) (rerr error) {
+	sess := client.daggerSession
+	slog := slog.With(
+		"isMainClient", client.clientID == sess.mainClientCallerID,
+		"sessionID", sess.sessionID,
+		"clientID", client.clientID,
+		"mainClientID", sess.mainClientCallerID)
+
+	slog.Trace("initialized client")
+
+	// nothing to actually do, client was passed in
+	w.WriteHeader(http.StatusNoContent)
+
+	return nil
+}
+
 func (srv *Server) serveShutdown(w http.ResponseWriter, r *http.Request, client *daggerClient) (rerr error) {
 	ctx := r.Context()
 
@@ -1136,6 +1170,14 @@ func (srv *Server) serveShutdown(w http.ResponseWriter, r *http.Request, client 
 		sess.services.StopSessionServices(ctx, sess.sessionID)
 
 		if len(sess.cacheExporterCfgs) > 0 {
+			ctx = context.WithoutCancel(ctx)
+			t := client.tracerProvider.Tracer(InstrumentationLibrary)
+			ctx, span := t.Start(ctx, "cache export", telemetry.Encapsulate())
+			defer span.End()
+
+			// create an internal span so we hide exporter children spans which are quite noisy
+			ctx, cInternal := t.Start(ctx, "cache export internal", telemetry.Internal())
+			defer cInternal.End()
 			bklog.G(ctx).Debugf("running cache export for client %s", client.clientID)
 			cacheExporterFuncs := make([]buildkit.ResolveCacheExporterFunc, len(sess.cacheExporterCfgs))
 			for i, cacheExportCfg := range sess.cacheExporterCfgs {
@@ -1201,11 +1243,15 @@ func (srv *Server) CurrentModule(ctx context.Context) (*core.Module, error) {
 	if client.clientID == client.daggerSession.mainClientCallerID {
 		return nil, fmt.Errorf("%w: main client caller has no current module", core.ErrNoCurrentModule)
 	}
-	if client.mod == nil {
-		return nil, core.ErrNoCurrentModule
+	if client.mod != nil {
+		return client.mod, nil
 	}
 
-	return client.mod, nil
+	if client.modName != "" {
+		return &core.Module{NameField: client.modName}, nil
+	}
+
+	return nil, core.ErrNoCurrentModule
 }
 
 // If the current client is coming from a function, return the function call metadata
@@ -1285,16 +1331,6 @@ func (srv *Server) Sockets(ctx context.Context) (*core.SocketStore, error) {
 		return nil, err
 	}
 	return client.socketStore, nil
-}
-
-// A map of unique IDs for the result of a given cache entry set query, allowing further queries on the result
-// to operate on a stable result rather than the live state.
-func (srv *Server) EngineCacheEntrySetMap(ctx context.Context) (*sync.Map, error) {
-	client, err := srv.clientFromContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return client.daggerSession.cacheEntrySetMap, nil
 }
 
 // The auth provider for the current client
@@ -1410,7 +1446,12 @@ func httpHandlerFunc[T any](fn func(http.ResponseWriter, *http.Request, T) error
 		if err == nil {
 			return
 		}
-		bklog.G(r.Context()).WithError(err).Error("failed to serve request")
+
+		bklog.G(r.Context()).
+			WithField("method", r.Method).
+			WithField("path", r.URL.Path).
+			WithError(err).Error("failed to serve request")
+
 		// check whether this is a hijacked connection, if so we can't write any http errors to it
 		if _, testErr := w.Write(nil); testErr == http.ErrHijacked {
 			return

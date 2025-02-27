@@ -180,7 +180,7 @@ func (gha *Gha) Workflow(
 		w = w.onPullRequest(nil, onPullRequestBranches, nil)
 	}
 	if onPullRequestPaths != nil {
-		w = w.onPullRequest([]string{"paths"}, nil, onPullRequestPaths)
+		w = w.onPullRequest(nil, nil, onPullRequestPaths)
 	}
 	if onPullRequestAssigned {
 		w = w.onPullRequest([]string{"assigned"}, nil, nil)
@@ -315,7 +315,7 @@ func (w *Workflow) onPush(
 
 // Add a trigger to execute a Dagger workflow on a schedule time
 func (w *Workflow) onSchedule(
-	// Cron exressions from https://pubs.opengroup.org/onlinepubs/9699919799/utilities/crontab.html#tag_20_25_07.
+	// Cron expressions from https://pubs.opengroup.org/onlinepubs/9699919799/utilities/crontab.html#tag_20_25_07.
 	// +optional
 	expressions []string,
 ) *Workflow {
@@ -384,12 +384,31 @@ func (w *Workflow) asWorkflow() api.Workflow {
 	jobs := map[string]api.Job{}
 	for _, job := range w.Jobs {
 		steps := []api.JobStep{}
-		// TODO: make checkout configurable
-		steps = append(steps, job.checkoutStep())
+		steps = append(steps, job.checkoutStep()) // TODO: make checkout configurable
 		steps = append(steps, job.installDaggerSteps()...)
-		steps = append(steps, job.warmEngineStep(), job.callDaggerStep())
+		steps = append(steps, job.warmEngineStep())
+		for _, cmd := range job.SetupCommands {
+			steps = append(steps, api.JobStep{
+				Name:  cmd,
+				Shell: "bash",
+				Run:   cmd,
+			})
+		}
+		callStep := job.callDaggerStep()
+		steps = append(steps, callStep)
+		if job.UploadLogs {
+			steps = append(steps, job.uploadJobOutputStep(callStep, "stderr_file"))
+			steps = append(steps, job.uploadEngineLogsStep()...)
+		}
 		if job.StopEngine {
 			steps = append(steps, job.stopEngineStep())
+		}
+		for _, cmd := range job.TeardownCommands {
+			steps = append(steps, api.JobStep{
+				Name:  cmd,
+				Shell: "bash",
+				Run:   cmd,
+			})
 		}
 
 		jobs[idify(job.Name)] = api.Job{
@@ -398,10 +417,6 @@ func (w *Workflow) asWorkflow() api.Workflow {
 			RunsOn:         job.Runner,
 			Steps:          steps,
 			TimeoutMinutes: job.TimeoutMinutes,
-			Outputs: map[string]string{
-				"stdout": "${{ steps.exec.outputs.stdout }}",
-				"stderr": "${{ steps.exec.outputs.stderr }}", // FIXME: max output size is 1MB
-			},
 		}
 	}
 	return api.Workflow{

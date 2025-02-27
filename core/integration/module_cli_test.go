@@ -8,15 +8,17 @@ import (
 	"strings"
 	"testing"
 
+	"dagger.io/dagger"
 	"github.com/dagger/dagger/core/modules"
-	"github.com/dagger/dagger/testctx"
+	"github.com/dagger/testctx"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 type CLISuite struct{}
 
 func TestCLI(t *testing.T) {
-	testctx.Run(testCtx, t, CLISuite{}, Middleware()...)
+	testctx.New(t, Middleware()...).RunTests(CLISuite{})
 }
 
 func (CLISuite) TestDaggerInit(ctx context.Context, t *testctx.T) {
@@ -148,7 +150,7 @@ func (CLISuite) TestDaggerInit(ctx context.Context, t *testctx.T) {
 
 		_, err := ctr.Stdout(ctx)
 		require.Error(t, err)
-		require.ErrorContains(t, err, "source subdir path \"../..\" escapes context")
+		requireErrOut(t, err, "source subpath \"../..\" escapes source root")
 	})
 }
 
@@ -166,7 +168,7 @@ func (CLISuite) TestDaggerInitLICENSE(ctx context.Context, t *testctx.T) {
 		require.Contains(t, content, "Apache License, Version 2.0")
 	})
 
-	t.Run("do not boostrap LICENSE file if license is set empty", func(ctx context.Context, t *testctx.T) {
+	t.Run("do not bootstrap LICENSE file if license is set empty", func(ctx context.Context, t *testctx.T) {
 		c := connect(ctx, t)
 
 		modGen := c.Container().From(golangImage).
@@ -215,7 +217,7 @@ func (CLISuite) TestDaggerInitLICENSE(ctx context.Context, t *testctx.T) {
 			require.Contains(t, content, "Apache License, Version 2.0")
 		})
 
-		t.Run("boostrap custom LICENSE file if sdk and license are specified", func(ctx context.Context, t *testctx.T) {
+		t.Run("bootstrap custom LICENSE file if sdk and license are specified", func(ctx context.Context, t *testctx.T) {
 			modGen := modGen.With(daggerExec("develop", "--sdk=go", `--license=MIT`))
 
 			content, err := modGen.File("LICENSE").Contents(ctx)
@@ -380,7 +382,7 @@ func (CLISuite) TestDaggerInitGit(ctx context.Context, t *testctx.T) {
 					With(daggerExec("develop", "--sdk=go"))
 
 				_, err = modGen.File(".gitignore").Contents(ctx)
-				require.ErrorContains(t, err, "no such file or directory")
+				requireErrOut(t, err, "no such file or directory")
 			})
 		})
 	}
@@ -448,10 +450,10 @@ func (CLISuite) TestDaggerDevelop(ctx context.Context, t *testctx.T) {
 				// currently, we don't support renaming or re-sdking a module, make sure that errors comprehensibly
 
 				_, err = ctr.With(daggerExec("develop", "--sdk", "python")).Sync(ctx)
-				require.ErrorContains(t, err, `cannot update module SDK that has already been set to "go"`)
+				requireErrOut(t, err, `cannot update module SDK that has already been set to "go"`)
 
 				_, err = ctr.With(daggerExec("develop", "--source", "blahblahblaha/blah")).Sync(ctx)
-				require.ErrorContains(t, err, `cannot update module source path that has already been set to "cool/subdir"`)
+				requireErrOut(t, err, `cannot update module source path that has already been set to "cool/subdir"`)
 			})
 		}
 	})
@@ -513,7 +515,7 @@ func (CLISuite) TestDaggerDevelop(ctx context.Context, t *testctx.T) {
 				With(mountedSocket).
 				With(daggerExec("develop", "-m", testGitModuleRef(tc, "top-level"))).
 				Sync(ctx)
-			require.ErrorContains(t, err, `module must be local`)
+			requireErrRegexp(t, err, `module source ".*" kind must be "local", got "git"`)
 		})
 	})
 
@@ -675,6 +677,56 @@ func (CLISuite) TestDaggerInstall(ctx context.Context, t *testctx.T) {
 		})
 	})
 
+	t.Run("installing a dependency with duplicate name is not allowed", func(ctx context.Context, t *testctx.T) {
+		c := connect(ctx, t)
+
+		ctr := c.Container().
+			From("alpine:latest").
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work/dep").
+			With(daggerExec("init", "--sdk=go", "--name=dep", "--source=.")).
+			WithWorkdir("/work/dep2").
+			With(daggerExec("init", "--sdk=go", "--name=dep2", "--source=.")).
+			WithWorkdir("/work").
+			With(daggerExec("init", "--sdk=go", "--name=foo", "--source=.")).
+			With(daggerExec("install", "./dep"))
+
+		daggerjson, err := ctr.File("dagger.json").Contents(ctx)
+		require.NoError(t, err)
+		require.Contains(t, daggerjson, `"dep"`)
+
+		_, err = ctr.
+			With(daggerExec("install", "./dep2", "--name=dep")).
+			Sync(ctx)
+
+		requireErrOut(t, err, fmt.Sprintf("duplicate dependency name %q", "dep"))
+	})
+
+	t.Run("installing a dependency with implicit duplicate name is not allowed", func(ctx context.Context, t *testctx.T) {
+		c := connect(ctx, t)
+
+		ctr := c.Container().
+			From("alpine:latest").
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work/dep").
+			With(daggerExec("init", "--sdk=go", "--name=dep", "--source=.")).
+			WithWorkdir("/work/dep2").
+			With(daggerExec("init", "--sdk=go", "--name=dep", "--source=.")).
+			WithWorkdir("/work").
+			With(daggerExec("init", "--sdk=go", "--source=.")).
+			With(daggerExec("install", "./dep"))
+
+		daggerjson, err := ctr.File("dagger.json").Contents(ctx)
+		require.NoError(t, err)
+		require.Contains(t, daggerjson, `"dep"`)
+
+		_, err = ctr.
+			With(daggerExec("install", "./dep2")).
+			Sync(ctx)
+
+		requireErrOut(t, err, fmt.Sprintf("duplicate dependency name %q", "dep"))
+	})
+
 	t.Run("install dep from various places", func(ctx context.Context, t *testctx.T) {
 		c := connect(ctx, t)
 
@@ -805,7 +857,7 @@ func (CLISuite) TestDaggerInstall(ctx context.Context, t *testctx.T) {
 				WithWorkdir("/work/test").
 				With(daggerExec("install", "../../play/dep")).
 				Sync(ctx)
-			require.ErrorContains(t, err, `local module dep source path "../play/dep" escapes context "/work"`)
+			requireErrOut(t, err, `local module dependency context directory "/play/dep" is not in parent context directory "/work"`)
 		})
 
 		t.Run("from src dir with absolute path", func(ctx context.Context, t *testctx.T) {
@@ -813,7 +865,7 @@ func (CLISuite) TestDaggerInstall(ctx context.Context, t *testctx.T) {
 				WithWorkdir("/work/test").
 				With(daggerExec("install", "/play/dep")).
 				Sync(ctx)
-			require.ErrorContains(t, err, `local module dep source path "../play/dep" escapes context "/work"`)
+			requireErrOut(t, err, `local module dependency context directory "/play/dep" is not in parent context directory "/work"`)
 		})
 
 		t.Run("from dep dir", func(ctx context.Context, t *testctx.T) {
@@ -821,7 +873,7 @@ func (CLISuite) TestDaggerInstall(ctx context.Context, t *testctx.T) {
 				WithWorkdir("/play/dep").
 				With(daggerExec("install", "-m=../../work/test", ".")).
 				Sync(ctx)
-			require.ErrorContains(t, err, `module dep source path "../play/dep" escapes context "/work"`)
+			requireErrOut(t, err, `local module dependency context directory "/play/dep" is not in parent context directory "/work"`)
 		})
 
 		t.Run("from dep dir with absolute path", func(ctx context.Context, t *testctx.T) {
@@ -829,7 +881,7 @@ func (CLISuite) TestDaggerInstall(ctx context.Context, t *testctx.T) {
 				WithWorkdir("/play/dep").
 				With(daggerExec("install", "-m=/work/test", ".")).
 				Sync(ctx)
-			require.ErrorContains(t, err, `module dep source path "../play/dep" escapes context "/work"`)
+			requireErrOut(t, err, `local module dependency context directory "/play/dep" is not in parent context directory "/work"`)
 		})
 
 		t.Run("from root", func(ctx context.Context, t *testctx.T) {
@@ -837,7 +889,7 @@ func (CLISuite) TestDaggerInstall(ctx context.Context, t *testctx.T) {
 				WithWorkdir("/").
 				With(daggerExec("install", "-m=work/test", "play/dep")).
 				Sync(ctx)
-			require.ErrorContains(t, err, `module dep source path "../play/dep" escapes context "/work"`)
+			requireErrOut(t, err, `local module dependency context directory "/play/dep" is not in parent context directory "/work"`)
 		})
 
 		t.Run("from root with absolute path", func(ctx context.Context, t *testctx.T) {
@@ -845,7 +897,7 @@ func (CLISuite) TestDaggerInstall(ctx context.Context, t *testctx.T) {
 				WithWorkdir("/").
 				With(daggerExec("install", "-m=/work/test", "play/dep")).
 				Sync(ctx)
-			require.ErrorContains(t, err, `module dep source path "../play/dep" escapes context "/work"`)
+			requireErrOut(t, err, `local module dependency context directory "/play/dep" is not in parent context directory "/work"`)
 		})
 	})
 
@@ -889,7 +941,7 @@ func (m *Test) Fn(ctx context.Context) (string, error) {
 					With(daggerExec("init", "--name=test", "--sdk=go", "--source=.")).
 					With(daggerExec("install", testGitModuleRef(tc, "../../"))).
 					Sync(ctx)
-				require.ErrorContains(t, err, `git module source subpath points out of root: "../.."`)
+				requireErrOut(t, err, `git module source subpath points out of root: "../.."`)
 
 				_, err = goGitBase(t, c).
 					With(mountedSocket).
@@ -897,7 +949,7 @@ func (m *Test) Fn(ctx context.Context) (string, error) {
 					With(daggerExec("init", "--name=test", "--sdk=go", "--source=.")).
 					With(daggerExec("install", testGitModuleRef(tc, "this/just/does/not/exist"))).
 					Sync(ctx)
-				require.ErrorContains(t, err, `module "test" dependency "" with source root path "this/just/does/not/exist" does not exist or does not have a configuration file`)
+				requireErrRegexp(t, err, `git module source .* does not contain a dagger config file`)
 			})
 
 			t.Run("unpinned gets pinned", func(ctx context.Context, t *testctx.T) {
@@ -921,6 +973,62 @@ func (m *Test) Fn(ctx context.Context) (string, error) {
 			})
 		})
 	})
+}
+
+func (CLISuite) TestDaggerInstallOrder(ctx context.Context, t *testctx.T) {
+	c := connect(ctx, t)
+
+	base := goGitBase(t, c).
+		WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+		WithWorkdir("/work/dep-abc").
+		With(daggerExec("init", "--source=.", "--name=dep-abc", "--sdk=go")).
+		WithNewFile("/work/dep-abc/main.go", `package main
+
+			import "context"
+
+			type DepAbc struct {}
+
+			func (m *DepAbc) DepFn(ctx context.Context, str string) string { return str }
+			`,
+		).
+		WithWorkdir("/work/dep-xyz").
+		With(daggerExec("init", "--source=.", "--name=dep-xyz", "--sdk=go")).
+		WithNewFile("/work/dep-xyz/main.go", `package main
+
+			import "context"
+
+			type DepXyz struct {}
+
+			func (m *DepXyz) DepFn(ctx context.Context, str string) string { return str }
+			`,
+		).
+		WithWorkdir("/work").
+		With(daggerExec("init", "--source=test", "--name=test", "--sdk=go"))
+
+	daggerJSON, err := base.
+		With(daggerExec("install", "./dep-abc")).
+		With(daggerExec("install", "./dep-xyz")).
+		File("dagger.json").
+		Contents(ctx)
+	require.NoError(t, err)
+	names := []string{}
+	for _, name := range gjson.Get(daggerJSON, "dependencies.#.name").Array() {
+		names = append(names, name.String())
+	}
+	require.Equal(t, []string{"dep-abc", "dep-xyz"}, names)
+
+	daggerJSON, err = base.
+		// switch the installation order
+		With(daggerExec("install", "./dep-xyz")).
+		With(daggerExec("install", "./dep-abc")).
+		File("dagger.json").
+		Contents(ctx)
+	require.NoError(t, err)
+	names = []string{}
+	for _, name := range gjson.Get(daggerJSON, "dependencies.#.name").Array() {
+		names = append(names, name.String())
+	}
+	require.Equal(t, []string{"dep-abc", "dep-xyz"}, names)
 }
 
 func (CLISuite) TestCLIFunctions(ctx context.Context, t *testctx.T) {
@@ -1036,7 +1144,7 @@ func (m *OtherObj) FnE() *dagger.Container {
 
 	t.Run("return primitive", func(ctx context.Context, t *testctx.T) {
 		_, err := ctr.With(daggerFunctions("prim")).Stdout(ctx)
-		require.ErrorContains(t, err, `function "prim" returns type "STRING_KIND" with no further functions available`)
+		requireErrOut(t, err, `function "prim" returns type "STRING_KIND" with no further functions available`)
 	})
 
 	t.Run("alt casing", func(ctx context.Context, t *testctx.T) {
@@ -1078,4 +1186,462 @@ func (m *OtherObj) FnE() *dagger.Container {
 		require.Contains(t, lines, "other-field-d   doc for OtherFieldD")
 		require.Contains(t, lines, "fn-e            doc for FnE")
 	})
+
+	t.Run("no module present errors nicely", func(ctx context.Context, t *testctx.T) {
+		_, err := ctr.
+			WithWorkdir("/empty").
+			With(daggerFunctions()).
+			Stdout(ctx)
+		requireErrOut(t, err, `module not found`)
+	})
+}
+
+func (CLISuite) TestDaggerUnInstall(ctx context.Context, t *testctx.T) {
+	t.Run("local dep", func(ctx context.Context, t *testctx.T) {
+		t.Run("uninstall a dependency currently used in module", func(ctx context.Context, t *testctx.T) {
+			c := connect(ctx, t)
+
+			ctr := c.Container().
+				From(alpineImage).
+				WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+				WithWorkdir("/work/bar").
+				With(daggerExec("init", "--sdk=go", "--name=bar", "--source=.")).
+				WithWorkdir("/work").
+				With(daggerExec("init", "--sdk=go", "--name=foo", "--source=.")).
+				With(daggerExec("install", "./bar")).
+				WithNewFile("main.go", `package main
+
+import (
+	"context"
+)
+
+type Foo struct{}
+
+func (f *Foo) ContainerEcho(ctx context.Context, input string) (string, error) {
+	return dag.Bar().ContainerEcho(input).Stdout(ctx)
+}
+`)
+
+			daggerjson, err := ctr.File("dagger.json").Contents(ctx)
+			require.NoError(t, err)
+			require.Contains(t, daggerjson, "bar")
+
+			daggerjson, err = ctr.With(daggerExec("uninstall", "bar")).
+				File("dagger.json").Contents(ctx)
+			require.NoError(t, err)
+			require.NotContains(t, daggerjson, "bar")
+		})
+
+		testcases := []struct {
+			name            string
+			modName         string
+			installCmd      []string
+			beforeUninstall dagger.WithContainerFunc
+			uninstallCmd    []string
+		}{
+			{
+				name:         "uninstall a dependency configured in dagger.json by name",
+				modName:      "baz",
+				installCmd:   []string{"install", "./bar", "--name=baz"},
+				uninstallCmd: []string{"uninstall", "baz"},
+			},
+			{
+				name:         "uninstall a dependency configured in dagger.json",
+				modName:      "bar",
+				installCmd:   []string{"install", "./bar"},
+				uninstallCmd: []string{"uninstall", "bar"},
+			},
+			{
+				name:         "uninstall a dependency configured in dagger.json using relative path syntax",
+				modName:      "bar",
+				installCmd:   []string{"install", "./bar"},
+				uninstallCmd: []string{"uninstall", "./bar"},
+			},
+			{
+				name:         "uninstall a dependency not configured in dagger.json",
+				modName:      "bar",
+				installCmd:   []string{},
+				uninstallCmd: []string{"uninstall", "./bar"},
+			},
+			{
+				name:       "dependency source is removed before calling uninstall",
+				modName:    "bar",
+				installCmd: []string{"install", "./bar"},
+				beforeUninstall: func(ctr *dagger.Container) *dagger.Container {
+					return ctr.WithoutDirectory("/work/bar")
+				},
+				uninstallCmd: []string{"uninstall", "bar"},
+			},
+			{
+				name:       "dependency source is removed before calling uninstall using relative path",
+				modName:    "bar",
+				installCmd: []string{"install", "./bar"},
+				beforeUninstall: func(ctr *dagger.Container) *dagger.Container {
+					return ctr.WithoutDirectory("/work/bar")
+				},
+				uninstallCmd: []string{"uninstall", "./bar"},
+			},
+		}
+
+		for _, tc := range testcases {
+			t.Run(tc.name, func(ctx context.Context, t *testctx.T) {
+				c := connect(ctx, t)
+
+				ctr := c.Container().
+					From(alpineImage).
+					WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+					WithWorkdir("/work/bar").
+					With(daggerExec("init", "--sdk=go", "--name=bar", "--source=.")).
+					WithWorkdir("/work").
+					With(daggerExec("init", "--sdk=go", "--name=foo", "--source=."))
+
+				if len(tc.installCmd) > 0 {
+					ctr = ctr.With(daggerExec(tc.installCmd...))
+				}
+
+				daggerjson, err := ctr.File("dagger.json").Contents(ctx)
+				require.NoError(t, err)
+
+				if len(tc.installCmd) > 0 {
+					require.Contains(t, daggerjson, tc.modName)
+				}
+
+				if tc.beforeUninstall != nil {
+					tc.beforeUninstall(ctr)
+				}
+
+				daggerjson, err = ctr.With(daggerExec(tc.uninstallCmd...)).
+					File("dagger.json").Contents(ctx)
+				require.NoError(t, err)
+				require.NotContains(t, daggerjson, tc.modName)
+			})
+		}
+	})
+
+	t.Run("git dependency", func(ctx context.Context, t *testctx.T) {
+		testcases := []struct {
+			// the mod used when running dagger install <mod>.
+			// empty means the dep is not installed
+			installCmdMod string
+
+			// the mod used when running dagger uninstall <mod>
+			uninstallCmdMod string
+
+			expectedError string
+		}{
+			{
+				installCmdMod:   "github.com/shykes/daggerverse/hello@v0.3.0",
+				uninstallCmdMod: "github.com/shykes/daggerverse/hello@v0.3.0",
+				expectedError:   "",
+			},
+			{
+				installCmdMod:   "github.com/shykes/daggerverse/hello@v0.3.0",
+				uninstallCmdMod: "github.com/shykes/daggerverse/hello",
+				expectedError:   "",
+			},
+			{
+				installCmdMod:   "github.com/shykes/daggerverse/hello@v0.3.0",
+				uninstallCmdMod: "hello",
+				expectedError:   "",
+			},
+			{
+				installCmdMod:   "github.com/shykes/daggerverse/hello",
+				uninstallCmdMod: "github.com/shykes/daggerverse/hello",
+				expectedError:   "",
+			},
+			{
+				installCmdMod:   "github.com/shykes/daggerverse/hello",
+				uninstallCmdMod: "github.com/shykes/daggerverse/hello@v0.3.0",
+				expectedError:   `version "v0.3.0" was requested to be uninstalled but the dependency "github.com/shykes/daggerverse/hello" was originally installed without a specific version. Try re-running the uninstall command without specifying the version number`,
+			},
+			{
+				installCmdMod:   "github.com/shykes/daggerverse/hello",
+				uninstallCmdMod: "hello",
+				expectedError:   "",
+			},
+			{
+				installCmdMod:   "github.com/shykes/daggerverse/hello@v0.1.2",
+				uninstallCmdMod: "github.com/shykes/daggerverse/hello@v0.3.0",
+				expectedError:   `version "v0.3.0" was requested to be uninstalled but the installed version is "v0.1.2"`,
+			},
+			{
+				installCmdMod:   "",
+				uninstallCmdMod: "github.com/shykes/daggerverse/hello@v0.3.0",
+				expectedError:   "",
+			},
+			{
+				installCmdMod:   "",
+				uninstallCmdMod: "github.com/shykes/daggerverse/hello",
+				expectedError:   "",
+			},
+			{
+				installCmdMod:   "",
+				uninstallCmdMod: "hello",
+				expectedError:   "",
+			},
+		}
+
+		for _, tc := range testcases {
+			t.Run(fmt.Sprintf("installed using %q, uninstalled using %q", tc.installCmdMod, tc.uninstallCmdMod), func(ctx context.Context, t *testctx.T) {
+				c := connect(ctx, t)
+
+				ctr := c.Container().
+					From(alpineImage).
+					WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+					WithWorkdir("/work").
+					With(daggerExec("init", "--sdk=go", "--name=foo", "--source=."))
+
+				if tc.installCmdMod != "" {
+					ctr = ctr.With(daggerExec("install", tc.installCmdMod))
+				}
+
+				daggerjson, err := ctr.File("dagger.json").Contents(ctx)
+				require.NoError(t, err)
+
+				if tc.installCmdMod != "" {
+					require.Contains(t, daggerjson, "hello")
+				}
+
+				daggerjson, err = ctr.With(daggerExec("uninstall", tc.uninstallCmdMod)).
+					File("dagger.json").Contents(ctx)
+
+				if tc.expectedError != "" {
+					requireErrOut(t, err, tc.expectedError)
+				} else {
+					require.NoError(t, err)
+					require.NotContains(t, daggerjson, "hello")
+				}
+			})
+		}
+	})
+}
+
+func (CLISuite) TestDaggerUpdate(ctx context.Context, t *testctx.T) {
+	const (
+		// pins from github.com/shykes/daggerverse/docker module
+		// to facilitate testing that pins are updated to expected
+		// values when we run dagger update
+		randomMainPin  = "b20176e68d27edc9660960ec27f323d33dba633b"
+		randomWolfiPin = "3d608cb5e6b4b18036a471400bc4e6c753f229d7"
+		v041DockerPin  = "5c8b312cd7c8493966d28c118834d4e9565c7c62"
+		v042DockerPin  = "7f2dcf2dbfb24af68c4c83a6da94dd5d885e58b8"
+		v013WolfiPin   = "3338120927f8e291c4780de691ef63a7c9d825c0"
+	)
+
+	// sample dagger.json files to use simulating initial setup
+	// we pin the dep to a random commit and then verify
+	// that the update actually changes the pin
+	noDeps := `{
+		"name": "foo", 
+		"sdk": "go"
+	}`
+
+	// pin a random old commit to verify pin is changed
+	depHasOldVersion := `{
+		"name": "foo", 
+		"sdk": "go", 
+		"dependencies": [
+			{ 
+				"name": "docker", 
+				"source": "github.com/shykes/daggerverse/docker@docker/v0.4.1",
+				"pin": "` + randomMainPin + `"
+			}
+		]
+	}`
+
+	depHasBranch := `{
+		"name": "foo", 
+		"sdk": "go", 
+		"dependencies": [
+			{ 
+				"name": "docker", 
+				"source": "github.com/shykes/daggerverse/docker@main",
+				"pin": "` + randomMainPin + `"
+			}
+		]
+	}`
+
+	depIsLocal := `{
+		"name": "foo", 
+		"sdk": "go", 
+		"dependencies": [
+			{ 
+				"name": "bar", 
+				"source": "./bar"
+			}
+		]
+	}`
+
+	depHasNoVersion := `{
+		"name": "foo", 
+		"sdk": "go", 
+		"dependencies": [
+			{ 
+				"name": "docker", 
+				"source": "github.com/shykes/daggerverse/docker",
+				"pin": "` + randomMainPin + `"
+			}
+		]
+	}`
+
+	multipleDeps := `{
+		"name": "foo", 
+		"sdk": "go", 
+		"dependencies": [
+			{ 
+				"name": "docker", 
+				"source": "github.com/shykes/daggerverse/docker@v0.4.1",
+				"pin": "` + randomMainPin + `"
+			},
+			{ 
+				"name": "wolfi", 
+				"source": "github.com/shykes/daggerverse/wolfi@v0.1.3",
+				"pin": "` + randomWolfiPin + `"
+			}
+		]
+	}`
+
+	testcases := []struct {
+		name          string
+		daggerjson    string
+		updateCmd     []string
+		contains      []string
+		notContains   []string
+		expectedError string
+	}{
+		{
+			name:        "existing dep has version, update cmd has version",
+			daggerjson:  depHasOldVersion,
+			updateCmd:   []string{"update", "github.com/shykes/daggerverse/docker@v0.4.2"},
+			contains:    []string{`"github.com/shykes/daggerverse/docker@docker/v0.4.2"`, v042DockerPin},
+			notContains: []string{`github.com/shykes/daggerverse/docker@docker/v0.4.1`},
+		},
+		{
+			name:        "existing dep has branch, update cmd has version",
+			daggerjson:  depHasBranch,
+			updateCmd:   []string{"update", "github.com/shykes/daggerverse/docker@v0.4.2"},
+			contains:    []string{`"github.com/shykes/daggerverse/docker@docker/v0.4.2"`, v042DockerPin},
+			notContains: []string{`github.com/shykes/daggerverse/docker@main`, randomMainPin},
+		},
+		{
+			name:        "existing dep dont have version, update cmd has version",
+			daggerjson:  depHasNoVersion,
+			updateCmd:   []string{"update", "github.com/shykes/daggerverse/docker@v0.4.2"},
+			contains:    []string{`github.com/shykes/daggerverse/docker@docker/v0.4.2`, v042DockerPin},
+			notContains: []string{`"github.com/shykes/daggerverse/docker"`},
+		},
+		{
+			name:        "existing dep dont have version, update cmd dont have version",
+			daggerjson:  depHasNoVersion,
+			updateCmd:   []string{"update", "github.com/shykes/daggerverse/docker"},
+			notContains: []string{randomMainPin},
+		},
+		{
+			name:        "existing dep use branch, update cmd dont have version",
+			daggerjson:  depHasBranch,
+			updateCmd:   []string{"update", "github.com/shykes/daggerverse/docker"},
+			contains:    []string{`"github.com/shykes/daggerverse/docker@main`},
+			notContains: []string{`"github.com/shykes/daggerverse/docker"`, randomMainPin},
+		},
+		{
+			name:        "existing dep have version, update cmd dont have version",
+			daggerjson:  depHasOldVersion,
+			updateCmd:   []string{"update", "github.com/shykes/daggerverse/docker"},
+			contains:    []string{`github.com/shykes/daggerverse/docker@docker/v0.4.1`, v041DockerPin},
+			notContains: []string{`"github.com/shykes/daggerverse/docker"`},
+		},
+		{
+			name:        "existing dep dont have version, update cmd use name without version",
+			daggerjson:  depHasNoVersion,
+			updateCmd:   []string{"update", "docker"},
+			contains:    []string{`"github.com/shykes/daggerverse/docker"`},
+			notContains: []string{randomMainPin},
+		},
+		{
+			name:        "existing dep use branch, update cmd use name without version",
+			daggerjson:  depHasBranch,
+			updateCmd:   []string{"update", "docker"},
+			contains:    []string{`"github.com/shykes/daggerverse/docker@main`},
+			notContains: []string{`"github.com/shykes/daggerverse/docker"`, randomMainPin},
+		},
+		{
+			name:        "existing dep have version, update cmd use name without version",
+			daggerjson:  depHasOldVersion,
+			updateCmd:   []string{"update", "docker"},
+			contains:    []string{`github.com/shykes/daggerverse/docker@docker/v0.4.1`, v041DockerPin},
+			notContains: []string{`"github.com/shykes/daggerverse/docker"`},
+		},
+		{
+			name:       "existing dep dont have version, update cmd use name with version",
+			daggerjson: depHasNoVersion,
+			updateCmd:  []string{"update", "docker@v0.4.2"},
+			contains:   []string{`"github.com/shykes/daggerverse/docker@docker/v0.4.2"`, v042DockerPin},
+		},
+		{
+			name:        "existing dep use branch, update cmd use name with version",
+			daggerjson:  depHasBranch,
+			updateCmd:   []string{"update", "docker@v0.4.2"},
+			contains:    []string{`"github.com/shykes/daggerverse/docker@docker/v0.4.2`, v042DockerPin},
+			notContains: []string{`"github.com/shykes/daggerverse/docker@main"`},
+		},
+		{
+			name:        "existing dep have version, update cmd use name with version",
+			daggerjson:  depHasOldVersion,
+			updateCmd:   []string{"update", "docker@v0.4.2"},
+			contains:    []string{`github.com/shykes/daggerverse/docker@docker/v0.4.2`, v042DockerPin},
+			notContains: []string{`"github.com/shykes/daggerverse/docker@docker/v0.4.1"`, v041DockerPin},
+		},
+		{
+			name:          "update a dependency not configured in dagger.json",
+			daggerjson:    noDeps,
+			updateCmd:     []string{"update", "github.com/shykes/daggerverse/docker@v0.4.2"},
+			expectedError: `dependency "github.com/shykes/daggerverse/docker" was requested to be updated, but it is not found in the dependencies list`,
+		},
+		{
+			name:       "can update all dependencies",
+			daggerjson: multipleDeps,
+			updateCmd:  []string{"update"},
+			contains:   []string{`"github.com/shykes/daggerverse/docker@docker/v0.4.1"`, v041DockerPin, `"github.com/shykes/daggerverse/wolfi@wolfi/v0.1.3"`, v013WolfiPin},
+		},
+		{
+			name:          "cannot update a local dependency",
+			daggerjson:    depIsLocal,
+			updateCmd:     []string{"update", "bar"},
+			expectedError: `updating local deps is not supported`,
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(ctx context.Context, t *testctx.T) {
+			c := connect(ctx, t)
+
+			ctr := c.Container().
+				From("alpine:latest").
+				WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+				WithWorkdir("/work").
+				With(daggerExec("init", "--sdk=go", "--name=foo", "--source=.")).
+				WithWorkdir("bar").
+				With(daggerExec("init", "--sdk=go", "--name=bar", "--source=.")).
+				WithWorkdir("/work").
+				WithNewFile("dagger.json", tc.daggerjson)
+
+			daggerjson, err := ctr.
+				With(daggerExec(tc.updateCmd...)).
+				File("dagger.json").
+				Contents(ctx)
+
+			if tc.expectedError != "" {
+				requireErrOut(t, err, tc.expectedError)
+			} else {
+				require.NoError(t, err)
+				for _, s := range tc.contains {
+					require.Contains(t, daggerjson, s)
+				}
+
+				for _, s := range tc.notContains {
+					require.NotContains(t, daggerjson, s)
+				}
+			}
+		})
+	}
 }

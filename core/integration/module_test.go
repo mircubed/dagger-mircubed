@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"go/format"
 	"io"
 	"net"
 	"os"
@@ -21,11 +20,9 @@ import (
 
 	"github.com/MakeNowJust/heredoc/v2"
 	"github.com/cenkalti/backoff/v4"
-	"github.com/iancoleman/strcase"
 	"github.com/moby/buildkit/identity"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
-	"golang.org/x/sync/errgroup"
 
 	"dagger.io/dagger"
 	"dagger.io/dagger/telemetry"
@@ -34,13 +31,13 @@ import (
 	"github.com/dagger/dagger/engine"
 	"github.com/dagger/dagger/engine/distconsts"
 	"github.com/dagger/dagger/internal/testutil"
-	"github.com/dagger/dagger/testctx"
+	"github.com/dagger/testctx"
 )
 
 type ModuleSuite struct{}
 
 func TestModule(t *testing.T) {
-	testctx.Run(testCtx, t, ModuleSuite{}, Middleware()...)
+	testctx.New(t, Middleware()...).RunTests(ModuleSuite{})
 }
 
 func (ModuleSuite) TestInvalidSDK(ctx context.Context, t *testctx.T) {
@@ -56,7 +53,7 @@ func (ModuleSuite) TestInvalidSDK(ctx context.Context, t *testctx.T) {
 			With(daggerQuery(`{bare{containerEcho(stringArg:"hello"){stdout}}}`)).
 			Stdout(ctx)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), `The "foo-bar" SDK does not exist.`)
+		requireErrOut(t, err, `The "foo-bar" SDK does not exist.`)
 	})
 
 	t.Run("specifying version with either of go/python/typescript sdk returns error", func(ctx context.Context, t *testctx.T) {
@@ -71,7 +68,7 @@ func (ModuleSuite) TestInvalidSDK(ctx context.Context, t *testctx.T) {
 			With(daggerQuery(`{bare{containerEcho(stringArg:"hello"){stdout}}}`)).
 			Stdout(ctx)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), `the go sdk does not currently support selecting a specific version`)
+		requireErrOut(t, err, `the go sdk does not currently support selecting a specific version`)
 	})
 }
 
@@ -80,7 +77,6 @@ func (ModuleSuite) TestDescription(ctx context.Context, t *testctx.T) {
 		file     string
 		contents string
 	}
-
 	for i, tc := range []struct {
 		sdk     string
 		sources []source
@@ -393,7 +389,7 @@ export class Test {
 			require.JSONEq(t, `{"test":{"set":{"foo": "abc"}}}`, out)
 
 			_, err = modGen.With(daggerQuery(`{test{set(foo: "abc", bar: "xyz"){bar}}}`)).Stdout(ctx)
-			require.ErrorContains(t, err, `Test has no such field: "bar"`)
+			requireErrOut(t, err, `Cannot query field \"bar\" on type \"Test\"`)
 		})
 	}
 }
@@ -710,6 +706,12 @@ func (ModuleSuite) TestConflictingSameNameDeps(ctx context.Context, t *testctx.T
 	// A -> B -> Dint
 	// A -> C -> Dstr
 	// where Dint and Dstr are modules with the same name and same object names but conflicting types
+
+	// this test is often slow if you're running locally, skip if -short is specified
+	if testing.Short() {
+		t.SkipNow()
+	}
+
 	c := connect(ctx, t)
 
 	ctr := goGitBase(t, c).
@@ -949,7 +951,7 @@ func (ModuleSuite) TestUseLocal(ctx context.Context, t *testctx.T) {
 			// cannot use transitive dependency directly
 			_, err = modGen.With(daggerQuery(`{dep{hello}}`)).Stdout(ctx)
 			require.Error(t, err)
-			require.ErrorContains(t, err, `Query has no such field: "dep"`)
+			requireErrOut(t, err, `Cannot query field \"dep\" on type \"Query\"`)
 		})
 	}
 }
@@ -1547,7 +1549,7 @@ class Test:
 
 		out, err = ctr.With(daggerCall("--foo=dagger.json", "foo", "contents")).Stdout(ctx)
 		require.NoError(t, err)
-		require.Contains(t, out, `"sdk": "python"`)
+		require.Contains(t, out, `"source": "python"`)
 
 		_, err = ctr.With(daggerCall("bar")).Sync(ctx)
 		require.NoError(t, err)
@@ -1589,7 +1591,7 @@ export class Test {
 
 		out, err = ctr.With(daggerCall("--foo=dagger.json", "foo", "contents")).Stdout(ctx)
 		require.NoError(t, err)
-		require.Contains(t, out, `"sdk": "typescript"`)
+		require.Contains(t, out, `"source": "typescript"`)
 
 		_, err = ctr.With(daggerCall("bar")).Sync(ctx)
 		require.NoError(t, err)
@@ -1704,225 +1706,6 @@ export class Test {
 	}
 }
 
-func (ModuleSuite) TestLotsOfFunctions(ctx context.Context, t *testctx.T) {
-	const funcCount = 100
-
-	t.Run("go sdk", func(ctx context.Context, t *testctx.T) {
-		c := connect(ctx, t)
-
-		mainSrc := `
-		package main
-
-		type PotatoSack struct {}
-		`
-
-		for i := 0; i < funcCount; i++ {
-			mainSrc += fmt.Sprintf(`
-			func (m *PotatoSack) Potato%d() string {
-				return "potato #%d"
-			}
-			`, i, i)
-		}
-
-		modGen := c.Container().From(golangImage).
-			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
-			WithWorkdir("/work").
-			WithNewFile("/work/main.go", mainSrc).
-			With(daggerExec("init", "--source=.", "--name=potatoSack", "--sdk=go"))
-
-		var eg errgroup.Group
-		for i := 0; i < funcCount; i++ {
-			i := i
-			// just verify a subset work
-			if i%10 != 0 {
-				continue
-			}
-			eg.Go(func() error {
-				_, err := modGen.
-					With(daggerCall(fmt.Sprintf("potato-%d", i))).
-					Sync(ctx)
-				return err
-			})
-		}
-		require.NoError(t, eg.Wait())
-	})
-
-	t.Run("python sdk", func(ctx context.Context, t *testctx.T) {
-		c := connect(ctx, t)
-
-		mainSrc := `import dagger
-
-@dagger.object_type
-class PotatoSack:
-`
-
-		for i := 0; i < funcCount; i++ {
-			mainSrc += fmt.Sprintf(`
-    @dagger.function
-    def potato_%d(self) -> str:
-        return "potato #%d"
-`, i, i)
-		}
-
-		modGen := c.Container().
-			From(golangImage).
-			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
-			WithWorkdir("/work").
-			With(fileContents("src/potato_sack/__init__.py", mainSrc)).
-			With(daggerExec("init", "--source=.", "--name=potatoSack", "--sdk=python"))
-
-		var eg errgroup.Group
-		for i := 0; i < funcCount; i++ {
-			i := i
-			// just verify a subset work
-			if i%10 != 0 {
-				continue
-			}
-			eg.Go(func() error {
-				_, err := modGen.
-					With(daggerCall(fmt.Sprintf("potato-%d", i))).
-					Sync(ctx)
-				return err
-			})
-		}
-		require.NoError(t, eg.Wait())
-	})
-
-	t.Run("typescript sdk", func(ctx context.Context, t *testctx.T) {
-		c := connect(ctx, t)
-
-		mainSrc := `
-		import { object, func } from "@dagger.io/dagger"
-
-@object()
-export class PotatoSack {
-		`
-
-		for i := 0; i < funcCount; i++ {
-			mainSrc += fmt.Sprintf(`
-  @func()
-  potato_%d(): string {
-    return "potato #%d"
-  }
-			`, i, i)
-		}
-
-		mainSrc += "\n}"
-
-		modGen := c.
-			Container().
-			From(golangImage).
-			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
-			WithWorkdir("/work").
-			With(sdkSource("typescript", mainSrc)).
-			With(daggerExec("init", "--name=potatoSack", "--sdk=typescript", "--source=."))
-
-		var eg errgroup.Group
-		for i := 0; i < funcCount; i++ {
-			i := i
-			// just verify a subset work
-			if i%10 != 0 {
-				continue
-			}
-			eg.Go(func() error {
-				_, err := modGen.
-					With(daggerCall(fmt.Sprintf("potato-%d", i))).
-					Sync(ctx)
-				return err
-			})
-		}
-		require.NoError(t, eg.Wait())
-	})
-}
-
-func (ModuleSuite) TestLotsOfDeps(ctx context.Context, t *testctx.T) {
-	c := connect(ctx, t)
-
-	modGen := goGitBase(t, c).
-		WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
-		WithWorkdir("/work")
-
-	modCount := 0
-
-	getModMainSrc := func(name string, depNames []string) string {
-		t.Helper()
-		mainSrc := fmt.Sprintf(`package main
-	import "context"
-
-	type %s struct {}
-
-	func (m *%s) Fn(ctx context.Context) (string, error) {
-		s := "%s"
-		var depS string
-		_ = depS
-		var err error
-		_ = err
-	`, strcase.ToCamel(name), strcase.ToCamel(name), name)
-		for _, depName := range depNames {
-			mainSrc += fmt.Sprintf(`
-	depS, err = dag.%s().Fn(ctx)
-	if err != nil {
-		return "", err
-	}
-	s += depS
-	`, strcase.ToCamel(depName))
-		}
-		mainSrc += "return s, nil\n}\n"
-		fmted, err := format.Source([]byte(mainSrc))
-		require.NoError(t, err)
-		return string(fmted)
-	}
-
-	// need to construct dagger.json directly in order to avoid excessive
-	// `dagger mod use` calls while constructing the huge DAG of deps
-	var rootCfg modules.ModuleConfig
-
-	addModulesWithDeps := func(newMods int, depNames []string) []string {
-		t.Helper()
-
-		var newModNames []string
-		for i := 0; i < newMods; i++ {
-			name := fmt.Sprintf("mod%d", modCount)
-			modCount++
-			newModNames = append(newModNames, name)
-			modGen = modGen.
-				WithWorkdir("/work/"+name).
-				WithNewFile("./main.go", getModMainSrc(name, depNames))
-
-			var depCfgs []*modules.ModuleConfigDependency
-			for _, depName := range depNames {
-				depCfgs = append(depCfgs, &modules.ModuleConfigDependency{
-					Name:   depName,
-					Source: filepath.Join("..", depName),
-				})
-			}
-			modGen = modGen.With(configFile(".", &modules.ModuleConfig{
-				Name:         name,
-				SDK:          "go",
-				Dependencies: depCfgs,
-			}))
-		}
-		return newModNames
-	}
-
-	// Create a base module, then add 6 layers of deps, where each layer has one more module
-	// than the previous layer and each module within the layer has a dep on each module
-	// from the previous layer. Finally add a single module at the top that depends on all
-	// modules from the last layer and call that.
-	// Basically, this creates a quadratically growing DAG of modules and verifies we
-	// handle it efficiently enough to be callable.
-	curDeps := addModulesWithDeps(1, nil)
-	for i := 0; i < 6; i++ {
-		curDeps = addModulesWithDeps(len(curDeps)+1, curDeps)
-	}
-	addModulesWithDeps(1, curDeps)
-
-	modGen = modGen.With(configFile("..", &rootCfg))
-
-	_, err := modGen.With(daggerCall("fn")).Sync(ctx)
-	require.NoError(t, err)
-}
-
 func (ModuleSuite) TestNamespacing(ctx context.Context, t *testctx.T) {
 	c := connect(ctx, t)
 
@@ -1944,6 +1727,11 @@ func (ModuleSuite) TestNamespacing(ctx context.Context, t *testctx.T) {
 func (ModuleSuite) TestLoops(ctx context.Context, t *testctx.T) {
 	// verify circular module dependencies result in an error
 
+	// this test is often slow if you're running locally, skip if -short is specified
+	if testing.Short() {
+		t.SkipNow()
+	}
+
 	c := connect(ctx, t)
 
 	_, err := goGitBase(t, c).
@@ -1954,8 +1742,9 @@ func (ModuleSuite) TestLoops(ctx context.Context, t *testctx.T) {
 		With(daggerExec("install", "-m=depC", "./depB")).
 		With(daggerExec("install", "-m=depB", "./depA")).
 		With(daggerExec("install", "-m=depA", "./depC")).
+		With(daggerCallAt("depA", "--help")).
 		Sync(ctx)
-	require.ErrorContains(t, err, `local module at "/work/depA" has a circular dependency`)
+	requireErrOut(t, err, `module "depA" has a circular dependency on itself through dependency "depC"`)
 }
 
 //go:embed testdata/modules/go/id/arg/main.go
@@ -2046,7 +1835,7 @@ func (ModuleSuite) TestReservedWords(ctx context.Context, t *testctx.T) {
 						With(daggerQuery(`{test{fn{id}}}`)).
 						Sync(ctx)
 
-					require.ErrorContains(t, err, "cannot define field with reserved name \"id\"")
+					requireErrOut(t, err, "cannot define field with reserved name \"id\"")
 				})
 			}
 		})
@@ -2079,7 +1868,7 @@ func (ModuleSuite) TestReservedWords(ctx context.Context, t *testctx.T) {
 						With(daggerQuery(`{test{id}}`)).
 						Sync(ctx)
 
-					require.ErrorContains(t, err, "cannot define function with reserved name \"id\"")
+					requireErrOut(t, err, "cannot define function with reserved name \"id\"")
 				})
 			}
 		})
@@ -2296,22 +2085,22 @@ func (ModuleSuite) TestCurrentModuleAPI(ctx context.Context, t *testctx.T) {
 			_, err := ctr.
 				With(daggerCall("escape-file", "contents")).
 				Stdout(ctx)
-			require.ErrorContains(t, err, `workdir path "../rootfile.txt" escapes workdir`)
+			requireErrOut(t, err, `workdir path "../rootfile.txt" escapes workdir`)
 
 			_, err = ctr.
 				With(daggerCall("escape-file-abs", "contents")).
 				Stdout(ctx)
-			require.ErrorContains(t, err, `workdir path "/rootfile.txt" escapes workdir`)
+			requireErrOut(t, err, `workdir path "/rootfile.txt" escapes workdir`)
 
 			_, err = ctr.
 				With(daggerCall("escape-dir", "entries")).
 				Stdout(ctx)
-			require.ErrorContains(t, err, `workdir path "../foo" escapes workdir`)
+			requireErrOut(t, err, `workdir path "../foo" escapes workdir`)
 
 			_, err = ctr.
 				With(daggerCall("escape-dir-abs", "entries")).
 				Stdout(ctx)
-			require.ErrorContains(t, err, `workdir path "/foo" escapes workdir`)
+			requireErrOut(t, err, `workdir path "/foo" escapes workdir`)
 		})
 	})
 }
@@ -2332,23 +2121,12 @@ import (
 
 type CoolSdk struct {}
 
-func (m *CoolSdk) ModuleRuntime(modSource *dagger.ModuleSource, introspectionJson string) *dagger.Container {
+func (m *CoolSdk) ModuleRuntime(modSource *dagger.ModuleSource, introspectionJson *dagger.File) *dagger.Container {
 	return modSource.WithSDK("go").AsModule().Runtime().WithEnvVariable("COOL", "true")
 }
 
-func (m *CoolSdk) Codegen(modSource *dagger.ModuleSource, introspectionJson string) *dagger.GeneratedCode {
+func (m *CoolSdk) Codegen(modSource *dagger.ModuleSource, introspectionJson *dagger.File) *dagger.GeneratedCode {
 	return dag.GeneratedCode(modSource.WithSDK("go").AsModule().GeneratedContextDirectory())
-}
-
-func (m *CoolSdk) RequiredPaths() []string {
-	return []string{
-		"**/go.mod",
-		"**/go.sum",
-		"**/go.work",
-		"**/go.work.sum",
-		"**/vendor/",
-		"**/*.go",
-	}
 }
 `,
 			).
@@ -2407,7 +2185,7 @@ func (m *Test) Fn() string {
 	})
 }
 
-// TestModuleHostError verifies the host api is not exposed to modules
+// TestHostError verifies the host api is not exposed to modules
 func (ModuleSuite) TestHostError(ctx context.Context, t *testctx.T) {
 	c := connect(ctx, t)
 
@@ -2428,10 +2206,10 @@ func (ModuleSuite) TestHostError(ctx context.Context, t *testctx.T) {
 		).
 		With(daggerCall("fn")).
 		Sync(ctx)
-	require.ErrorContains(t, err, "dag.Host undefined")
+	requireErrOut(t, err, "dag.Host undefined")
 }
 
-// TestModuleEngineError verifies the engine api is not exposed to modules
+// TestEngineError verifies the engine api is not exposed to modules
 func (ModuleSuite) TestEngineError(ctx context.Context, t *testctx.T) {
 	c := connect(ctx, t)
 
@@ -2445,24 +2223,24 @@ func (ModuleSuite) TestEngineError(ctx context.Context, t *testctx.T) {
  			)
  			type Test struct {}
  			func (m *Test) Fn(ctx context.Context) error {
- 				_, _ = dag.DaggerEngine().LocalCache().EntrySet().Entries(ctx)
+ 				_, _ = dag.Engine().LocalCache().EntrySet().Entries(ctx)
 				return nil
  			}
  			`,
 		).
 		With(daggerCall("fn")).
 		Sync(ctx)
-	require.ErrorContains(t, err, "dag.DaggerEngine undefined")
+	requireErrOut(t, err, "dag.Engine undefined")
 }
 
 func (ModuleSuite) TestDaggerListen(ctx context.Context, t *testctx.T) {
 	t.Run("with mod", func(ctx context.Context, t *testctx.T) {
 		modDir := t.TempDir()
-		_, err := hostDaggerExec(ctx, t, modDir, "--debug", "init", "--source=.", "--name=test", "--sdk=go")
+		_, err := hostDaggerExec(ctx, t, modDir, "init", "--source=.", "--name=test", "--sdk=go")
 		require.NoError(t, err)
 
 		addr := "127.0.0.1:12456"
-		listenCmd := hostDaggerCommand(ctx, t, modDir, "--debug", "listen", "--listen", addr)
+		listenCmd := hostDaggerCommand(ctx, t, modDir, "listen", "--listen", addr)
 		listenCmd.Env = append(listenCmd.Env, "DAGGER_SESSION_TOKEN=lol")
 		listenCmd.Stdout = testutil.NewTWriter(t)
 		listenCmd.Stderr = testutil.NewTWriter(t)
@@ -2479,7 +2257,7 @@ func (ModuleSuite) TestDaggerListen(ctx context.Context, t *testctx.T) {
 			backoff.WithMaxElapsedTime(time.Minute),
 		))
 
-		callCmd := hostDaggerCommand(ctx, t, modDir, "--debug", "call", "container-echo", "--string-arg=hi", "stdout")
+		callCmd := hostDaggerCommand(ctx, t, modDir, "call", "container-echo", "--string-arg=hi", "stdout")
 		callCmd.Env = append(callCmd.Env, "DAGGER_SESSION_PORT=12456", "DAGGER_SESSION_TOKEN=lol")
 		callCmd.Stderr = testutil.NewTWriter(t)
 		out, err := callCmd.Output()
@@ -2494,16 +2272,16 @@ func (ModuleSuite) TestDaggerListen(ctx context.Context, t *testctx.T) {
 			// mod load fails but should still be able to query base api
 
 			modDir := t.TempDir()
-			_, err := hostDaggerExec(ctx, t, modDir, "--debug", "init", "--source=.", "--name=test", "--sdk=go")
+			_, err := hostDaggerExec(ctx, t, modDir, "init", "--source=.", "--name=test", "--sdk=go")
 			require.NoError(t, err)
 
-			listenCmd := hostDaggerCommand(ctx, t, modDir, "--debug", "listen", "--disable-host-read-write", "--listen", "127.0.0.1:12457")
+			listenCmd := hostDaggerCommand(ctx, t, modDir, "listen", "--disable-host-read-write", "--listen", "127.0.0.1:12457")
 			listenCmd.Env = append(listenCmd.Env, "DAGGER_SESSION_TOKEN=lol")
 			require.NoError(t, listenCmd.Start())
 
 			var out []byte
 			for range limitTicker(time.Second, 60) {
-				callCmd := hostDaggerCommand(ctx, t, modDir, "--debug", "query")
+				callCmd := hostDaggerCommand(ctx, t, modDir, "query")
 				callCmd.Stdin = strings.NewReader(fmt.Sprintf(`query{container{from(address:"%s"){file(path:"/etc/alpine-release"){contents}}}}`, alpineImage))
 				callCmd.Stderr = testutil.NewTWriter(t)
 				callCmd.Env = append(callCmd.Env, "DAGGER_SESSION_PORT=12457", "DAGGER_SESSION_TOKEN=lol")
@@ -2520,14 +2298,14 @@ func (ModuleSuite) TestDaggerListen(ctx context.Context, t *testctx.T) {
 		t.Run("without mod", func(ctx context.Context, t *testctx.T) {
 			tmpdir := t.TempDir()
 
-			listenCmd := hostDaggerCommand(ctx, t, tmpdir, "--debug", "listen", "--disable-host-read-write", "--listen", "127.0.0.1:12458")
+			listenCmd := hostDaggerCommand(ctx, t, tmpdir, "listen", "--disable-host-read-write", "--listen", "127.0.0.1:12458")
 			listenCmd.Env = append(listenCmd.Env, "DAGGER_SESSION_TOKEN=lol")
 			require.NoError(t, listenCmd.Start())
 
 			var out []byte
 			var err error
 			for range limitTicker(time.Second, 60) {
-				callCmd := hostDaggerCommand(ctx, t, tmpdir, "--debug", "query")
+				callCmd := hostDaggerCommand(ctx, t, tmpdir, "query")
 				callCmd.Stdin = strings.NewReader(fmt.Sprintf(`query{container{from(address:"%s"){file(path:"/etc/alpine-release"){contents}}}}`, alpineImage))
 				callCmd.Stderr = testutil.NewTWriter(t)
 				callCmd.Env = append(callCmd.Env, "DAGGER_SESSION_PORT=12458", "DAGGER_SESSION_TOKEN=lol")
@@ -2934,6 +2712,97 @@ func (m *Test) Test(ctx context.Context) (string, error) {
 			require.Equal(t, "HELLO FROM FOO", out)
 		})
 
+		t.Run("double nested and called repeatedly", func(ctx context.Context, t *testctx.T) {
+			c := connect(ctx, t)
+			ctr := c.Container().From(golangImage).
+				WithMountedFile(testCLIBinPath, daggerCliFile(t, c))
+
+			// Set up the base generator module
+			ctr = ctr.
+				WithWorkdir("/work/keychain/generator").
+				With(daggerExec("init", "--name=generator", "--sdk=go", "--source=.")).
+				WithNewFile("main.go", `package main
+
+import (
+    "context"
+    "dagger/generator/internal/dagger"
+)
+
+type Generator struct {
+    // +private
+    Password *dagger.Secret
+}
+
+func New() *Generator {
+    return &Generator{
+        Password: dag.SetSecret("pass", "admin"),
+    }
+}
+
+func (m *Generator) Gen(ctx context.Context, name string) error {
+    _, err := m.Password.Plaintext(ctx)
+    return err
+}
+`)
+
+			// Set up the keychain module that depends on generator
+			ctr = ctr.
+				WithWorkdir("/work/keychain").
+				With(daggerExec("init", "--name=keychain", "--sdk=go", "--source=.")).
+				With(daggerExec("install", "./generator")).
+				WithNewFile("main.go", `package main
+
+import (
+    "context"
+)
+
+type Keychain struct{}
+
+func (m *Keychain) Get(ctx context.Context, name string) error {
+    return dag.Generator().Gen(ctx, name)
+}
+`)
+
+			// Set up the main module that uses keychain
+			ctr = ctr.
+				WithWorkdir("/work").
+				With(daggerExec("init", "--name=mymodule", "--sdk=go", "--source=.")).
+				With(daggerExec("install", "./keychain")).
+				WithNewFile("main.go", `package main
+
+import (
+    "context"
+    "fmt"
+)
+
+type Mymodule struct{}
+
+func (m *Mymodule) Issue(ctx context.Context) error {
+    kc := dag.Keychain()
+
+    err := kc.Get(ctx, "a")
+    if err != nil {
+        return fmt.Errorf("first get: %w", err)
+    }
+
+    err = kc.Get(ctx, "a")
+    if err != nil {
+        return fmt.Errorf("second get, same args: %w", err)
+    }
+
+    err = kc.Get(ctx, "b")
+    if err != nil {
+        return fmt.Errorf("third get: %w", err)
+    }
+    return nil
+}
+`)
+
+			// Test that repeated calls work correctly
+			_, err := ctr.With(daggerCall("issue")).Sync(ctx)
+			require.NoError(t, err)
+		})
+
 		t.Run("cached", func(ctx context.Context, t *testctx.T) {
 			c := connect(ctx, t)
 			ctr := c.Container().From(golangImage).
@@ -3236,7 +3105,7 @@ import (
 type Leaker struct {}
 
 func (l *Leaker) Leak(ctx context.Context) error {
-	secret, _ := dag.Secret("mysecret").Plaintext(ctx)
+	secret, _ := dag.LoadSecretFromName("mysecret").Plaintext(ctx)
 	fmt.Println("trying to read secret:", secret)
 	return nil
 }
@@ -3530,7 +3399,7 @@ func (ModuleSuite) TestStartServices(ctx context.Context, t *testctx.T) {
 			).
 			WithWorkdir("/srv/www").
 			WithExposedPort(23457).
-			WithExec([]string{"python", "-m", "http.server", "23457"}).
+			WithDefaultArgs([]string{"python", "-m", "http.server", "23457"}).
 			AsService()
 
 		ctr := dag.Container().
@@ -3586,7 +3455,8 @@ func (m *Test) Fn(ctx context.Context) *dagger.Container {
 	redis := dag.Container().
 		From("redis").
 		WithExposedPort(6379).
-		AsService()
+		AsService(dagger.ContainerAsServiceOpts{UseEntrypoint: true})
+
 	cli := dag.Container().
 		From("redis").
 		WithoutEntrypoint().
@@ -3608,109 +3478,6 @@ func (m *Test) Fn(ctx context.Context) *dagger.Container {
 			Sync(ctx)
 		require.NoError(t, err)
 	})
-}
-
-// regression test for https://github.com/dagger/dagger/issues/7334
-// and https://github.com/dagger/dagger/pull/7336
-func (ModuleSuite) TestCallSameModuleInParallel(ctx context.Context, t *testctx.T) {
-	c := connect(ctx, t)
-
-	ctr := goGitBase(t, c).
-		WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
-		WithWorkdir("/work/dep").
-		With(daggerExec("init", "--name=dep", "--sdk=go")).
-		With(sdkSource("go", `package main
-
-import (
-	"github.com/moby/buildkit/identity"
-	"dagger/dep/internal/dagger"
-)
-
-type Dep struct {}
-
-func (m *Dep) DepFn(s *dagger.Secret) string {
-	return identity.NewID()
-}
-`)).
-		WithWorkdir("/work").
-		With(daggerExec("init", "--name=test", "--sdk=go", "--source=.")).
-		With(sdkSource("go", `package main
-
-import (
-	"context"
-	"golang.org/x/sync/errgroup"
-)
-
-type Test struct {}
-
-func (m *Test) Fn(ctx context.Context) ([]string, error) {
-	var eg errgroup.Group
-	results := make([]string, 10)
-	for i := 0; i < 10; i++ {
-		i := i
-		eg.Go(func() error {
-			res, err := dag.Dep().DepFn(ctx, dag.SetSecret("foo", "bar"))
-			if err != nil {
-				return err
-			}
-			results[i] = res
-			return nil
-		})
-	}
-	if err := eg.Wait(); err != nil {
-		return nil, err
-	}
-	return results, nil
-}
-`)).
-		With(daggerExec("install", "./dep")).
-		With(daggerCall("fn"))
-
-	out, err := ctr.Stdout(ctx)
-	require.NoError(t, err)
-	results := strings.Split(strings.TrimSpace(out), "\n")
-	require.Len(t, results, 10)
-	expectedRes := results[0]
-	for _, res := range results {
-		require.Equal(t, expectedRes, res)
-	}
-}
-
-func (ModuleSuite) TestLargeObjectFieldVal(ctx context.Context, t *testctx.T) {
-	// make sure we don't hit any limits when an object field value is large
-
-	c := connect(ctx, t)
-
-	// put a timeout on this since failures modes could result in hangs
-	t = t.WithTimeout(60 * time.Second)
-
-	_, err := goGitBase(t, c).
-		WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
-		WithWorkdir("/work").
-		With(daggerExec("init", "--name=test", "--sdk=go")).
-		With(sdkSource("go", `package main
-
-import "strings"
-
-type Test struct {
-	BigVal string
-}
-
-func New() *Test {
-	return &Test{
-		BigVal: strings.Repeat("a", 30*1024*1024),
-	}
-}
-
-// add a func for returning the val in order to test mode codepaths that
-// involve serializing and passing the object around
-func (m *Test) Fn() string {
-	return m.BigVal
-}
-`)).
-		With(daggerCall("fn")).
-		Sync(ctx)
-	require.NoError(t, err)
 }
 
 func (ModuleSuite) TestReturnNilField(ctx context.Context, t *testctx.T) {
@@ -4700,28 +4467,28 @@ export class Test {
 					out, err := modGen.With(daggerCall("too-high-relative-dir-path")).Stdout(ctx)
 					require.Empty(t, out)
 					require.Error(t, err)
-					require.ErrorContains(t, err, `path should be relative to the context directory`)
+					requireErrOut(t, err, `path should be relative to the context directory`)
 				})
 
 				t.Run("too high relative context file path", func(ctx context.Context, t *testctx.T) {
 					out, err := modGen.With(daggerCall("too-high-relative-file-path")).Stdout(ctx)
 					require.Empty(t, out)
 					require.Error(t, err)
-					require.ErrorContains(t, err, `path should be relative to the context directory`)
+					requireErrOut(t, err, `path should be relative to the context directory`)
 				})
 
 				t.Run("non existing dir path", func(ctx context.Context, t *testctx.T) {
 					out, err := modGen.With(daggerCall("non-existing-path")).Stdout(ctx)
 					require.Empty(t, out)
 					require.Error(t, err)
-					require.ErrorContains(t, err, "no such file or directory")
+					requireErrOut(t, err, "no such file or directory")
 				})
 
 				t.Run("non existing file", func(ctx context.Context, t *testctx.T) {
 					out, err := modGen.With(daggerCall("non-existing-file")).Stdout(ctx)
 					require.Empty(t, out)
 					require.Error(t, err)
-					require.ErrorContains(t, err, "no such file or directory")
+					requireErrOut(t, err, "no such file or directory")
 				})
 			})
 		}
@@ -4755,7 +4522,7 @@ func (m *Dep) GetRelSource(
 	// +ignore=["**", "!yo"]
 	source *dagger.Directory,
 ) *dagger.Directory {
-  return source 
+  return source
 }
 `,
 			).
@@ -4798,6 +4565,18 @@ func (m *Test) GetRelDepSource() *dagger.Directory {
 		out, err = ctr.With(daggerCall("get-rel-dep-source", "entries")).Stdout(ctx)
 		require.NoError(t, err)
 		require.Equal(t, "yo\n", out)
+
+		// now try calling from outside
+
+		ctr = ctr.WithWorkdir("/")
+
+		out, err = ctr.With(daggerCallAt("work", "get-dep-source", "entries")).Stdout(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "yo\n", out)
+
+		out, err = ctr.With(daggerCallAt("work", "get-rel-dep-source", "entries")).Stdout(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "yo\n", out)
 	})
 
 	t.Run("as module", func(ctx context.Context, t *testctx.T) {
@@ -4812,9 +4591,9 @@ func (m *Test) GetRelDepSource() *dagger.Directory {
 import (
 	"dagger/dep/internal/dagger"
 )
-		
+
 type Dep struct{}
-		
+
 func (m *Dep) GetSource(
 	// +defaultPath="/dep"
 	// +ignore=["**", "!yo"]
@@ -4824,11 +4603,11 @@ func (m *Dep) GetSource(
 }
 
 func (m *Dep) GetRelSource(
-	// +defaultPath="./dep"
+	// +defaultPath="."
 	// +ignore=["**","!yo"]
 	source *dagger.Directory,
 ) *dagger.Directory {
-	return source 
+	return source
 }
 		`).
 			WithNewFile("yo", "yo")
@@ -4844,11 +4623,11 @@ import (
 	"dagger/test/internal/dagger"
 	"github.com/Khan/genqlient/graphql"
 )
-			
+
 type Test struct{}
-			
+
 func (m *Test) GetDepSource(ctx context.Context, src *dagger.Directory) (*dagger.Directory, error) {
-	err := src.AsModule().Initialize().Serve(ctx)
+	err := src.AsModule(dagger.DirectoryAsModuleOpts{SourceRootPath: "dep"}).Serve(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -4877,7 +4656,7 @@ func (m *Test) GetDepSource(ctx context.Context, src *dagger.Directory) (*dagger
 }
 
 func (m *Test) GetRelDepSource(ctx context.Context, src *dagger.Directory) (*dagger.Directory, error) {
-  err := src.AsModule().Initialize().Serve(ctx)
+	err := src.AsModule(dagger.DirectoryAsModuleOpts{SourceRootPath: "dep"}).Serve(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -4907,11 +4686,11 @@ func (m *Test) GetRelDepSource(ctx context.Context, src *dagger.Directory) (*dag
 			`,
 			)
 
-		out, err := ctr.With(daggerCall("get-dep-source", "--src", "./dep", "entries")).Stdout(ctx)
+		out, err := ctr.With(daggerCall("get-dep-source", "--src", ".", "entries")).Stdout(ctx)
 		require.NoError(t, err)
 		require.Equal(t, "yo\n", out)
 
-		out, err = ctr.With(daggerCall("get-rel-dep-source", "--src", "./dep", "entries")).Stdout(ctx)
+		out, err = ctr.With(daggerCall("get-rel-dep-source", "--src", ".", "entries")).Stdout(ctx)
 		require.NoError(t, err)
 		require.Equal(t, "yo\n", out)
 	})
@@ -5074,7 +4853,7 @@ func (t *Test) IgnoreDirButKeepFileInSubdir(
 		})
 	})
 
-	// We don't need to test all ignore pattenrs, just that it works with given directory instead of the context one and that
+	// We don't need to test all ignore patterns, just that it works with given directory instead of the context one and that
 	// ignore is correctly applied.
 	t.Run("ignore with argument directory", func(ctx context.Context, t *testctx.T) {
 		t.Run("ignore all", func(ctx context.Context, t *testctx.T) {
@@ -5089,6 +4868,123 @@ func (t *Test) IgnoreDirButKeepFileInSubdir(
 			require.Equal(t, ".git\nLICENSE\nbackend\ndagger\ndagger.json\nfrontend\n", out)
 		})
 	})
+}
+
+func (ModuleSuite) TestFloat(ctx context.Context, t *testctx.T) {
+	depSrc := `package main
+
+type Dep struct{}
+
+func (m *Dep) Dep(n float64) float32 {
+	return float32(n)
+}
+`
+
+	type testCase struct {
+		sdk    string
+		source string
+	}
+
+	testCases := []testCase{
+		{
+			sdk: "go",
+			source: `package main
+
+import "context"
+
+type Test struct{}
+
+func (m *Test) Test(n float64) float64 {
+	return n
+}
+
+func (m *Test) TestFloat32(n float32) float32 {
+	return n
+}
+
+func (m *Test) Dep(ctx context.Context, n float64) (float64, error) {
+	return dag.Dep().Dep(ctx, n)
+}`,
+		},
+		{
+			sdk: "typescript",
+			source: `import { dag, float, object, func } from "@dagger.io/dagger"
+
+@object()
+export class Test {
+  @func()
+  test(n: float): float {
+    return n
+  }
+
+  @func()
+  testFloat32(n: float): float {
+    return n
+  }
+
+  @func()
+  async dep(n: float): Promise<float> {
+    return dag.dep().dep(n)
+  }
+}`,
+		},
+		{
+			sdk: "python",
+			source: `import dagger
+from dagger import dag
+
+@dagger.object_type
+class Test:
+    @dagger.function
+    def test(self, n: float) -> float:
+        return n
+
+    @dagger.function
+    def testFloat32(self, n: float) -> float:
+        return n
+
+    @dagger.function
+    async def dep(self, n: float) -> float:
+        return await dag.dep().dep(n)
+`,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+
+		t.Run(tc.sdk, func(ctx context.Context, t *testctx.T) {
+			c := connect(ctx, t)
+
+			modGen := c.Container().From(golangImage).
+				WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+				WithWorkdir("/work/dep").
+				With(daggerExec("init", "--name=dep", "--sdk=go", "--source=.")).
+				WithNewFile("/work/dep/main.go", depSrc).
+				WithWorkdir("/work").
+				With(daggerExec("init", "--name=test", "--sdk="+tc.sdk, "--source=.")).
+				With(sdkSource(tc.sdk, tc.source)).
+				With(daggerExec("install", "./dep"))
+
+			t.Run("float64", func(ctx context.Context, t *testctx.T) {
+				out, err := modGen.With(daggerCall("test", "--n=3.14")).Stdout(ctx)
+				require.NoError(t, err)
+				require.JSONEq(t, `3.14`, out)
+			})
+
+			t.Run("float32", func(ctx context.Context, t *testctx.T) {
+				out, err := modGen.With(daggerCall("test-float-32", "--n=1.73424")).Stdout(ctx)
+				require.NoError(t, err)
+				require.JSONEq(t, `1.73424`, out)
+			})
+
+			t.Run("call dep with float64 to float32 conversion", func(ctx context.Context, t *testctx.T) {
+				out, err := modGen.With(daggerCall("dep", "--n=232.3454")).Stdout(ctx)
+				require.NoError(t, err)
+				require.JSONEq(t, `232.3454`, out)
+			})
+		})
+	}
 }
 
 func (ModuleSuite) TestModuleDevelopVersion(ctx context.Context, t *testctx.T) {
@@ -5122,7 +5018,7 @@ func schemaVersion(ctx context.Context) (string, error) {
 		work := c.Container().From(golangImage).
 			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
 			WithWorkdir("/work").
-			WithNewFile("dagger.json", `{"name": "foo", "sdk": "go", "source": ".", "engineVersion": "v0.0.0"}`).
+			WithNewFile("dagger.json", `{"name": "foo", "sdk": "go", "engineVersion": "v0.0.0"}`).
 			WithNewFile("main.go", moduleSrc)
 
 		work = work.With(daggerExec("develop"))
@@ -5130,7 +5026,7 @@ func schemaVersion(ctx context.Context) (string, error) {
 			File("dagger.json").
 			Contents(ctx)
 		require.NoError(t, err)
-		require.JSONEq(t, `{"name": "foo", "sdk": "go", "source": ".", "engineVersion": "`+engine.Version+`"}`, daggerJSON)
+		require.Equal(t, engine.Version, gjson.Get(daggerJSON, "engineVersion").String())
 	})
 
 	t.Run("from high", func(ctx context.Context, t *testctx.T) {
@@ -5139,15 +5035,20 @@ func schemaVersion(ctx context.Context) (string, error) {
 		work := c.Container().From(golangImage).
 			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
 			WithWorkdir("/work").
-			WithNewFile("dagger.json", `{"name": "foo", "sdk": "go", "source": ".", "engineVersion": "v100.0.0"}`).
+			WithNewFile("dagger.json", `{"name": "foo", "sdk": "go", "engineVersion": "v100.0.0"}`).
 			WithNewFile("main.go", moduleSrc)
 
 		work = work.With(daggerExec("develop"))
-		daggerJSON, err := work.
+		_, err := work.
 			File("dagger.json").
 			Contents(ctx)
-		require.NoError(t, err)
-		require.JSONEq(t, `{"name": "foo", "sdk": "go", "source": ".", "engineVersion": "`+engine.Version+`"}`, daggerJSON)
+
+		// sadly, just no way to handle this :(
+		// in the future, the format of dagger.json might change dramatically,
+		// and so there's no real way to know from the older version how to
+		// convert it back down
+		require.Error(t, err)
+		requireErrOut(t, err, `module requires dagger v100.0.0, but you have`)
 	})
 
 	t.Run("from missing", func(ctx context.Context, t *testctx.T) {
@@ -5156,7 +5057,7 @@ func schemaVersion(ctx context.Context) (string, error) {
 		work := c.Container().From(golangImage).
 			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
 			WithWorkdir("/work").
-			WithNewFile("dagger.json", `{"name": "foo", "sdk": "go", "source": "."}`).
+			WithNewFile("dagger.json", `{"name": "foo", "sdk": "go"}`).
 			WithNewFile("main.go", moduleSrc)
 
 		work = work.With(daggerExec("develop"))
@@ -5164,7 +5065,7 @@ func schemaVersion(ctx context.Context) (string, error) {
 			File("dagger.json").
 			Contents(ctx)
 		require.NoError(t, err)
-		require.JSONEq(t, `{"name": "foo", "sdk": "go", "source": ".", "engineVersion": "`+engine.Version+`"}`, daggerJSON)
+		require.Equal(t, engine.Version, gjson.Get(daggerJSON, "engineVersion").String())
 	})
 
 	t.Run("to specified", func(ctx context.Context, t *testctx.T) {
@@ -5173,14 +5074,14 @@ func schemaVersion(ctx context.Context) (string, error) {
 		work := c.Container().From(golangImage).
 			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
 			WithWorkdir("/work").
-			WithNewFile("dagger.json", `{"name": "foo", "sdk": "go", "source": ".", "engineVersion": "v0.0.0"}`)
+			WithNewFile("dagger.json", `{"name": "foo", "sdk": "go", "engineVersion": "v0.0.0"}`)
 
 		work = work.With(daggerExec("develop", "--compat=v0.9.9"))
 		daggerJSON, err := work.
 			File("dagger.json").
 			Contents(ctx)
 		require.NoError(t, err)
-		require.JSONEq(t, `{"name": "foo", "sdk": "go", "source": ".", "engineVersion": "v0.9.9"}`, daggerJSON)
+		require.Equal(t, "v0.9.9", gjson.Get(daggerJSON, "engineVersion").String())
 	})
 
 	t.Run("skipped", func(ctx context.Context, t *testctx.T) {
@@ -5189,27 +5090,88 @@ func schemaVersion(ctx context.Context) (string, error) {
 		work := c.Container().From(golangImage).
 			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
 			WithWorkdir("/work").
-			WithNewFile("dagger.json", `{"name": "foo", "sdk": "go", "source": ".", "engineVersion": "v0.9.9"}`)
+			WithNewFile("dagger.json", `{"name": "foo", "sdk": "go", "engineVersion": "v0.9.9"}`)
 
 		work = work.With(daggerExec("develop", "--compat"))
 		daggerJSON, err := work.
 			File("dagger.json").
 			Contents(ctx)
 		require.NoError(t, err)
-		require.JSONEq(t, `{"name": "foo", "sdk": "go", "source": ".", "engineVersion": "v0.9.9"}`, daggerJSON)
+		require.Equal(t, "v0.9.9", gjson.Get(daggerJSON, "engineVersion").String())
+	})
+
+	t.Run("in install", func(ctx context.Context, t *testctx.T) {
+		c := connect(ctx, t)
+
+		work := c.Container().From(golangImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work").
+			WithNewFile("dagger.json", `{"name": "foo", "sdk": "go", "source": ".", "engineVersion": "v0.0.0"}`).
+			WithNewFile("main.go", moduleSrc)
+
+		work = work.With(daggerExec("install", "github.com/shykes/hello"))
+		daggerJSON, err := work.
+			File("dagger.json").
+			Contents(ctx)
+		require.NoError(t, err)
+		require.Equal(t, engine.Version, gjson.Get(daggerJSON, "engineVersion").String())
+	})
+
+	t.Run("in uninstall", func(ctx context.Context, t *testctx.T) {
+		c := connect(ctx, t)
+
+		work := c.Container().From(golangImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work").
+			WithNewFile("dagger.json", `{"name": "foo", "sdk": "go", "dependencies": [{ "name": "hello", "source": "github.com/shykes/hello", "pin": "2d789671a44c4d559be506a9bc4b71b0ba6e23c9" }], "source": ".", "engineVersion": "v0.0.0"}`).
+			WithNewFile("main.go", moduleSrc)
+
+		work = work.With(daggerExec("uninstall", "hello"))
+		daggerJSON, err := work.
+			File("dagger.json").
+			Contents(ctx)
+		require.NoError(t, err)
+		require.Equal(t, engine.Version, gjson.Get(daggerJSON, "engineVersion").String())
+	})
+
+	t.Run("in update", func(ctx context.Context, t *testctx.T) {
+		c := connect(ctx, t)
+
+		work := c.Container().From(golangImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work").
+			WithNewFile("dagger.json", `{"name": "foo", "sdk": "go", "source": ".", "engineVersion": "v0.0.0"}`).
+			WithNewFile("main.go", moduleSrc)
+
+		work = work.With(daggerExec("update"))
+		daggerJSON, err := work.
+			File("dagger.json").
+			Contents(ctx)
+		require.NoError(t, err)
+		require.Equal(t, engine.Version, gjson.Get(daggerJSON, "engineVersion").String())
 	})
 }
 
 func (ModuleSuite) TestTypedefSourceMaps(ctx context.Context, t *testctx.T) {
-	baseSrc := `package main
+	goBaseSrc := `package main
 
 type Test struct {}
     `
 
+	tsBaseSrc := `import { object, func } from "@dagger.io/dagger"
+
+@object()
+export class Test {}`
+
+	type languageMatch struct {
+		golang     []string
+		typescript []string
+	}
+
 	tcs := []struct {
 		sdk     string
 		src     string
-		matches []string
+		matches languageMatch
 	}{
 		{
 			sdk: "go",
@@ -5244,41 +5206,130 @@ func (m *Dep) Collect(MyEnum, MyInterface) error {
     return nil
 }
     `,
-			matches: []string{
-				// struct
-				`\ntype Dep struct { // dep \(../../dep/main.go:5\)\n`,
-				// struct field
-				`\nfunc \(.* \*Dep\) FieldDef\(.* // dep \(../../dep/main.go:6\)\n`,
-				// struct func
-				`\nfunc \(.* \*Dep\) FuncDef\(.* // dep \(../../dep/main.go:9\)\n`,
-				// struct func arg
-				`\n\s*Arg2 string // dep \(../../dep/main.go:11\)\n`,
+			matches: languageMatch{
+				golang: []string{
+					// struct
+					`\ntype Dep struct { // dep \(../../dep/main.go:5:6\)\n`,
+					// struct field
+					`\nfunc \(.* \*Dep\) FieldDef\(.* // dep \(../../dep/main.go:6:5\)\n`,
+					// struct func
+					`\nfunc \(.* \*Dep\) FuncDef\(.* // dep \(../../dep/main.go:9:1\)\n`,
+					// struct func arg
+					`\n\s*Arg2 string // dep \(../../dep/main.go:11:2\)\n`,
 
-				// enum
-				`\ntype DepMyEnum string // dep \(../../dep/main.go:16\)\n`,
-				// enum value
-				`\n\s*DepMyEnumMyEnumA DepMyEnum = "MyEnumA" // dep \(../../dep/main.go:18\)\n`,
+					// enum
+					`\ntype DepMyEnum string // dep \(../../dep/main.go:16:6\)\n`,
+					// enum value
+					`\n\s*DepMyEnumMyEnumA DepMyEnum = "MyEnumA" // dep \(../../dep/main.go:18:5\)\n`,
 
-				// interface
-				`\ntype DepMyInterface struct { // dep \(../../dep/main.go:22\)\n`,
-				// interface func
-				`\nfunc \(.* \*DepMyInterface\) Do\(.* // dep \(../../dep/main.go:24\)\n`,
+					// interface
+					`\ntype DepMyInterface struct { // dep \(../../dep/main.go:22:6\)\n`,
+					// interface func
+					`\nfunc \(.* \*DepMyInterface\) Do\(.* // dep \(../../dep/main.go:24:4\)\n`,
+				},
+				typescript: []string{
+					// struct
+					`export class Dep extends BaseClient { // dep \(../../../dep/main.go:5:6\)`,
+					// struct field
+					`fieldDef = async \(\): Promise<string> => { // dep \(../../../dep/main.go:6:5\)`,
+					// struct func
+					`\s*funcDef = async \(.*\s*opts\?: .* \/\/ dep \(../../../dep/main.go:9:1\) *\s*.*\/\/ dep \(../../../dep/main.go:9:1\)`,
+					// struct func arg
+					`\s*arg2\?: string // dep \(../../../dep/main.go:11:2\)`,
+
+					// enum
+					`export enum DepMyEnum { // dep \(../../../dep/main.go:16:6\)`,
+					// enum value
+					`\s*Myenuma = "MyEnumA", // dep \(../../../dep/main.go:18:5\)`,
+				},
+			},
+		},
+		{
+			sdk: "typescript",
+			src: `import { object, func } from "@dagger.io/dagger"
+
+export enum MyEnum {
+  MyEnumA = "MyEnumA",
+	MyEnumB = "MyEnumB",
+}
+
+@object()
+export class Dep {
+  @func()
+  fieldDef: string
+
+  @func()
+  funcDef(arg1: string, arg2?: string): string {
+    return ""
+  }
+
+	@func()
+	async collect(enumValue: MyEnum): Promise<void> {}
+}`,
+			matches: languageMatch{
+				golang: []string{
+					// struct
+					`\ntype Dep struct { // dep \(../../dep/src/index.ts:9:14\)\n`,
+					// struct field
+					`\nfunc \(.* \*Dep\) FieldDef\(.* // dep \(../../dep/src/index.ts:11:3\)\n`,
+					// struct func
+					`\nfunc \(.* \*Dep\) FuncDef\(.* // dep \(../../dep/src/index.ts:14:3\)\n`,
+					// struct func arg
+					`\n\s*Arg2 string // dep \(../../dep/src/index.ts:14:25\)\n`,
+
+					// enum
+					`\ntype DepMyEnum string // dep \(../../dep/src/index.ts:3:13\)\n`,
+					// enum value
+					`\n\s*DepMyEnumMyEnumA DepMyEnum = "MyEnumA" // dep \(../../dep/src/index.ts:4:3\)\n`,
+				},
+				typescript: []string{
+					// struct
+					`export class Dep extends BaseClient { // dep \(../../../dep/src/index.ts:9:14\)`,
+					// struct field
+					`\s*fieldDef = async \(\): Promise<string> => { // dep \(../../../dep/src/index.ts:11:3\)`,
+					// struct func
+					`\s*funcDef = async \(.*\s*opts\?: .* \/\/ dep \(../../../dep/src/index.ts:14:3\) *\s*.*\/\/ dep \(../../../dep/src/index.ts:14:3\)`,
+					// struct func arg
+					`\s*arg2\?: string // dep \(../../../dep/src/index.ts:14:25\)`,
+
+					// enum
+					`export enum DepMyEnum { // dep \(../../../dep/src/index.ts:3:13\)`,
+					// enum value
+					`\s*Myenuma = "MyEnumA", // dep \(../../../dep/src/index.ts:4:3\)`,
+				},
 			},
 		},
 	}
 
 	for _, tc := range tcs {
-		t.Run(tc.sdk, func(ctx context.Context, t *testctx.T) {
+		t.Run(fmt.Sprintf("%s dep with go generation", tc.sdk), func(ctx context.Context, t *testctx.T) {
 			c := connect(ctx, t)
 
-			modGen := modInit(t, c, tc.sdk, baseSrc).
-				With(withModInitAt("./dep", "go", tc.src)).
+			modGen := modInit(t, c, "go", goBaseSrc).
+				With(withModInitAt("./dep", tc.sdk, tc.src)).
 				With(daggerExec("install", "./dep"))
 
-			codegenContents, err := modGen.File(sdkCodegenFile(t, tc.sdk)).Contents(ctx)
+			codegenContents, err := modGen.File(sdkCodegenFile(t, "go")).Contents(ctx)
 			require.NoError(t, err)
 
-			for _, match := range tc.matches {
+			for _, match := range tc.matches.golang {
+				matched, err := regexp.MatchString(match, codegenContents)
+				require.NoError(t, err)
+				require.Truef(t, matched, "%s did not match contents:\n%s", match, codegenContents)
+			}
+		})
+
+		t.Run(fmt.Sprintf("%s dep with typescript generation", tc.sdk), func(ctx context.Context, t *testctx.T) {
+			c := connect(ctx, t)
+
+			modGen := modInit(t, c, "typescript", tsBaseSrc).
+				With(withModInitAt("./dep", tc.sdk, tc.src)).
+				With(daggerExec("install", "./dep"))
+
+			codegenContents, err := modGen.File(sdkCodegenFile(t, "typescript")).Contents(ctx)
+			require.NoError(t, err)
+
+			for _, match := range tc.matches.typescript {
 				matched, err := regexp.MatchString(match, codegenContents)
 				require.NoError(t, err)
 				require.Truef(t, matched, "%s did not match contents:\n%s", match, codegenContents)
@@ -5287,9 +5338,24 @@ func (m *Dep) Collect(MyEnum, MyInterface) error {
 	}
 }
 
+func (ModuleSuite) TestLoadWhenNoModule(ctx context.Context, t *testctx.T) {
+	// verify that if a module is loaded from a directory w/ no module we don't
+	// load extra files
+	c := connect(ctx, t)
+
+	tmpDir := t.TempDir()
+	fileName := "foo"
+	filePath := filepath.Join(tmpDir, fileName)
+	require.NoError(t, os.WriteFile(filePath, []byte("foo"), 0o644))
+
+	ents, err := c.ModuleSource(tmpDir).ContextDirectory().Entries(ctx)
+	require.NoError(t, err)
+	require.Empty(t, ents)
+}
+
 func daggerExec(args ...string) dagger.WithContainerFunc {
 	return func(c *dagger.Container) *dagger.Container {
-		return c.WithExec(append([]string{"dagger", "--debug"}, args...), dagger.ContainerWithExecOpts{
+		return c.WithExec(append([]string{"dagger"}, args...), dagger.ContainerWithExecOpts{
 			ExperimentalPrivilegedNesting: true,
 		})
 	}
@@ -5302,7 +5368,7 @@ func daggerQuery(query string, args ...any) dagger.WithContainerFunc {
 func daggerQueryAt(modPath string, query string, args ...any) dagger.WithContainerFunc {
 	query = fmt.Sprintf(query, args...)
 	return func(c *dagger.Container) *dagger.Container {
-		execArgs := []string{"dagger", "--debug", "query"}
+		execArgs := []string{"dagger", "query"}
 		if modPath != "" {
 			execArgs = append(execArgs, "-m", modPath)
 		}
@@ -5319,7 +5385,7 @@ func daggerCall(args ...string) dagger.WithContainerFunc {
 
 func daggerCallAt(modPath string, args ...string) dagger.WithContainerFunc {
 	return func(c *dagger.Container) *dagger.Container {
-		execArgs := []string{"dagger", "--debug", "call"}
+		execArgs := []string{"dagger", "call"}
 		if modPath != "" {
 			execArgs = append(execArgs, "-m", modPath)
 		}
@@ -5349,7 +5415,7 @@ func mountedPrivateRepoSocket(c *dagger.Client, t *testctx.T) (dagger.WithContai
 
 func daggerFunctions(args ...string) dagger.WithContainerFunc {
 	return func(c *dagger.Container) *dagger.Container {
-		return c.WithExec(append([]string{"dagger", "--debug", "functions"}, args...), dagger.ContainerWithExecOpts{
+		return c.WithExec(append([]string{"dagger", "functions"}, args...), dagger.ContainerWithExecOpts{
 			ExperimentalPrivilegedNesting: true,
 		})
 	}
@@ -5468,7 +5534,7 @@ func sdkCodegenFile(t *testctx.T, sdk string) string {
 	case "python":
 		return "sdk/src/dagger/client/gen.py"
 	case "typescript":
-		return "sdk/api/client.gen.ts"
+		return "sdk/src/api/client.gen.ts"
 	default:
 		panic(fmt.Errorf("unknown sdk %q", sdk))
 	}
@@ -5476,7 +5542,7 @@ func sdkCodegenFile(t *testctx.T, sdk string) string {
 
 func modInit(t *testctx.T, c *dagger.Client, sdk, contents string) *dagger.Container {
 	t.Helper()
-	return daggerCliBase(t, c).With(withModInit(sdk, contents))
+	return goGitBase(t, c).With(withModInit(sdk, contents))
 }
 
 func withModInit(sdk, contents string) dagger.WithContainerFunc {
@@ -5510,7 +5576,7 @@ func currentSchema(ctx context.Context, t *testctx.T, ctr *dagger.Container) *in
 }
 
 var moduleIntrospection = daggerQuery(`
-query { host { directory(path: ".") { asModule { initialize {
+query { host { directory(path: ".") { asModule {
     description
     objects {
         asObject {
@@ -5539,6 +5605,20 @@ query { host { directory(path: ".") { asModule { initialize {
             }
         }
     }
+		interfaces {
+		  asInterface {
+			  name
+				description
+				functions {
+				  name
+					description
+					args {
+					  name
+						description
+					}
+				}
+			}
+		}
     enums {
         asEnum {
             name
@@ -5549,14 +5629,14 @@ query { host { directory(path: ".") { asModule { initialize {
 			}
         }
     }
-} } } } }
+} } } }
 `)
 
 func inspectModule(ctx context.Context, t *testctx.T, ctr *dagger.Container) gjson.Result {
 	t.Helper()
 	out, err := ctr.With(moduleIntrospection).Stdout(ctx)
 	require.NoError(t, err)
-	result := gjson.Get(out, "host.directory.asModule.initialize")
+	result := gjson.Get(out, "host.directory.asModule")
 	t.Logf("module introspection:\n%v", result.Raw)
 	return result
 }
@@ -5566,7 +5646,7 @@ func inspectModuleObjects(ctx context.Context, t *testctx.T, ctr *dagger.Contain
 	return inspectModule(ctx, t, ctr).Get("objects.#.asObject")
 }
 
-func goGitBase(t *testctx.T, c *dagger.Client) *dagger.Container {
+func goGitBase(t testing.TB, c *dagger.Client) *dagger.Container {
 	t.Helper()
 	return c.Container().From(golangImage).
 		WithExec([]string{"apk", "add", "git"}).

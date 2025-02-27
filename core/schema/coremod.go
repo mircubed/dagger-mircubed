@@ -28,10 +28,6 @@ func (m *CoreMod) Name() string {
 	return core.ModuleName
 }
 
-func (m *CoreMod) Dependencies() []core.Mod {
-	return nil
-}
-
 func (m *CoreMod) View() (string, bool) {
 	return m.Dag.View, true
 }
@@ -50,7 +46,9 @@ func (m *CoreMod) Install(ctx context.Context, dag *dagql.Server) error {
 		&httpSchema{dag},
 		&platformSchema{dag},
 		&socketSchema{dag},
+		&moduleSourceSchema{dag},
 		&moduleSchema{dag},
+		&errorSchema{dag},
 		&engineSchema{dag},
 	} {
 		schema.Install()
@@ -62,7 +60,7 @@ func (m *CoreMod) ModTypeFor(ctx context.Context, typeDef *core.TypeDef, checkDi
 	var modType core.ModType
 
 	switch typeDef.Kind {
-	case core.TypeDefKindString, core.TypeDefKindInteger, core.TypeDefKindBoolean, core.TypeDefKindVoid:
+	case core.TypeDefKindString, core.TypeDefKindInteger, core.TypeDefKindFloat, core.TypeDefKindBoolean, core.TypeDefKindVoid:
 		modType = &core.PrimitiveType{Def: typeDef}
 
 	case core.TypeDefKindList:
@@ -425,6 +423,8 @@ func introspectionRefToTypeDef(introspectionType *introspection.TypeRef, nonNull
 			typeDef.Kind = core.TypeDefKindString
 		case string(introspection.ScalarInt):
 			typeDef.Kind = core.TypeDefKindInteger
+		case string(introspection.ScalarFloat):
+			typeDef.Kind = core.TypeDefKindFloat
 		case string(introspection.ScalarBoolean):
 			typeDef.Kind = core.TypeDefKindBoolean
 		case string(introspection.ScalarVoid):

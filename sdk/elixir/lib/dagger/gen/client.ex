@@ -9,23 +9,6 @@ defmodule Dagger.Client do
 
   @type t() :: %__MODULE__{}
 
-  @doc "Retrieves a content-addressed blob."
-  @spec blob(t(), String.t(), integer(), String.t(), String.t()) :: Dagger.Directory.t()
-  def blob(%__MODULE__{} = client, digest, size, media_type, uncompressed) do
-    query_builder =
-      client.query_builder
-      |> QB.select("blob")
-      |> QB.put_arg("digest", digest)
-      |> QB.put_arg("size", size)
-      |> QB.put_arg("mediaType", media_type)
-      |> QB.put_arg("uncompressed", uncompressed)
-
-    %Dagger.Directory{
-      query_builder: query_builder,
-      client: client.client
-    }
-  end
-
   @doc "Retrieves a container builtin to the engine."
   @spec builtin_container(t(), String.t()) :: Dagger.Container.t()
   def builtin_container(%__MODULE__{} = client, digest) do
@@ -39,10 +22,13 @@ defmodule Dagger.Client do
   end
 
   @doc "Constructs a cache volume for a given cache key."
-  @spec cache_volume(t(), String.t()) :: Dagger.CacheVolume.t()
-  def cache_volume(%__MODULE__{} = client, key) do
+  @spec cache_volume(t(), String.t(), [{:namespace, String.t() | nil}]) :: Dagger.CacheVolume.t()
+  def cache_volume(%__MODULE__{} = client, key, optional_args \\ []) do
     query_builder =
-      client.query_builder |> QB.select("cacheVolume") |> QB.put_arg("key", key)
+      client.query_builder
+      |> QB.select("cacheVolume")
+      |> QB.put_arg("key", key)
+      |> QB.maybe_put_arg("namespace", optional_args[:namespace])
 
     %Dagger.CacheVolume{
       query_builder: query_builder,
@@ -116,18 +102,6 @@ defmodule Dagger.Client do
     end
   end
 
-  @doc "The Dagger engine container configuration and state"
-  @spec dagger_engine(t()) :: Dagger.DaggerEngine.t()
-  def dagger_engine(%__MODULE__{} = client) do
-    query_builder =
-      client.query_builder |> QB.select("daggerEngine")
-
-    %Dagger.DaggerEngine{
-      query_builder: query_builder,
-      client: client.client
-    }
-  end
-
   @doc "The default platform of the engine."
   @spec default_platform(t()) :: {:ok, Dagger.Platform.t()} | {:error, term()}
   def default_platform(%__MODULE__{} = client) do
@@ -144,6 +118,30 @@ defmodule Dagger.Client do
       client.query_builder |> QB.select("directory")
 
     %Dagger.Directory{
+      query_builder: query_builder,
+      client: client.client
+    }
+  end
+
+  @doc "The Dagger engine container configuration and state"
+  @spec engine(t()) :: Dagger.Engine.t()
+  def engine(%__MODULE__{} = client) do
+    query_builder =
+      client.query_builder |> QB.select("engine")
+
+    %Dagger.Engine{
+      query_builder: query_builder,
+      client: client.client
+    }
+  end
+
+  @doc "Create a new error."
+  @spec error(t(), String.t()) :: Dagger.Error.t()
+  def error(%__MODULE__{} = client, message) do
+    query_builder =
+      client.query_builder |> QB.select("error") |> QB.put_arg("message", message)
+
+    %Dagger.Error{
       query_builder: query_builder,
       client: client.client
     }
@@ -265,61 +263,6 @@ defmodule Dagger.Client do
     }
   end
 
-  @doc "Load a DaggerEngineCacheEntry from its ID."
-  @spec load_dagger_engine_cache_entry_from_id(t(), Dagger.DaggerEngineCacheEntryID.t()) ::
-          Dagger.DaggerEngineCacheEntry.t()
-  def load_dagger_engine_cache_entry_from_id(%__MODULE__{} = client, id) do
-    query_builder =
-      client.query_builder
-      |> QB.select("loadDaggerEngineCacheEntryFromID")
-      |> QB.put_arg("id", id)
-
-    %Dagger.DaggerEngineCacheEntry{
-      query_builder: query_builder,
-      client: client.client
-    }
-  end
-
-  @doc "Load a DaggerEngineCacheEntrySet from its ID."
-  @spec load_dagger_engine_cache_entry_set_from_id(t(), Dagger.DaggerEngineCacheEntrySetID.t()) ::
-          Dagger.DaggerEngineCacheEntrySet.t()
-  def load_dagger_engine_cache_entry_set_from_id(%__MODULE__{} = client, id) do
-    query_builder =
-      client.query_builder
-      |> QB.select("loadDaggerEngineCacheEntrySetFromID")
-      |> QB.put_arg("id", id)
-
-    %Dagger.DaggerEngineCacheEntrySet{
-      query_builder: query_builder,
-      client: client.client
-    }
-  end
-
-  @doc "Load a DaggerEngineCache from its ID."
-  @spec load_dagger_engine_cache_from_id(t(), Dagger.DaggerEngineCacheID.t()) ::
-          Dagger.DaggerEngineCache.t()
-  def load_dagger_engine_cache_from_id(%__MODULE__{} = client, id) do
-    query_builder =
-      client.query_builder |> QB.select("loadDaggerEngineCacheFromID") |> QB.put_arg("id", id)
-
-    %Dagger.DaggerEngineCache{
-      query_builder: query_builder,
-      client: client.client
-    }
-  end
-
-  @doc "Load a DaggerEngine from its ID."
-  @spec load_dagger_engine_from_id(t(), Dagger.DaggerEngineID.t()) :: Dagger.DaggerEngine.t()
-  def load_dagger_engine_from_id(%__MODULE__{} = client, id) do
-    query_builder =
-      client.query_builder |> QB.select("loadDaggerEngineFromID") |> QB.put_arg("id", id)
-
-    %Dagger.DaggerEngine{
-      query_builder: query_builder,
-      client: client.client
-    }
-  end
-
   @doc "Load a Directory from its ID."
   @spec load_directory_from_id(t(), Dagger.DirectoryID.t()) :: Dagger.Directory.t()
   def load_directory_from_id(%__MODULE__{} = client, id) do
@@ -327,6 +270,56 @@ defmodule Dagger.Client do
       client.query_builder |> QB.select("loadDirectoryFromID") |> QB.put_arg("id", id)
 
     %Dagger.Directory{
+      query_builder: query_builder,
+      client: client.client
+    }
+  end
+
+  @doc "Load a EngineCacheEntry from its ID."
+  @spec load_engine_cache_entry_from_id(t(), Dagger.EngineCacheEntryID.t()) ::
+          Dagger.EngineCacheEntry.t()
+  def load_engine_cache_entry_from_id(%__MODULE__{} = client, id) do
+    query_builder =
+      client.query_builder |> QB.select("loadEngineCacheEntryFromID") |> QB.put_arg("id", id)
+
+    %Dagger.EngineCacheEntry{
+      query_builder: query_builder,
+      client: client.client
+    }
+  end
+
+  @doc "Load a EngineCacheEntrySet from its ID."
+  @spec load_engine_cache_entry_set_from_id(t(), Dagger.EngineCacheEntrySetID.t()) ::
+          Dagger.EngineCacheEntrySet.t()
+  def load_engine_cache_entry_set_from_id(%__MODULE__{} = client, id) do
+    query_builder =
+      client.query_builder |> QB.select("loadEngineCacheEntrySetFromID") |> QB.put_arg("id", id)
+
+    %Dagger.EngineCacheEntrySet{
+      query_builder: query_builder,
+      client: client.client
+    }
+  end
+
+  @doc "Load a EngineCache from its ID."
+  @spec load_engine_cache_from_id(t(), Dagger.EngineCacheID.t()) :: Dagger.EngineCache.t()
+  def load_engine_cache_from_id(%__MODULE__{} = client, id) do
+    query_builder =
+      client.query_builder |> QB.select("loadEngineCacheFromID") |> QB.put_arg("id", id)
+
+    %Dagger.EngineCache{
+      query_builder: query_builder,
+      client: client.client
+    }
+  end
+
+  @doc "Load a Engine from its ID."
+  @spec load_engine_from_id(t(), Dagger.EngineID.t()) :: Dagger.Engine.t()
+  def load_engine_from_id(%__MODULE__{} = client, id) do
+    query_builder =
+      client.query_builder |> QB.select("loadEngineFromID") |> QB.put_arg("id", id)
+
+    %Dagger.Engine{
       query_builder: query_builder,
       client: client.client
     }
@@ -364,6 +357,18 @@ defmodule Dagger.Client do
       client.query_builder |> QB.select("loadEnvVariableFromID") |> QB.put_arg("id", id)
 
     %Dagger.EnvVariable{
+      query_builder: query_builder,
+      client: client.client
+    }
+  end
+
+  @doc "Load a Error from its ID."
+  @spec load_error_from_id(t(), Dagger.ErrorID.t()) :: Dagger.Error.t()
+  def load_error_from_id(%__MODULE__{} = client, id) do
+    query_builder =
+      client.query_builder |> QB.select("loadErrorFromID") |> QB.put_arg("id", id)
+
+    %Dagger.Error{
       query_builder: query_builder,
       client: client.client
     }
@@ -454,19 +459,6 @@ defmodule Dagger.Client do
     }
   end
 
-  @doc "Load a GitModuleSource from its ID."
-  @spec load_git_module_source_from_id(t(), Dagger.GitModuleSourceID.t()) ::
-          Dagger.GitModuleSource.t()
-  def load_git_module_source_from_id(%__MODULE__{} = client, id) do
-    query_builder =
-      client.query_builder |> QB.select("loadGitModuleSourceFromID") |> QB.put_arg("id", id)
-
-    %Dagger.GitModuleSource{
-      query_builder: query_builder,
-      client: client.client
-    }
-  end
-
   @doc "Load a GitRef from its ID."
   @spec load_git_ref_from_id(t(), Dagger.GitRefID.t()) :: Dagger.GitRef.t()
   def load_git_ref_from_id(%__MODULE__{} = client, id) do
@@ -552,32 +544,6 @@ defmodule Dagger.Client do
     }
   end
 
-  @doc "Load a LocalModuleSource from its ID."
-  @spec load_local_module_source_from_id(t(), Dagger.LocalModuleSourceID.t()) ::
-          Dagger.LocalModuleSource.t()
-  def load_local_module_source_from_id(%__MODULE__{} = client, id) do
-    query_builder =
-      client.query_builder |> QB.select("loadLocalModuleSourceFromID") |> QB.put_arg("id", id)
-
-    %Dagger.LocalModuleSource{
-      query_builder: query_builder,
-      client: client.client
-    }
-  end
-
-  @doc "Load a ModuleDependency from its ID."
-  @spec load_module_dependency_from_id(t(), Dagger.ModuleDependencyID.t()) ::
-          Dagger.ModuleDependency.t()
-  def load_module_dependency_from_id(%__MODULE__{} = client, id) do
-    query_builder =
-      client.query_builder |> QB.select("loadModuleDependencyFromID") |> QB.put_arg("id", id)
-
-    %Dagger.ModuleDependency{
-      query_builder: query_builder,
-      client: client.client
-    }
-  end
-
   @doc "Load a Module from its ID."
   @spec load_module_from_id(t(), Dagger.ModuleID.t()) :: Dagger.Module.t()
   def load_module_from_id(%__MODULE__{} = client, id) do
@@ -597,19 +563,6 @@ defmodule Dagger.Client do
       client.query_builder |> QB.select("loadModuleSourceFromID") |> QB.put_arg("id", id)
 
     %Dagger.ModuleSource{
-      query_builder: query_builder,
-      client: client.client
-    }
-  end
-
-  @doc "Load a ModuleSourceView from its ID."
-  @spec load_module_source_view_from_id(t(), Dagger.ModuleSourceViewID.t()) ::
-          Dagger.ModuleSourceView.t()
-  def load_module_source_view_from_id(%__MODULE__{} = client, id) do
-    query_builder =
-      client.query_builder |> QB.select("loadModuleSourceViewFromID") |> QB.put_arg("id", id)
-
-    %Dagger.ModuleSourceView{
       query_builder: query_builder,
       client: client.client
     }
@@ -639,6 +592,18 @@ defmodule Dagger.Client do
     }
   end
 
+  @doc "Load a SDKConfig from its ID."
+  @spec load_sdk_config_from_id(t(), Dagger.SDKConfigID.t()) :: Dagger.SDKConfig.t() | nil
+  def load_sdk_config_from_id(%__MODULE__{} = client, id) do
+    query_builder =
+      client.query_builder |> QB.select("loadSDKConfigFromID") |> QB.put_arg("id", id)
+
+    %Dagger.SDKConfig{
+      query_builder: query_builder,
+      client: client.client
+    }
+  end
+
   @doc "Load a ScalarTypeDef from its ID."
   @spec load_scalar_type_def_from_id(t(), Dagger.ScalarTypeDefID.t()) :: Dagger.ScalarTypeDef.t()
   def load_scalar_type_def_from_id(%__MODULE__{} = client, id) do
@@ -656,6 +621,22 @@ defmodule Dagger.Client do
   def load_secret_from_id(%__MODULE__{} = client, id) do
     query_builder =
       client.query_builder |> QB.select("loadSecretFromID") |> QB.put_arg("id", id)
+
+    %Dagger.Secret{
+      query_builder: query_builder,
+      client: client.client
+    }
+  end
+
+  @doc "Load a Secret from its Name."
+  @spec load_secret_from_name(t(), String.t(), [{:accessor, String.t() | nil}]) ::
+          Dagger.Secret.t()
+  def load_secret_from_name(%__MODULE__{} = client, name, optional_args \\ []) do
+    query_builder =
+      client.query_builder
+      |> QB.select("loadSecretFromName")
+      |> QB.put_arg("name", name)
+      |> QB.maybe_put_arg("accessor", optional_args[:accessor])
 
     %Dagger.Secret{
       query_builder: query_builder,
@@ -735,27 +716,12 @@ defmodule Dagger.Client do
     }
   end
 
-  @doc "Create a new module dependency configuration from a module source and name"
-  @spec module_dependency(t(), Dagger.ModuleSource.t(), [{:name, String.t() | nil}]) ::
-          Dagger.ModuleDependency.t()
-  def module_dependency(%__MODULE__{} = client, source, optional_args \\ []) do
-    query_builder =
-      client.query_builder
-      |> QB.select("moduleDependency")
-      |> QB.put_arg("source", Dagger.ID.id!(source))
-      |> QB.maybe_put_arg("name", optional_args[:name])
-
-    %Dagger.ModuleDependency{
-      query_builder: query_builder,
-      client: client.client
-    }
-  end
-
-  @doc "Create a new module source instance from a source ref string."
+  @doc "Create a new module source instance from a source ref string"
   @spec module_source(t(), String.t(), [
           {:ref_pin, String.t() | nil},
-          {:stable, boolean() | nil},
-          {:rel_host_path, String.t() | nil}
+          {:disable_find_up, boolean() | nil},
+          {:allow_not_exists, boolean() | nil},
+          {:require_kind, Dagger.ModuleSourceKind.t() | nil}
         ]) :: Dagger.ModuleSource.t()
   def module_source(%__MODULE__{} = client, ref_string, optional_args \\ []) do
     query_builder =
@@ -763,8 +729,9 @@ defmodule Dagger.Client do
       |> QB.select("moduleSource")
       |> QB.put_arg("refString", ref_string)
       |> QB.maybe_put_arg("refPin", optional_args[:ref_pin])
-      |> QB.maybe_put_arg("stable", optional_args[:stable])
-      |> QB.maybe_put_arg("relHostPath", optional_args[:rel_host_path])
+      |> QB.maybe_put_arg("disableFindUp", optional_args[:disable_find_up])
+      |> QB.maybe_put_arg("allowNotExists", optional_args[:allow_not_exists])
+      |> QB.maybe_put_arg("requireKind", optional_args[:require_kind])
 
     %Dagger.ModuleSource{
       query_builder: query_builder,
@@ -772,14 +739,11 @@ defmodule Dagger.Client do
     }
   end
 
-  @doc "Reference a secret by name."
-  @spec secret(t(), String.t(), [{:accessor, String.t() | nil}]) :: Dagger.Secret.t()
-  def secret(%__MODULE__{} = client, name, optional_args \\ []) do
+  @doc "Creates a new secret."
+  @spec secret(t(), String.t()) :: Dagger.Secret.t()
+  def secret(%__MODULE__{} = client, uri) do
     query_builder =
-      client.query_builder
-      |> QB.select("secret")
-      |> QB.put_arg("name", name)
-      |> QB.maybe_put_arg("accessor", optional_args[:accessor])
+      client.query_builder |> QB.select("secret") |> QB.put_arg("uri", uri)
 
     %Dagger.Secret{
       query_builder: query_builder,

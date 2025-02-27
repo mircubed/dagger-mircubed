@@ -123,9 +123,58 @@ When working with private Git repositories, ensure that [SSH authentication is p
     dagger call copy-and-modify-directory --source=https://github.com/dagger/dagger#main directory --path=/src entries
     ```
 
-### Copy a file to a container
+### Clone a remote Git repository into a container by branch, tag or commit
 
-The following Dagger Function accepts a `File` argument representing the host file to be copied. It writes the specified file to a container in the `/src/` directory and returns the modified container.
+The following Dagger Function accepts a Git repository URL and a branch name, tag name or commit id. It copies the repository at the specified branch, tag or commit to the `/src` path in a container and returns the modified container.
+
+:::note
+When working with private Git repositories, ensure that [SSH authentication is properly configured](../api/remote-modules.mdx#configuring-ssh-authentication) on your Dagger host.
+:::
+
+<Tabs groupId="language">
+<TabItem value="Go">
+
+```go file=./snippets/clone-git-repository/go/main.go
+```
+
+</TabItem>
+<TabItem value="Python">
+
+```python file=./snippets/clone-git-repository/python/main.py
+```
+
+</TabItem>
+<TabItem value="TypeScript">
+
+```typescript file=./snippets/clone-git-repository/typescript/index.ts
+```
+
+</TabItem>
+</Tabs>
+
+#### Examples
+
+- Clone the `main` branch of the public `dagger/dagger` GitHub repository to `/src` in the container:
+
+    ```shell
+    dagger call clone --repository=https://github.com/dagger/dagger --locator=BRANCH --ref=main
+    ```
+
+- Clone the public `dagger/dagger` GitHub repository at tag `v0.12.1` to `/src` in the container and list the contents of the `CHANGELOG.md` file in the repository root directory:
+
+    ```shell
+    dagger call clone --repository=https://github.com/dagger/dagger --locator=TAG --ref=v0.12.1 file --path=/src/CHANGELOG.md contents
+    ```
+
+- Clone the public `dagger/dagger` GitHub repository at commit id  `196f232a4d6b2d1d3db5f5e040cf20b6a76a76c5` to `/src` in the container and open an interactive terminal to inspect the container filesystem:
+
+    ```shell
+    dagger call clone --repository=https://github.com/dagger/dagger --locator=COMMIT --ref=196f232a4d6b2d1d3db5f5e040cf20b6a76a76c5 terminal
+    ```
+
+### Copy a local or remote file to a container
+
+The following Dagger Function accepts a `File` argument, which could reference either a file from the local filesystem or from a [remote Git repository](../api/arguments.mdx#remote-repositories). It writes the specified file to a container in the `/src/` directory and returns the modified container.
 
 <Tabs groupId="language">
 <TabItem value="Go">
@@ -162,30 +211,46 @@ The following Dagger Function accepts a `File` argument representing the host fi
     dagger call copy-file --f=/home/admin/archives.zip directory --path=/src entries
     ```
 
-### Copy a subset of a directory or remote repository to a container
+-  Copy the `README.md` file from the public `dagger/dagger` GitHub repository to the `/src` directory in the container:
 
-The following Dagger Function accepts a `Directory` argument, which could reference either a directory from the local filesystem or from a [remote Git repository](../api/arguments.mdx#remote-repositories). It copies the specified directory to the `/src` path in a container, using wildcard patterns to exclude specified sub-directories and files, and returns the modified container.
+    ```shell
+    dagger call copy-file --f=https://github.com/dagger/dagger.git#main:README.md
+    ```
+
+-  Copy the `README.md` file from the public `dagger/dagger` GitHub repository to the `/src` directory in the container and display its contents:
+
+    ```shell
+    dagger call copy-file --f=https://github.com/dagger/dagger.git#main:README.md file --path=/src/README.md contents
+    ```
+
+### Copy a subset of a directory or remote repository to a container using filters specified at run-time
+
+The following Dagger Function accepts a `Directory` argument, which could reference either a directory from the local filesystem or a [remote Git repository](../api/arguments.mdx#remote-repositories). It copies the specified directory to the `/src` path in a container, using filter patterns specified at call-time to exclude specified sub-directories and files, and returns the modified container.
 
 :::note
 When working with private Git repositories, ensure that [SSH authentication is properly configured](../api/remote-modules.mdx#configuring-ssh-authentication) on your Dagger host.
 :::
 
+:::note
+This is an example of [post-call filtering](../api/fs-filters.mdx#post-call-filtering) with [directory filters](../api/fs-filters.mdx).
+:::
+
 <Tabs groupId="language">
 <TabItem value="Go">
 
-```go file=./snippets/copy-filter-dir/go/main.go
+```go file=./snippets/copy-filter-dir-post/go/main.go
 ```
 
 </TabItem>
 <TabItem value="Python">
 
-```python file=./snippets/copy-filter-dir/python/main.py
+```python file=./snippets/copy-filter-dir-post/python/main.py
 ```
 
 </TabItem>
 <TabItem value="TypeScript">
 
-```typescript file=./snippets/copy-filter-dir/typescript/index.ts
+```typescript file=./snippets/copy-filter-dir-post/typescript/index.ts
 ```
 
 </TabItem>
@@ -211,6 +276,168 @@ When working with private Git repositories, ensure that [SSH authentication is p
     dagger call copy-directory-with-exclusions --source=ssh://git@github.com/user/foo#main --exclude-file='*.md' directory --path=/src entries
     ```
 
+### Request a file over HTTP/HTTPS and save it in a container
+
+<Tabs groupId="language">
+<TabItem value="Go">
+
+```go file=./snippets/read-file-http/go/main.go
+```
+
+</TabItem>
+<TabItem value="Python">
+
+```python file=./snippets/read-file-http/python/main.py
+```
+
+</TabItem>
+<TabItem value="TypeScript">
+
+```typescript file=./snippets/read-file-http/typescript/index.ts
+```
+
+</TabItem>
+</Tabs>
+
+#### Examples
+
+-  Request the `README.md` file from the public `dagger/dagger` GitHub repository over HTTPS and save it as `/src/myfile` in the container:
+
+    ```shell
+    dagger call read-file-http --url=https://raw.githubusercontent.com/dagger/dagger/refs/heads/main/README.md
+    ```
+
+-  Request the `README.md` file from the public `dagger/dagger` GitHub repository over HTTPS, save it as `/src/myfile` in the container, and display its contents:
+
+    ```shell
+    dagger call read-file-http --url=https://raw.githubusercontent.com/dagger/dagger/refs/heads/main/README.md file --path=/src/myfile contents
+    ```
+
+### Copy a file to the Dagger module runtime container for custom processing
+
+The following Dagger Function accepts a `File` argument and copies the specified file to the Dagger module runtime container. This makes it possible to add one or more files to the runtime container and manipulate them using custom logic.
+
+<Tabs groupId="language">
+<TabItem value="Go">
+
+```go file=./snippets/copy-file-runtime/go/main.go
+```
+
+</TabItem>
+<TabItem value="Python">
+
+```python file=./snippets/copy-file-runtime/python/main.py
+```
+
+</TabItem>
+<TabItem value="TypeScript">
+
+```typescript file=./snippets/copy-file-runtime/typescript/index.ts
+```
+
+</TabItem>
+</Tabs>
+
+#### Example
+
+Copy the `data.json` host file to the runtime container and process it:
+
+```shell
+dagger call copy-file --source=../data.json
+```
+
+### Copy a subset of a directory or remote repository to a container using pre-defined filters
+
+The following Dagger Function accepts a `Directory` argument, which could reference either a directory from the local filesystem or a [remote Git repository](../api/arguments.mdx#remote-repositories). It copies the specified directory to the `/src` path in a container, using pre-defined filter patterns to exclude specified sub-directories and files, and returns the modified container.
+
+:::note
+When working with private Git repositories, ensure that [SSH authentication is properly configured](../api/remote-modules.mdx#configuring-ssh-authentication) on your Dagger host.
+:::
+
+:::note
+This is an example of [pre-call filtering](../api/fs-filters.mdx#pre-call-filtering) with [directory filters](../api/fs-filters.mdx).
+:::
+
+<Tabs groupId="language">
+<TabItem value="Go">
+
+```go file=./snippets/copy-filter-dir-pre/go/main.go
+```
+
+</TabItem>
+<TabItem value="Python">
+
+```python file=./snippets/copy-filter-dir-pre/python/main.py
+```
+
+</TabItem>
+<TabItem value="TypeScript">
+
+```typescript file=./snippets/copy-filter-dir-pre/typescript/index.ts
+```
+
+</TabItem>
+</Tabs>
+
+#### Examples
+
+- Copy the specified host directory to `/src` in the container, excluding everything except Markdown files, and return the modified container:
+
+    ```shell
+    dagger call copy-directory-with-exclusions --source=../docs
+    ```
+
+- Copy the public `dagger/dagger` GitHub repository to `/src` in the container, excluding everything except Markdown files, and list the contents of the `/src` directory in the container:
+
+    ```shell
+    dagger call copy-directory-with-exclusions --source=https://github.com/dagger/dagger#main directory --path=/src entries
+    ```
+
+### Set a module-wide default path
+
+The following Dagger module uses a constructor to set a module-wide `Directory` argument and point it to a default path on the host. This eliminates the need to pass a common `Directory` argument individually to each Dagger Function in the module. If required, the default path can be overridden by specifying a different `Directory` value at call time.
+
+<Tabs groupId="language">
+<TabItem value="Go">
+
+```go file=./snippets/set-common-default-path/go/main.go
+```
+
+</TabItem>
+<TabItem value="Python">
+
+```python file=./snippets/set-common-default-path/python/main.py
+```
+
+</TabItem>
+<TabItem value="TypeScript">
+
+```typescript file=./snippets/set-common-default-path/typescript/index.ts
+```
+
+</TabItem>
+<TabItem value="PHP">
+
+```php file=./snippets/set-common-default-path/php/src/MyModule.php
+```
+
+</TabItem>
+</Tabs>
+
+#### Examples
+
+- Call the Dagger Function without arguments. The default path (the current directory `.`) is used:
+
+    ```shell
+    dagger call foo
+    ```
+
+- Call the Dagger Function with a constructor argument. The specified directory (`/src/myapp`) is used:
+
+    ```shell
+    dagger call --source=/src/myapp foo
+    ```
+
 ## Builds
 
 ### Perform a multi-stage build
@@ -233,6 +460,12 @@ The following Dagger Function performs a multi-stage build.
 <TabItem value="TypeScript">
 
 ```typescript file=./snippets/builds/multi-stage-build/typescript/index.ts
+```
+
+</TabItem>
+<TabItem value="PHP">
+
+```php file=./snippets/builds/multi-stage-build/php/src/MyModule.php
 ```
 
 </TabItem>
@@ -266,6 +499,12 @@ The following Dagger Function performs a matrix build.
 <TabItem value="TypeScript">
 
 ```typescript file=./snippets/builds/matrix-build/typescript/index.ts
+```
+
+</TabItem>
+<TabItem value="PHP">
+
+```php file=./snippets/builds/matrix-build/php/src/MyModule.php
 ```
 
 </TabItem>
@@ -392,13 +631,19 @@ The following Dagger Function builds an image from a Dockerfile.
 ```
 
 </TabItem>
+<TabItem value="PHP">
+
+```php file=./snippets/builds/dockerfile/php/src/MyModule.php
+```
+
+</TabItem>
 </Tabs>
 
 #### Example
 Build and publish an image from an existing Dockerfile
 
 ```shell
-dagger call build --src https://github.com/dockersamples/python-flask-redis
+dagger call build --src=https://github.com/dockersamples/python-flask-redis
 ```
 
 ### Build image from Dockerfile using different build context
@@ -436,26 +681,59 @@ dagger call build \
   --dockerfile https://github.com/vimagick/dockerfiles#master:registry-cli/Dockerfile
 ```
 
-### Add OCI labels to image
+### Add OCI annotations to image
 
-The following Dagger Function adds OpenContainer Initiative (OCI) labels to an image.
+The following Dagger Function adds [OpenContainer Initiative (OCI) annotations](https://github.com/opencontainers/image-spec/blob/main/annotations.md) to an image.
 
 <Tabs groupId="language">
 <TabItem value="Go">
 
-```go file=./snippets/builds/oci/go/main.go
+```go file=./snippets/builds/oci-annotations/go/main.go
 ```
 
 </TabItem>
 <TabItem value="Python">
 
-```python file=./snippets/builds/oci/python/main.py
+```python file=./snippets/builds/oci-annotations/python/main.py
 ```
 
 </TabItem>
 <TabItem value="TypeScript">
 
-```typescript file=./snippets/builds/oci/typescript/index.ts
+```typescript file=./snippets/builds/oci-annotations/typescript/index.ts
+```
+
+</TabItem>
+</Tabs>
+
+#### Example
+
+Build and publish an image with OCI annotations:
+
+```shell
+dagger call build
+```
+
+### Add OCI labels to image
+
+The following Dagger Function adds [OpenContainer Initiative (OCI) labels](https://github.com/opencontainers/image-spec/blob/main/config.md) to an image.
+
+<Tabs groupId="language">
+<TabItem value="Go">
+
+```go file=./snippets/builds/oci-labels/go/main.go
+```
+
+</TabItem>
+<TabItem value="Python">
+
+```python file=./snippets/builds/oci-labels/python/main.py
+```
+
+</TabItem>
+<TabItem value="TypeScript">
+
+```typescript file=./snippets/builds/oci-labels/typescript/index.ts
 ```
 
 </TabItem>
@@ -497,6 +775,12 @@ The following function demonstrates how to invalidate the Dagger layer cache and
 ```
 
 </TabItem>
+<TabItem value="PHP">
+
+```php file=./snippets/builds/cache/php/src/MyModule.php
+```
+
+</TabItem>
 </Tabs>
 
 #### Example
@@ -511,7 +795,7 @@ dagger call build
 
 ### Use secret variables
 
-The following Dagger Function accepts a GitHub personal access token as a `Secret`, and uses the `Secret` to authorize a request to the GitHub API. The secret may be sourced from a host environment variable, host file, or host command execution.
+The following Dagger Function accepts a GitHub personal access token as a `Secret`, and uses the `Secret` to authorize a request to the GitHub API. The secret may be sourced from the host (via an environment variable, host file, or host command) or from an external secrets manager (1Password or Vault):
 
 <Tabs groupId="language">
 <TabItem value="Go">
@@ -536,22 +820,46 @@ The following Dagger Function accepts a GitHub personal access token as a `Secre
 
 #### Examples
 
-- Query the API using a secret sourced from an environment variable:
+- Use a secret sourced from an environment variable:
 
     ```shell
-    dagger call github-api --token=env:GITHUB_API_TOKEN
+    dagger call github-api --token=env://GITHUB_API_TOKEN
     ```
 
-- Query the API using a secret sourced from a file:
+- Use a secret sourced from a file:
 
     ```shell
-    dagger call github-api --token=file:./github.txt
+    dagger call github-api --token=file://./github.txt
     ```
 
-- Query the API using a secret sourced from a command:
+- Use a secret sourced from a command:
 
     ```shell
-    dagger call github-api --token=cmd:"gh auth token"
+    dagger call github-api --token=cmd://"gh auth token"
+    ```
+
+- Use a secret from 1Password:
+
+    ```shell
+    dagger call github-api --token=op://infra/github/credential
+    ```
+
+  [1Password service accounts](https://developer.1password.com/docs/service-accounts/) are also supported:
+
+    ```shell
+    OP_SERVICE_ACCOUNT_TOKEN="mytoken" dagger call github-api --token=op://infra/github/credential
+    ```
+
+- Use a secret from Vault:
+
+    ```shell
+    VAULT_ADDR="https://127.0.0.1:8200" VAULT_TOKEN="gue55me7" dagger call github-api --token=vault://credentials.github
+    ```
+
+  [Vault AppRole authentication](https://developer.hashicorp.com/vault/docs/auth/approle) is also supported:
+
+    ```shell
+    VAULT_ADDR="https://127.0.0.1:8200" VAULT_APPROLE_ROLE_ID="ROLE-ID" VAULT_APPROLE_SECRET_ID="SECRET-ID" dagger call github-api --token=vault://credentials.github
     ```
 
 ### Mount files as secrets
@@ -581,11 +889,10 @@ The following Dagger Function accepts a GitHub hosts configuration file as a `Se
 
 #### Example
 
-Query the GitHub API using a mounted secret file:
+Use a mounted secret file:
 
 ```shell
-dagger call github-auth \
-    --gh-creds=file:$HOME/.config/gh/hosts.yml
+dagger call github-auth --gh-creds=file://$HOME/.config/gh/hosts.yml
 ```
 
 ### Use secret in Dockerfile build
@@ -626,10 +933,10 @@ RUN --mount=type=secret,id=gh-secret \
 
 #### Example
 
-Build from a Dockerfile with a mounted secret:
+Build from a Dockerfile with a mounted secret from the host environment:
 
 ```shell
-dagger call build --source=. --secret=env:GITHUB_API_TOKEN
+dagger call build --source=. --secret=env://GITHUB_API_TOKEN
 ```
 
 ## Services
@@ -816,6 +1123,39 @@ Start and stop a Redis service:
 dagger call redis-service
 ```
 
+### Create interdependent services
+
+The following Dagger Function runs two services, service A and service B, that depend on each other. The services are set up with custom hostnames, `svca` and `svcb`, allowing each service to communicate with the other by hostname.
+
+<Tabs groupId="language">
+<TabItem value="Go">
+
+```go file=../api/snippets/services/create-interdependent-services/go/main.go
+```
+
+</TabItem>
+<TabItem value="Python">
+
+```python file=../api/snippets/services/create-interdependent-services/python/main.py
+```
+
+</TabItem>
+<TabItem value="TypeScript">
+
+```typescript file=../api/snippets/services/create-interdependent-services/typescript/index.ts
+```
+
+</TabItem>
+</Tabs>
+
+#### Example
+
+Start two inter-dependent services:
+
+```shell
+dagger call services up --ports 8080:80
+```
+
 ## Just-in-time artifacts
 
 ### Publish a container image to a private registry
@@ -993,6 +1333,12 @@ The following Dagger Function uses a cache volume for application dependencies. 
 ```
 
 </TabItem>
+<TabItem value="PHP">
+
+```php file=./snippets/cache-dependencies/php/src/MyModule.php
+```
+
+</TabItem>
 </Tabs>
 
 #### Example
@@ -1023,6 +1369,12 @@ The following Dagger Function demonstrates how to set a single environment varia
 <TabItem value="TypeScript">
 
 ```typescript file=./snippets/set-env-var/typescript/index.ts
+```
+
+</TabItem>
+<TabItem value="PHP">
+
+```php file=./snippets/set-env-var/php/src/MyModule.php
 ```
 
 </TabItem>
@@ -1069,7 +1421,6 @@ dagger call set-env-vars
 
 The following Dagger Function uses a cache volume to persist a Redis service's data across Dagger Function runs.
 
-
 <Tabs groupId="language">
 <TabItem value="Go">
 
@@ -1104,6 +1455,39 @@ Retrieve the value of the key `foo` after recreating the service state from the 
 ```shell
 # returns "123"
 dagger call get --key=foo
+```
+
+### Execute functions concurrently
+
+The following Dagger Function demonstrates how to use native-language concurrency features ([errgroups](https://pkg.go.dev/golang.org/x/sync/errgroup) in Go, [task groups](https://anyio.readthedocs.io/en/stable/tasks.html) in Python), and [promises](https://basarat.gitbook.io/typescript/future-javascript/promise) in TypeScript to execute other Dagger Functions concurrently. If any of the concurrently-running functions fails, the remaining ones will be immediately cancelled.
+
+<Tabs groupId="language">
+<TabItem value="Go">
+
+```go file=./snippets/execute-concurrently/go/main.go
+```
+
+</TabItem>
+<TabItem value="Python">
+
+```python file=./snippets/execute-concurrently/python/main.py
+```
+
+</TabItem>
+<TabItem value="TypeScript">
+
+```typescript file=./snippets/execute-concurrently/typescript/index.ts
+```
+
+</TabItem>
+</Tabs>
+
+#### Example
+
+Execute a Dagger Function which performs different types of tests by executing other Dagger Functions concurrently.
+
+```shell
+dagger call --source=. run-all-tests
 ```
 
 ## Error handling

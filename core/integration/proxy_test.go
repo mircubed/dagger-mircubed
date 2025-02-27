@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dagger/dagger/testctx"
+	"github.com/dagger/testctx"
 	"github.com/goproxy/goproxy"
 	"github.com/moby/buildkit/identity"
 	"github.com/stretchr/testify/require"
@@ -175,7 +175,7 @@ http_access allow localhost
 		WithNewFile("/etc/squid/squid.conf", squidConf).
 		WithServiceBinding(httpServerAlias, httpServer.AsService()).
 		WithServiceBinding(noproxyHTTPServerAlias, noproxyHTTPServer.AsService()).
-		WithExec([]string{"sh", "-c", "chmod -R a+rw /var/log/squidaccess && exec squid --foreground"}).
+		WithDefaultArgs([]string{"sh", "-c", "chmod -R a+rw /var/log/squidaccess && exec squid --foreground"}).
 		AsService()
 
 	if os.Getenv(executeTestEnvName) == "" {
@@ -208,7 +208,7 @@ http_access allow localhost
 			WithMountedDirectory("/src", thisRepo).
 			WithWorkdir("/src").
 			WithMountedFile("/ca.pem", certGen.caRootCert).
-			WithServiceBinding("engine", devEngine.AsService()).
+			WithServiceBinding("engine", devEngineContainerAsService(devEngine)).
 			WithMountedFile("/bin/dagger", daggerCliFile(t, c)).
 			WithEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", "/bin/dagger").
 			WithEnvVariable("_EXPERIMENTAL_DAGGER_RUNNER_HOST", "tcp://engine:1234").
@@ -349,7 +349,7 @@ func (ContainerSuite) TestSystemProxies(ctx context.Context, t *testctx.T) {
 					WithExec([]string{"curl", "-v", f.httpsServerURL.String()}).
 					Stderr(ctx)
 				// curl WON'T exit 0 if it gets a 407 when using TLS, so DO expect an error
-				require.ErrorContains(t, err, "< HTTP/1.1 407 Proxy Authentication Required")
+				requireErrOut(t, err, "< HTTP/1.1 407 Proxy Authentication Required")
 			}},
 		)
 	})
@@ -458,7 +458,7 @@ func (ContainerSuite) TestSystemGoProxy(ctx context.Context, t *testctx.T) {
 						With(goCache(c)).
 						WithMountedDirectory("/src", thisRepo).
 						WithWorkdir("/src").
-						WithServiceBinding("engine", devEngine.AsService()).
+						WithServiceBinding("engine", devEngineContainerAsService(devEngine)).
 						WithMountedFile("/bin/dagger", daggerCliFile(t, c)).
 						WithEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", "/bin/dagger").
 						WithEnvVariable("_EXPERIMENTAL_DAGGER_RUNNER_HOST", "tcp://engine:1234").

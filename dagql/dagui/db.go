@@ -2,7 +2,8 @@ package dagui
 
 import (
 	"context"
-	"fmt"
+	"iter"
+	"slices"
 	"sort"
 	"time"
 
@@ -10,8 +11,8 @@ import (
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/trace"
 
 	"dagger.io/dagger/telemetry"
 	"github.com/dagger/dagger/dagql/call/callpbv1"
@@ -19,86 +20,196 @@ import (
 )
 
 type DB struct {
-	PrimarySpan trace.SpanID
-	PrimaryLogs map[trace.SpanID][]sdklog.Record
+	PrimarySpan SpanID
+	PrimaryLogs map[SpanID][]sdklog.Record
 
-	Traces        map[trace.TraceID]*Trace
-	Spans         map[trace.SpanID]*Span
-	SpanOrder     []*Span
-	Children      map[trace.SpanID]map[trace.SpanID]struct{}
-	ChildrenOrder map[trace.SpanID][]trace.SpanID
+	Epoch, End time.Time
 
-	Calls     map[string]*callpbv1.Call
+	Spans    *OrderedSet[SpanID, *Span]
+	RootSpan *Span
+
+	Resources map[attribute.Distinct]*resource.Resource
+
+	CallPayloads map[string]string
+	Calls        map[string]*callpbv1.Call
+
 	Outputs   map[string]map[string]struct{}
 	OutputOf  map[string]map[string]struct{}
 	Intervals map[string]map[time.Time]*Span
 
-	Effects    map[string]*Span
-	EffectSite map[string]*Span
+	CauseSpans  map[string]SpanSet
+	EffectSpans map[string]SpanSet
+
+	CompletedEffects map[string]bool
+	FailedEffects    map[string]bool
+
+	// Map of call digest -> metric name -> data points
+	// NOTE: this is hard coded for Gauge int64 metricdata essentially right now,
+	// needs generalization as more metric types get added
+	MetricsByCall map[string]map[string][]metricdata.DataPoint[int64]
+
+	// updatedSpans is a set of spans that have been updated since the last
+	// sync, which includes any parent spans whose overall active time intervals
+	// or status were modified via a child or linked span.
+	updatedSpans SpanSet
+
+	// seenSpans keeps track of which spans have been observed via
+	// UpdatedSnapshots so that we can know whether we need to send them when we
+	// finally see them
+	seenSpans map[SpanID]struct{}
 }
 
 func NewDB() *DB {
 	return &DB{
-		PrimaryLogs: make(map[trace.SpanID][]sdklog.Record),
+		PrimaryLogs: make(map[SpanID][]sdklog.Record),
 
-		Traces:        make(map[trace.TraceID]*Trace),
-		Spans:         make(map[trace.SpanID]*Span),
-		SpanOrder:     make([]*Span, 0),
-		Children:      make(map[trace.SpanID]map[trace.SpanID]struct{}),
-		ChildrenOrder: make(map[trace.SpanID][]trace.SpanID),
+		Spans:     NewSpanSet(),
+		Resources: make(map[attribute.Distinct]*resource.Resource),
 
-		Calls:      make(map[string]*callpbv1.Call),
-		OutputOf:   make(map[string]map[string]struct{}),
-		Outputs:    make(map[string]map[string]struct{}),
-		Intervals:  make(map[string]map[time.Time]*Span),
-		Effects:    make(map[string]*Span),
-		EffectSite: make(map[string]*Span),
+		CallPayloads: make(map[string]string),
+		Calls:        make(map[string]*callpbv1.Call),
+
+		OutputOf:  make(map[string]map[string]struct{}),
+		Outputs:   make(map[string]map[string]struct{}),
+		Intervals: make(map[string]map[time.Time]*Span),
+
+		CompletedEffects: make(map[string]bool),
+		FailedEffects:    make(map[string]bool),
+		CauseSpans:       make(map[string]SpanSet),
+		EffectSpans:      make(map[string]SpanSet),
+
+		updatedSpans: NewSpanSet(),
+		seenSpans:    make(map[SpanID]struct{}),
 	}
 }
 
-func (db *DB) AllTraces() []*Trace {
-	traces := make([]*Trace, 0, len(db.Traces))
-	for _, traceData := range db.Traces {
-		traces = append(traces, traceData)
-	}
-	sort.Slice(traces, func(i, j int) bool {
-		return traces[i].Epoch.After(traces[j].Epoch)
+func (db *DB) seen(spanID SpanID) {
+	db.seenSpans[spanID] = struct{}{}
+}
+
+func (db *DB) hasSeen(spanID SpanID) bool {
+	_, seen := db.seenSpans[spanID]
+	return seen
+}
+
+func (db *DB) UpdatedSnapshots(filter map[SpanID]bool) []SpanSnapshot {
+	snapshots := snapshotSpans(db.updatedSpans.Order, func(span *Span) bool {
+		if filter == nil || filter[span.ParentID] {
+			// include subscribed (or all) spans
+			return true
+		}
+		if span.IsFailedOrCausedFailure() {
+			// include failed spans so we can summarize them without having to
+			// deep-dive.
+			return true
+		}
+		if span.Reveal || len(span.RevealedSpans.Order) > 0 {
+			// always include revealed spans and their parents
+			return true
+		}
+		if span.Passthrough {
+			// include any passthrough spans to ensure failures are collected.
+			// the POST /query span for example never fails on its own.
+			for _, child := range span.ChildSpans.Order {
+				if child.IsFailedOrCausedFailure() {
+					return true
+				}
+			}
+		}
+		return false
 	})
-	return traces
+	for spanID := range filter {
+		span := db.Spans.Map[spanID]
+		if span == nil {
+			continue
+		}
+		if !db.hasSeen(spanID) {
+			snapshots = append(snapshots, span.Snapshot())
+		}
+		for p := range span.Parents {
+			if !db.hasSeen(p.ID) {
+				snapshots = append(snapshots, p.Snapshot())
+			}
+		}
+	}
+	for _, snapshot := range snapshots {
+		db.seen(snapshot.ID)
+	}
+	db.updatedSpans = NewSpanSet()
+	return snapshots
+}
+
+func (db *DB) ImportSnapshots(snapshots []SpanSnapshot) {
+	for _, snapshot := range snapshots {
+		span := db.findOrAllocSpan(snapshot.ID)
+		span.Received = true
+		snapshot.Version += span.Version // don't reset the version
+		span.SpanSnapshot = snapshot
+		db.integrateSpan(span)
+	}
+}
+
+func (db *DB) update(span *Span) {
+	if span.Final {
+		// don't bump versions for final spans; leave the remote as the
+		// source of truth, lest we stray forward and miss an actual version bump
+		return
+	}
+	span.Version++
+	db.updatedSpans.Add(span)
+}
+
+// Matches returns true if the span matches the filter, looking through
+// Passthrough span parents until a match is found or a non-Passthrough span
+// is reached.
+func (span *Span) Matches(match func(*Span) bool) bool {
+	if match(span) {
+		return true
+	}
+	if span.ParentSpan != nil && span.ParentSpan.Passthrough {
+		return span.ParentSpan.Matches(match)
+	}
+	return false
+}
+
+func snapshotSpans(spans []*Span, filter func(*Span) bool) []SpanSnapshot {
+	var filtered []SpanSnapshot
+	for _, span := range spans {
+		if span.Matches(filter) {
+			filtered = append(filtered, span.Snapshot())
+		}
+	}
+	return filtered
+}
+
+func (db *DB) SpanSnapshots(id SpanID) []SpanSnapshot {
+	snaps := snapshotSpans(db.Spans.Order, func(span *Span) bool {
+		return span.ParentID == id || span.ID == id
+	})
+	if span := db.Spans.Map[id]; span != nil {
+		for p := range span.Parents {
+			if !db.hasSeen(p.ID) {
+				snaps = append(snaps, p.Snapshot())
+			}
+		}
+	}
+	for _, snapshot := range snaps {
+		db.seen(snapshot.ID)
+	}
+	return snaps
+}
+
+func (db *DB) RemainingSnapshots() []SpanSnapshot {
+	return snapshotSpans(db.Spans.Order, func(span *Span) bool {
+		return !db.hasSeen(span.ID)
+	})
 }
 
 var _ sdktrace.SpanExporter = (*DB)(nil)
 
 func (db *DB) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
 	for _, span := range spans {
-		traceID := span.SpanContext().TraceID()
-
-		traceData, found := db.Traces[traceID]
-		if !found {
-			traceData = &Trace{
-				ID:    traceID,
-				Epoch: span.StartTime(),
-				End:   span.EndTime(),
-				db:    db,
-			}
-			db.Traces[traceID] = traceData
-		}
-
-		if span.StartTime().Before(traceData.Epoch) {
-			slog.Debug("new epoch", "old", traceData.Epoch, "new", span.StartTime())
-			traceData.Epoch = span.StartTime()
-		}
-
-		if span.EndTime().Before(span.StartTime()) {
-			traceData.IsRunning = true
-		}
-
-		if span.EndTime().After(traceData.End) {
-			slog.Debug("new end", "old", traceData.End, "new", span.EndTime())
-			traceData.End = span.EndTime()
-		}
-
-		db.maybeRecordSpan(traceData, span)
+		db.recordOTelSpan(span)
 	}
 	return nil
 }
@@ -117,9 +228,10 @@ func (db DBLogExporter) Export(ctx context.Context, logs []sdklog.Record) error 
 			// eof; ignore
 			continue
 		}
-		if log.SpanID() == db.PrimarySpan {
+		spanID := SpanID{log.SpanID()}
+		if spanID == db.PrimarySpan {
 			// buffer raw logs so we can replay them later
-			db.PrimaryLogs[log.SpanID()] = append(db.PrimaryLogs[log.SpanID()], log)
+			db.PrimaryLogs[spanID] = append(db.PrimaryLogs[spanID], log)
 		}
 	}
 	return nil
@@ -158,23 +270,20 @@ func (db DBMetricExporter) Export(ctx context.Context, resourceMetrics *metricda
 			}
 
 			for _, point := range metricData.DataPoints {
-				spanIDStr, ok := point.Attributes.Value(telemetry.MetricsSpanIDAttr)
-				if !ok {
-					continue
-				}
-				spanID, err := trace.SpanIDFromHex(spanIDStr.AsString())
-				if err != nil {
-					continue
-				}
-				span, ok := db.Spans[spanID]
+				callDigest, ok := point.Attributes.Value(telemetry.DagDigestAttr)
 				if !ok {
 					continue
 				}
 
-				if span.MetricsByName == nil {
-					span.MetricsByName = make(map[string][]metricdata.DataPoint[int64])
+				if db.MetricsByCall == nil {
+					db.MetricsByCall = make(map[string]map[string][]metricdata.DataPoint[int64])
 				}
-				span.MetricsByName[metric.Name] = append(span.MetricsByName[metric.Name], point)
+				metricsByName, ok := db.MetricsByCall[callDigest.AsString()]
+				if !ok {
+					metricsByName = make(map[string][]metricdata.DataPoint[int64])
+					db.MetricsByCall[callDigest.AsString()] = metricsByName
+				}
+				metricsByName[metric.Name] = append(metricsByName[metric.Name], point)
 			}
 		}
 	}
@@ -186,197 +295,392 @@ func (db DBMetricExporter) Export(ctx context.Context, resourceMetrics *metricda
 // span. normally we assume the root span is the primary span, but in a nested
 // scenario we never actually see the root span, so the CLI explicitly sets it
 // to the span it created.
-func (db *DB) SetPrimarySpan(span trace.SpanID) {
+func (db *DB) SetPrimarySpan(span SpanID) {
 	db.PrimarySpan = span
 }
 
-func (db *DB) maybeRecordSpan(traceData *Trace, span sdktrace.ReadOnlySpan) { //nolint: gocyclo
-	spanID := span.SpanContext().SpanID()
-
-	spanData, found := db.Spans[spanID]
+func (db *DB) initSpan(spanID SpanID) *Span {
+	spanData, found := db.Spans.Map[spanID]
 	if !found {
-		if !span.Parent().IsValid() && !db.PrimarySpan.IsValid() {
-			// Default the 'primary' span to the root span.
-			db.PrimarySpan = spanID
-		}
+		spanData = db.newSpan(spanID)
+		db.Spans.Add(spanData)
+	}
+	return spanData
+}
 
-		spanData = &Span{
+func (db *DB) findOrAllocSpan(spanID SpanID) *Span {
+	spanData, found := db.Spans.Map[spanID]
+	if found {
+		return spanData
+	}
+	return db.newSpan(spanID)
+}
+
+func (db *DB) newSpan(spanID SpanID) *Span {
+	// TODO: this fools things into thinking they're a root span...?
+	return &Span{
+		SpanSnapshot: SpanSnapshot{
 			ID: spanID,
+		},
+		ChildSpans:      NewSpanSet(),
+		RunningSpans:    NewSpanSet(),
+		RevealedSpans:   NewSpanSet(),
+		FailedLinks:     NewSpanSet(),
+		causesViaLinks:  NewSpanSet(),
+		effectsViaLinks: NewSpanSet(),
+		db:              db,
+	}
+}
 
-			FailedEffects:  map[string]*Span{},
-			RunningEffects: map[string]*Span{},
+func (db *DB) recordOTelSpan(span sdktrace.ReadOnlySpan) {
+	spanID := SpanID{span.SpanContext().SpanID()}
 
-			db:    db,
-			trace: traceData,
-		}
+	// mark the span as updated so we sync it to the frontend,
+	// if this database is running on a backend
+	//
+	// NOTE: any updates to *other* spans should also be marked! for example, if
+	// we update the status or active time of any linked/parent spans, those
+	// should go in here too.
 
-		db.Spans[spanID] = spanData
-		db.SpanOrder = append(db.SpanOrder, spanData)
-
-		// collect any children that were received before the parent
-		for _, childID := range db.ChildrenOrder[spanID] {
-			child := db.Spans[childID]
-			if child == nil {
-				// defensive
-				slog.Warn("child span not found", "child", childID)
-				continue
-			}
-			spanData.ChildSpans = append(spanData.ChildSpans, child)
-			child.ParentSpan = spanData
+	// create or update the span itself
+	spanData := db.findOrAllocSpan(spanID)
+	spanData.Received = true
+	spanData.ParentID.SpanID = span.Parent().SpanID()
+	spanData.Name = span.Name()
+	spanData.StartTime = span.StartTime()
+	spanData.EndTime = span.EndTime()
+	spanData.Status = span.Status()
+	spanData.Links = make([]SpanContext, len(span.Links()))
+	for i, link := range span.Links() {
+		spanData.Links[i] = SpanContext{
+			TraceID: TraceID{link.SpanContext.TraceID()},
+			SpanID:  SpanID{link.SpanContext.SpanID()},
 		}
 	}
 
-	spanData.ReadOnlySpan = span
-	spanData.IsSelfRunning = span.EndTime().Before(span.StartTime())
-
-	slog.Debug("recording span", "span", span.Name(), "id", spanID)
-
-	// track parent/child relationships
-	if parent := span.Parent(); parent.IsValid() {
-		if db.Children[parent.SpanID()] == nil {
-			db.Children[parent.SpanID()] = make(map[trace.SpanID]struct{})
-		}
-		slog.Debug("recording span child", "span", span.Name(), "parent", parent.SpanID(), "child", spanID)
-		if _, found := db.Children[parent.SpanID()][spanID]; !found {
-			db.Children[parent.SpanID()][spanID] = struct{}{}
-			db.ChildrenOrder[parent.SpanID()] = append(db.ChildrenOrder[parent.SpanID()], spanID)
-			if parent, exists := db.Spans[span.Parent().SpanID()]; exists {
-				spanData.ParentSpan = parent
-				parent.ChildSpans = append(parent.ChildSpans, spanData)
-			}
-		}
-	} else if !db.PrimarySpan.IsValid() {
-		// default primary to "root" span, but we might never see it in a nested
-		// scenario.
-		db.PrimarySpan = spanID
+	if resource := span.Resource(); resource != nil {
+		db.Resources[resource.Equivalent()] = resource
 	}
 
-	attrs := span.Attributes()
-
-	var digest string
-	if digestAttr, ok := getAttr(attrs, telemetry.DagDigestAttr); ok {
-		digest = digestAttr.AsString()
-		spanData.Digest = digest
-
-		// keep track of intervals seen for a digest
-		if db.Intervals[digest] == nil {
-			db.Intervals[digest] = make(map[time.Time]*Span)
-		}
-
-		db.Intervals[digest][span.StartTime()] = spanData
+	// populate snapshot from otel attributes
+	for _, attr := range span.Attributes() {
+		spanData.ProcessAttribute(
+			string(attr.Key),
+			attr.Value.AsInterface(),
+		)
 	}
 
-	for _, attr := range attrs {
-		switch attr.Key {
-		case telemetry.DagCallAttr:
-			var call callpbv1.Call
-			if err := call.Decode(attr.Value.AsString()); err != nil {
-				slog.Warn("failed to decode id", "err", err)
-				continue
+	// integrate the span's data into the DB's live objects
+	db.integrateSpan(spanData)
+}
+
+type Activity struct {
+	CompletedIntervals []Interval
+	EarliestRunning    time.Time
+
+	// Keep track of the full set of running spans so we can update
+	// EarliestRunning as they complete.
+	//
+	// This needs to be synced to the frontend so it doesn't lose track of the
+	// running status in updateEarliest. We exclude from JSON marshalling since
+	// the map key is incompatible. Syncing to the frontend uses encoding/gob,
+	// which accepts the map key type.
+	AllRunning map[SpanID]time.Time `json:"-"`
+}
+
+func (activity *Activity) Intervals(now time.Time) iter.Seq[Interval] {
+	return func(yield func(Interval) bool) {
+		var lastIval *Interval
+		for _, ival := range activity.CompletedIntervals {
+			ival := ival
+			lastIval = &ival
+			if !activity.EarliestRunning.IsZero() &&
+				activity.EarliestRunning.Before(ival.Start) {
+				yield(Interval{Start: activity.EarliestRunning, End: now})
+				break
 			}
-
-			spanData.Call = &call
-
-			// Seeing loadFooFromID is only really interesting if it actually
-			// resulted in evaluating the ID, so we set Passthrough, which will only
-			// show its children.
-			if call.Field == fmt.Sprintf("load%sFromID", call.Type.ToAST().Name()) {
-				spanData.Passthrough = true
+			if !yield(ival) {
+				return
 			}
+		}
+		if !activity.EarliestRunning.IsZero() &&
+			(lastIval == nil || activity.EarliestRunning.After(lastIval.End)) {
+			yield(Interval{Start: activity.EarliestRunning, End: now})
+		}
+	}
+}
 
-			// We also don't care about seeing the id field selection itself, since
-			// it's more noisy and confusing than helpful. We'll still show all the
-			// spans leadning up to it, just not the ID selection.
-			if call.Field == "id" {
-				spanData.Ignore = true
-			}
+func (activity *Activity) Duration(now time.Time) time.Duration {
+	var dur time.Duration
+	for ival := range activity.Intervals(now) {
+		dur += ival.End.Sub(ival.Start)
+	}
+	return dur
+}
 
-			if digest != "" {
-				db.Calls[digest] = &call
-			}
+type Interval struct {
+	Start time.Time
+	End   time.Time
+}
 
-		case telemetry.LLBOpAttr:
-			// TODO
+func (activity *Activity) Add(span *Span) bool {
+	var changed bool
 
-		case telemetry.CachedAttr:
-			spanData.Cached = attr.Value.AsBool()
+	if span.IsRunning() {
+		if activity.AllRunning == nil {
+			activity.AllRunning = map[SpanID]time.Time{}
+		}
+		if _, found := activity.AllRunning[span.ID]; !found {
+			activity.AllRunning[span.ID] = span.StartTime
+			changed = true
+		}
+		if activity.updateEarliest() {
+			changed = true
+		}
+		return changed
+	}
 
-		case telemetry.CanceledAttr:
-			spanData.Canceled = attr.Value.AsBool()
+	delete(activity.AllRunning, span.ID)
+	if activity.updateEarliest() {
+		changed = true
+	}
 
-		case telemetry.UIEncapsulateAttr:
-			spanData.Encapsulate = attr.Value.AsBool()
+	ival := Interval{
+		Start: span.StartTime,
+		End:   span.EndTime,
+	}
 
-		case telemetry.UIEncapsulatedAttr:
-			spanData.Encapsulated = attr.Value.AsBool()
+	if len(activity.CompletedIntervals) == 0 {
+		activity.CompletedIntervals = append(activity.CompletedIntervals, ival)
+		changed = true
+		return changed
+	}
 
-		case telemetry.UIInternalAttr:
-			spanData.Internal = attr.Value.AsBool()
+	idx, _ := slices.BinarySearchFunc(activity.CompletedIntervals, ival, func(a, b Interval) int {
+		if a.Start.Before(b.Start) {
+			return -1
+		} else if a.Start.After(b.Start) {
+			return 1
+		} else {
+			return 0
+		}
+	})
 
-		case telemetry.UIPassthroughAttr:
-			spanData.Passthrough = attr.Value.AsBool()
-
-		case telemetry.DagInputsAttr:
-			spanData.Inputs = attr.Value.AsStringSlice()
-
-		case telemetry.EffectIDsAttr:
-			spanData.Effects = attr.Value.AsStringSlice()
-			for _, digest := range spanData.Effects {
-				if db.EffectSite[digest] == nil {
-					db.EffectSite[digest] = spanData
-				}
-			}
-
-		case telemetry.DagOutputAttr:
-			output := attr.Value.AsString()
-			if digest == "" {
-				slog.Warn("output attribute is set, but a digest is not?")
-			} else {
-				slog.Debug("recording output", "digest", digest, "output", output)
-
-				// parent -> child
-				if db.Outputs[digest] == nil {
-					db.Outputs[digest] = make(map[string]struct{})
-				}
-				db.Outputs[digest][output] = struct{}{}
-
-				// child -> parent
-				if db.OutputOf[output] == nil {
-					db.OutputOf[output] = make(map[string]struct{})
-				}
-				db.OutputOf[output][digest] = struct{}{}
-			}
-
-		case telemetry.EffectIDAttr:
-			spanData.EffectID = attr.Value.AsString()
-			db.Effects[spanData.EffectID] = spanData
-			if dependentSpan := db.EffectSite[spanData.EffectID]; dependentSpan != nil {
-				if spanData.IsRunning() {
-					dependentSpan.RunningEffects[spanData.EffectID] = spanData
-				} else {
-					delete(dependentSpan.RunningEffects, spanData.EffectID)
-				}
-				if spanData.Failed() {
-					dependentSpan.FailedEffects[spanData.EffectID] = spanData
-				}
-			}
-
-		case "rpc.service":
-			// TODO: rather than special-casing this, we should just switch
-			// the telemetry pipeline over to HTTP.
-			// I tried adding attributes like 'internal' to the spans we care about
-			// but the OTel API is broken and stuck in bikeshedding:
-			// https://github.com/open-telemetry/opentelemetry-go-contrib/pull/5431#pullrequestreview-2024891968
-			spanData.Passthrough = true
+	// optimization: if the new interval is wholly subsumed by an existing
+	// interval we can skip adding it. this is also handled by mergeIntervals,
+	// but it's harder to return false after the fact.
+	for _, existing := range activity.CompletedIntervals {
+		if ival.Start.After(existing.Start) && ival.End.Before(existing.End) {
+			return changed
 		}
 	}
 
-	if spanData.Call != nil && spanData.Call.ReceiverDigest != "" {
-		parentCall, ok := db.Calls[spanData.Call.ReceiverDigest]
-		if ok {
-			spanData.Base = db.Simplify(parentCall, spanData.Internal)
+	activity.CompletedIntervals = slices.Insert(activity.CompletedIntervals, idx, ival)
+	activity.mergeIntervals()
+	changed = true
+	return changed
+}
+
+func (activity *Activity) IsRunning() bool {
+	return !activity.EarliestRunning.IsZero()
+}
+
+func (activity *Activity) EndTimeOrFallback(now time.Time) time.Time {
+	if !activity.EarliestRunning.IsZero() {
+		return now
+	}
+	if len(activity.CompletedIntervals) == 0 {
+		return time.Time{}
+	}
+	return activity.CompletedIntervals[len(activity.CompletedIntervals)-1].End
+}
+
+func (activity *Activity) updateEarliest() (changed bool) {
+	if len(activity.AllRunning) > 0 {
+		for _, t := range activity.AllRunning {
+			if activity.EarliestRunning.IsZero() || t.Before(activity.EarliestRunning) {
+				activity.EarliestRunning = t
+				changed = true
+			}
+		}
+	} else if !activity.EarliestRunning.IsZero() {
+		activity.EarliestRunning = time.Time{}
+		changed = true
+	}
+	return
+}
+
+// mergeIntervals merges overlapping intervals in the activity.
+func (activity *Activity) mergeIntervals() {
+	// If there are no intervals, there's nothing to merge.
+	if len(activity.CompletedIntervals) == 0 {
+		return
+	}
+
+	// Keep track of the index of the last merged interval.
+	lastIndex := 0
+	for i := 1; i < len(activity.CompletedIntervals); i++ {
+		ival := activity.CompletedIntervals[i]
+		// If the current interval overlaps with the last one, merge them.
+		if ival.Start.Before(activity.CompletedIntervals[lastIndex].End) {
+			if ival.End.After(activity.CompletedIntervals[lastIndex].End) {
+				// Extend the last interval.
+				activity.CompletedIntervals[lastIndex].End = ival.End
+			}
+			// If ival is wholly subsumed, do nothing (continue).
+		} else {
+			// No overlap, move the lastIndex forward.
+			lastIndex++
+			activity.CompletedIntervals[lastIndex] = ival
 		}
 	}
+
+	// Resize the slice to only include the merged intervals.
+	activity.CompletedIntervals = activity.CompletedIntervals[:lastIndex+1]
+}
+
+// integrateSpan takes a possibly newly created span and updates
+// database relationships and state
+func (db *DB) integrateSpan(span *Span) { //nolint: gocyclo
+	// track the span's own interval
+	span.Activity.Add(span)
+	db.update(span)
+
+	// keep track of the time boundary
+	if db.Epoch.IsZero() ||
+		(!span.StartTime.IsZero() &&
+			span.StartTime.Before(db.Epoch)) {
+		db.Epoch = span.StartTime
+	}
+	if span.EndTime.After(db.End) {
+		db.End = span.EndTime
+	}
+
+	// associate the span to its parents and links
+	if span.ParentID.IsValid() &&
+		// If a span has links, don't bother associating it to its
+		// parent. We might want to use that info someday (the
+		// "unlazying" point), but no use case right now.
+		len(span.Links) == 0 {
+		span.ParentSpan = db.initSpan(span.ParentID)
+		if span.ParentSpan.ChildSpans.Add(span) {
+			// if we're a new child, take a new snapshot for ChildCount
+			db.update(span.ParentSpan)
+		}
+	}
+	for _, linkedCtx := range span.Links {
+		linked := db.initSpan(linkedCtx.SpanID)
+		linked.ChildSpans.Add(span)
+		linked.effectsViaLinks.Add(span)
+		span.causesViaLinks.Add(linked)
+	}
+
+	// keep track of intervals seen for a digest
+	if span.CallDigest != "" {
+		if db.Intervals[span.CallDigest] == nil {
+			db.Intervals[span.CallDigest] = make(map[time.Time]*Span)
+		}
+		db.Intervals[span.CallDigest][span.StartTime] = span
+	}
+
+	if span.CallDigest != "" && span.CallPayload != "" {
+		db.CallPayloads[span.CallDigest] = span.CallPayload
+	}
+
+	if !span.ParentID.IsValid() {
+		// TODO: when we initialize new spans we haven't seen before, they
+		// end up with a zero parent ID, so just do a nil check as a
+		// workaround, as we'll always see the true root first.
+		if db.RootSpan == nil {
+			// keep track of the trace's root span
+			db.RootSpan = span
+		}
+
+		if !db.PrimarySpan.IsValid() {
+			// default primary to root span, though we might never see a "root
+			// span" in a nested scenario.
+			db.PrimarySpan = span.ID
+		}
+
+		if !span.IsRunning() {
+			for _, span := range db.Spans.Order {
+				if span.IsRunning() {
+					span.Canceled = true
+					span.EndTime = db.RootSpan.EndTime
+					db.update(span)
+				}
+			}
+		}
+	} else if db.RootSpan != nil && !db.RootSpan.IsRunning() && span.IsRunning() {
+		span.Canceled = true
+		span.EndTime = db.RootSpan.EndTime
+	}
+
+	if span.EffectID != "" {
+		if db.EffectSpans[span.EffectID] == nil {
+			db.EffectSpans[span.EffectID] = NewSpanSet()
+		}
+		db.EffectSpans[span.EffectID].Add(span)
+		if span.IsFailed() {
+			db.FailedEffects[span.EffectID] = true
+		}
+		causes := db.CauseSpans[span.EffectID]
+		if causes == nil {
+			causes = NewSpanSet()
+			db.CauseSpans[span.EffectID] = causes
+		}
+		span.causesViaAttrs = causes
+	}
+
+	for _, id := range span.EffectIDs {
+		effects := db.EffectSpans[id]
+		if effects == nil {
+			effects = NewSpanSet()
+			db.EffectSpans[id] = effects
+		}
+		if span.effectsViaAttrs == nil {
+			span.effectsViaAttrs = make(map[string]SpanSet)
+		}
+		span.effectsViaAttrs[id] = effects
+	}
+
+	for _, dig := range span.EffectsCompleted {
+		db.CompletedEffects[dig] = true
+	}
+
+	if span.CallDigest != "" {
+		// parent -> child
+		if db.Outputs[span.CallDigest] == nil {
+			db.Outputs[span.CallDigest] = make(map[string]struct{})
+		}
+		db.Outputs[span.CallDigest][span.Output] = struct{}{}
+
+		// child -> parent
+		if db.OutputOf[span.Output] == nil {
+			db.OutputOf[span.Output] = make(map[string]struct{})
+		}
+		db.OutputOf[span.Output][span.CallDigest] = struct{}{}
+	}
+
+	for _, id := range span.EffectIDs {
+		if db.CauseSpans[id] == nil {
+			db.CauseSpans[id] = NewSpanSet()
+		}
+		db.CauseSpans[id].Add(span)
+	}
+
+	// update span states, propagating them up through parents, too
+	span.PropagateStatusToParentsAndLinks()
+
+	// finally, install the span if we don't already have it
+	//
+	// this dance is a little clumsy because we want to make sure parent spans
+	// are inserted before their child spans, so we find-or-allocate the span but
+	// aggressively initialize its parent span
+	//
+	// FIXME: refactor? can we keep some sort of flat map of spans an append
+	// children to them instead of having the single big ordered list?
+	db.Spans.Add(span)
 }
 
 func (db *DB) HighLevelSpan(call *callpbv1.Call) *Span {
@@ -386,17 +690,17 @@ func (db *DB) HighLevelSpan(call *callpbv1.Call) *Span {
 func (db *DB) MostInterestingSpan(dig string) *Span {
 	var earliest *Span
 	var earliestCached bool
-	vs := make([]sdktrace.ReadOnlySpan, 0, len(db.Intervals[dig]))
+	vs := make([]*Span, 0, len(db.Intervals[dig]))
 	for _, span := range db.Intervals[dig] {
 		vs = append(vs, span)
 	}
 	sort.Slice(vs, func(i, j int) bool {
-		return vs[i].StartTime().Before(vs[j].StartTime())
+		return vs[i].StartTime.Before(vs[j].StartTime)
 	})
 	for _, span := range db.Intervals[dig] {
 		// a running vertex is always most interesting, and these are already in
 		// order
-		if span.IsRunning() {
+		if span.IsRunningOrEffectsRunning() {
 			return span
 		}
 		switch {
@@ -410,7 +714,7 @@ func (db *DB) MostInterestingSpan(dig string) *Span {
 			// unclear how this would happen, but non-cached versions are always more
 			// interesting
 			earliest = span
-		case span.StartTime().Before(earliest.StartTime()):
+		case span.StartTime.Before(earliest.StartTime):
 			// prefer the earliest active interval
 			earliest = span
 		}
@@ -438,18 +742,42 @@ func (*DB) Close() error {
 	return nil
 }
 
-func (db *DB) MustCall(dig string) *callpbv1.Call {
-	call, ok := db.Calls[dig]
+func (db *DB) Call(dig string) *callpbv1.Call {
+	cached, ok := db.Calls[dig]
+	if ok {
+		return cached
+	}
+	callPayload, ok := db.CallPayloads[dig]
 	if !ok {
-		// Sometimes may see a call's digest before the call itself.
-		//
-		// The loadFooFromID APIs for example will emit their call via their span
-		// before loading the ID, and its ID argument will just be a digest like
-		// anything else.
-		return &callpbv1.Call{
-			Field: "unknown",
+		return nil
+	}
+	var call callpbv1.Call
+	if err := call.Decode(callPayload); err != nil {
+		slog.Warn("failed to decode call", "err", err)
+	} else {
+		db.Calls[dig] = &call
+	}
+	return &call
+}
+
+func (db *DB) MustCall(dig string) *callpbv1.Call {
+	call := db.Call(dig)
+	if call == nil {
+		// Rather than blowing up, fill in an "easter egg."
+		call = &callpbv1.Call{
+			Field: "no",
 			Type: &callpbv1.Type{
-				NamedType: "Void",
+				NamedType: "Missing",
+			},
+			Args: []*callpbv1.Argument{
+				{
+					Name: "digest",
+					Value: &callpbv1.Literal{
+						Value: &callpbv1.Literal_String_{
+							String_: dig,
+						},
+					},
+				},
 			},
 			Digest: dig,
 		}
@@ -479,11 +807,14 @@ func (db *DB) litSize(lit *callpbv1.Literal) int {
 
 func (db *DB) idSize(id *callpbv1.Call) int {
 	size := 0
-	for id := id; id != nil; id = db.Calls[id.ReceiverDigest] {
+	for id := id; id != nil; id = db.MustCall(id.ReceiverDigest) {
 		size++
 		size += len(id.Args)
 		for _, arg := range id.Args {
 			size += db.litSize(arg.GetValue())
+		}
+		if id.ReceiverDigest == "" {
+			break
 		}
 	}
 	return size
@@ -508,23 +839,25 @@ loop:
 			// can't be simplified to itself
 			continue
 		}
-		creator, ok := db.Calls[creatorDig]
-		if ok {
-			for _, creatorArg := range creator.Args {
-				if creatorArg, ok := creatorArg.Value.Value.(*callpbv1.Literal_CallDigest); ok {
-					if creatorArg.CallDigest == call.Digest {
-						// can't be simplified to a call that references itself
-						// in it's argument - which would loop endlessly
-						continue loop
-					}
+		creator := db.Call(creatorDig)
+		if creator == nil {
+			// creator not found? skip
+			continue
+		}
+		for _, creatorArg := range creator.Args {
+			if creatorArg, ok := creatorArg.Value.Value.(*callpbv1.Literal_CallDigest); ok {
+				if creatorArg.CallDigest == call.Digest {
+					// can't be simplified to a call that references itself
+					// in it's argument - which would loop endlessly
+					continue loop
 				}
 			}
+		}
 
-			if size := db.idSize(creator); smallestSize == -1 || size < smallestSize {
-				smallest = creator
-				smallestSize = size
-				simplified = true
-			}
+		if size := db.idSize(creator); smallestSize == -1 || size < smallestSize {
+			smallest = creator
+			smallestSize = size
+			simplified = true
 		}
 	}
 	if simplified {
@@ -533,11 +866,99 @@ loop:
 	return smallest
 }
 
-func getAttr(attrs []attribute.KeyValue, key attribute.Key) (attribute.Value, bool) {
-	for _, attr := range attrs {
-		if attr.Key == key {
-			return attr.Value, true
+// Function to check if a row is or contains a target row
+func isOrContains(row, target *TraceTree) bool {
+	if row == target {
+		return true
+	}
+	for _, child := range row.Children {
+		if isOrContains(child, target) {
+			return true
 		}
 	}
-	return attribute.Value{}, false
+	return false
+}
+
+type WalkDecision int
+
+const (
+	WalkContinue WalkDecision = iota
+	WalkSkip
+	WalkPassthrough
+	WalkStop
+)
+
+func WalkTree(tree []*TraceTree, f func(*TraceTree, int) WalkDecision) {
+	var walk func([]*TraceTree, int)
+	walk = func(rows []*TraceTree, depth int) {
+		for _, row := range rows {
+			switch f(row, depth) {
+			case WalkContinue:
+				walk(row.Children, depth+1)
+			case WalkPassthrough:
+				walk(row.Children, depth)
+			case WalkSkip:
+				continue
+			case WalkStop:
+				return
+			}
+		}
+	}
+	walk(tree, 0)
+}
+
+func (db *DB) CollectErrors(rows *RowsView) []*TraceTree {
+	reveal := make(map[*TraceTree]struct{})
+
+	var collect func(row *TraceTree)
+	collect = func(tree *TraceTree) {
+		failed := tree.Span.IsFailedOrCausedFailure()
+		if failed {
+			reveal[tree] = struct{}{}
+		}
+		if failed || tree.Span.IsUnset() {
+			for _, child := range tree.Children {
+				collect(child)
+			}
+		}
+	}
+
+	for _, row := range rows.Body {
+		collect(row)
+	}
+
+	return collectParents(rows.Body, reveal)
+}
+
+func (db *DB) FindResource(filter attribute.KeyValue) *resource.Resource {
+	for _, res := range db.Resources {
+		for _, kv := range res.Attributes() {
+			if kv.Key == filter.Key && kv.Value == filter.Value {
+				return res
+			}
+		}
+	}
+	return nil
+}
+
+func collectParents(rows []*TraceTree, targets map[*TraceTree]struct{}) []*TraceTree {
+	var result []*TraceTree
+
+	for _, row := range rows {
+		contains := false
+		for target := range targets {
+			if isOrContains(row, target) {
+				contains = true
+				break
+			}
+		}
+		if !contains {
+			continue
+		}
+		rowCopy := *row
+		rowCopy.Children = collectParents(row.Children, targets)
+		result = append(result, &rowCopy)
+	}
+
+	return result
 }

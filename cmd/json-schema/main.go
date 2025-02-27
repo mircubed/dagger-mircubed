@@ -5,11 +5,14 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"regexp"
 	"slices"
 
-	"github.com/dagger/dagger/core/modules"
 	"github.com/invopop/jsonschema"
 	"github.com/spf13/cobra"
+
+	"github.com/dagger/dagger/core/modules"
+	"github.com/dagger/dagger/engine/config"
 )
 
 var rootCmd = &cobra.Command{
@@ -25,8 +28,14 @@ func generateSchema(cmd *cobra.Command, args []string) error {
 		}
 
 		r := new(jsonschema.Reflector)
-		if err := r.AddGoComments("github.com/dagger/dagger", target.path); err != nil {
+		err := r.AddGoComments("github.com/dagger/dagger", target.path)
+		if err != nil {
 			return err
+		}
+		for k, v := range r.CommentMap {
+			// remove all standalone newlines
+			re := regexp.MustCompile(`([^\n])\n([^\n])`)
+			r.CommentMap[k] = re.ReplaceAllString(v, `$1 $2`)
 		}
 
 		s := r.Reflect(target.value)
@@ -44,7 +53,12 @@ var targets = []target{
 	{
 		id:    "dagger.json",
 		path:  "./core/modules",
-		value: &modules.ModuleConfig{},
+		value: &modules.ModuleConfigWithUserFields{},
+	},
+	{
+		id:    "engine.json",
+		path:  "./engine/config",
+		value: &config.Config{},
 	},
 }
 

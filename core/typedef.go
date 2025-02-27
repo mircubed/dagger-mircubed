@@ -77,15 +77,6 @@ func (fn *Function) FieldSpec() (dagql.FieldSpec, error) {
 		Name:        fn.Name,
 		Description: formatGqlDescription(fn.Description),
 		Type:        fn.ReturnType.ToTyped(),
-
-		// NB: functions actually _are_ cached per-session, which matches the
-		// lifetime of the server, so we might as well consider them pure. That way
-		// there will be locking around concurrent calls, so the user won't see
-		// multiple in parallel.
-		//
-		// However, we can't *quite* mark them as pure, since Call has special
-		// logic for transferring secrets between cached calls.
-		ImpurityReason: "secrets still need transferring on cached calls",
 	}
 	for _, arg := range fn.Args {
 		input := arg.TypeDef.ToInput()
@@ -259,9 +250,6 @@ func (d DynamicID) TypeName() string {
 var _ dagql.InputDecoder = DynamicID{}
 
 func (d DynamicID) DecodeInput(val any) (dagql.Input, error) {
-	if val == nil {
-		val = ""
-	}
 	switch x := val.(type) {
 	case string:
 		var idp call.ID
@@ -357,6 +345,8 @@ func (typeDef *TypeDef) ToTyped() dagql.Typed {
 		typed = dagql.String("")
 	case TypeDefKindInteger:
 		typed = dagql.Int(0)
+	case TypeDefKindFloat:
+		typed = dagql.Float(0)
 	case TypeDefKindBoolean:
 		typed = dagql.Boolean(false)
 	case TypeDefKindScalar:
@@ -389,6 +379,8 @@ func (typeDef *TypeDef) ToInput() dagql.Input {
 		typed = dagql.String("")
 	case TypeDefKindInteger:
 		typed = dagql.Int(0)
+	case TypeDefKindFloat:
+		typed = dagql.Float(0)
 	case TypeDefKindBoolean:
 		typed = dagql.Boolean(false)
 	case TypeDefKindScalar:
@@ -556,7 +548,7 @@ func (typeDef *TypeDef) IsSubtypeOf(otherDef *TypeDef) bool {
 	}
 
 	switch typeDef.Kind {
-	case TypeDefKindString, TypeDefKindInteger, TypeDefKindBoolean, TypeDefKindVoid:
+	case TypeDefKindString, TypeDefKindInteger, TypeDefKindFloat, TypeDefKindBoolean, TypeDefKindVoid:
 		return typeDef.Kind == otherDef.Kind
 	case TypeDefKindScalar:
 		return typeDef.AsScalar.Value.Name == otherDef.AsScalar.Value.Name
@@ -1049,6 +1041,10 @@ var TypeDefKinds = dagql.NewEnum[TypeDefKind]()
 var (
 	TypeDefKindString = TypeDefKinds.Register("STRING_KIND",
 		"A string value.")
+
+	TypeDefKindFloat = TypeDefKinds.Register("FLOAT_KIND",
+		"A float value.")
+
 	TypeDefKindInteger = TypeDefKinds.Register("INTEGER_KIND",
 		"An integer value.")
 	TypeDefKindBoolean = TypeDefKinds.Register("BOOLEAN_KIND",
@@ -1132,6 +1128,27 @@ func (fnCall *FunctionCall) ReturnValue(ctx context.Context, val JSON) error {
 		ctx,
 		bytes.NewReader(val),
 		filepath.Join(modMetaDirPath, modMetaOutputPath),
+		0o600,
+	)
+}
+
+func (fnCall *FunctionCall) ReturnError(ctx context.Context, errID dagql.ID[*Error]) error {
+	// The return is implemented by exporting the result back to the caller's
+	// filesystem. This ensures that the result is cached as part of the module
+	// function's Exec while also keeping SDKs as agnostic as possible to the
+	// format + location of that result.
+	bk, err := fnCall.Query.Buildkit(ctx)
+	if err != nil {
+		return fmt.Errorf("get buildkit client: %w", err)
+	}
+	enc, err := errID.Encode()
+	if err != nil {
+		return fmt.Errorf("encode error ID: %w", err)
+	}
+	return bk.IOReaderExport(
+		ctx,
+		strings.NewReader(enc),
+		filepath.Join(modMetaDirPath, modMetaErrorPath),
 		0o600,
 	)
 }

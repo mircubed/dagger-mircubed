@@ -13,102 +13,15 @@ import (
 
 	"github.com/containerd/continuity/fs"
 	bkclient "github.com/moby/buildkit/client"
-	"github.com/moby/buildkit/client/llb"
 	bkgw "github.com/moby/buildkit/frontend/gateway/client"
-	"github.com/moby/buildkit/identity"
 	"github.com/moby/buildkit/session/filesync"
 	"github.com/moby/buildkit/snapshot"
 	bksolverpb "github.com/moby/buildkit/solver/pb"
 	"github.com/moby/buildkit/util/bklog"
-	"github.com/moby/buildkit/util/compression"
-	specs "github.com/opencontainers/image-spec/specs-go/v1"
 	fsutiltypes "github.com/tonistiigi/fsutil/types"
 
 	"github.com/dagger/dagger/engine"
-	"github.com/dagger/dagger/engine/slog"
 )
-
-func (c *Client) LocalImport(
-	ctx context.Context,
-	platform specs.Platform,
-	srcPath string,
-	excludePatterns []string,
-	includePatterns []string,
-) (*bksolverpb.Definition, specs.Descriptor, error) {
-	var desc specs.Descriptor
-
-	srcPath = path.Clean(srcPath)
-	if srcPath == ".." || strings.HasPrefix(srcPath, "../") {
-		return nil, desc, fmt.Errorf("path %q escapes workdir; use an absolute path instead", srcPath)
-	}
-
-	clientMetadata, err := engine.ClientMetadataFromContext(ctx)
-	if err != nil {
-		return nil, desc, err
-	}
-
-	stableID := clientMetadata.ClientStableID
-	if stableID == "" {
-		slog.WarnContext(ctx, "client stable ID not set, using random value")
-		stableID = identity.NewID()
-	}
-
-	localOpts := []llb.LocalOption{
-		llb.SessionID(clientMetadata.ClientID),
-		llb.SharedKeyHint(strings.Join([]string{stableID, srcPath}, " ")),
-	}
-
-	localName := fmt.Sprintf("upload %s from %s (client id: %s, session id: %s)", srcPath, stableID, clientMetadata.ClientID, clientMetadata.SessionID)
-	if len(includePatterns) > 0 {
-		localName += fmt.Sprintf(" (include: %s)", strings.Join(includePatterns, ", "))
-		localOpts = append(localOpts, llb.IncludePatterns(includePatterns))
-	}
-	if len(excludePatterns) > 0 {
-		localName += fmt.Sprintf(" (exclude: %s)", strings.Join(excludePatterns, ", "))
-		localOpts = append(localOpts, llb.ExcludePatterns(excludePatterns))
-	}
-	localOpts = append(localOpts, llb.WithCustomName(localName))
-	localLLB := llb.Local(srcPath, localOpts...)
-
-	// We still need to do a copy here for now because buildkit's cache calls
-	// Finalize on refs when getting their blobs which makes the cache ref for the
-	// local ref unable to be reused.
-	//
-	// TODO: we should ensure that this doesn't create a new cache entry, without
-	// this the entire local directory is uploaded to the cache. See also
-	// blobSource.CacheKey for more context
-	copyLLB := llb.Scratch().File(
-		llb.Copy(localLLB, "/", "/"),
-		llb.WithCustomNamef("%scopy %s", InternalPrefix, localName),
-	)
-
-	copyDef, err := copyLLB.Marshal(ctx, llb.Platform(platform))
-	if err != nil {
-		return nil, desc, err
-	}
-	copyPB := copyDef.ToPB()
-
-	return c.DefToBlob(ctx, copyPB, compression.Zstd)
-}
-
-// Import a directory from the engine container, as opposed to from a client
-func (c *Client) EngineContainerLocalImport(
-	ctx context.Context,
-	platform specs.Platform,
-	srcPath string,
-	excludePatterns []string,
-	includePatterns []string,
-) (*bksolverpb.Definition, specs.Descriptor, error) {
-	hostname, err := os.Hostname()
-	if err != nil {
-		return nil, specs.Descriptor{}, fmt.Errorf("failed to get hostname for engine local import: %w", err)
-	}
-	ctx = engine.ContextWithClientMetadata(ctx, &engine.ClientMetadata{
-		ClientID:       c.ID(),
-		ClientHostname: hostname,
-	})
-	return c.LocalImport(ctx, platform, srcPath, excludePatterns, includePatterns)
-}
 
 func (c *Client) diffcopy(ctx context.Context, opts engine.LocalImportOpts, msg any) error {
 	ctx, cancel, err := c.withClientCloseCancel(ctx)
@@ -147,6 +60,19 @@ func (c *Client) ReadCallerHostFile(ctx context.Context, path string) ([]byte, e
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
 	return msg.Data, nil
+}
+
+// Return the absolute path of the given path as calculated by the caller's host using OS-specific rules.
+func (c *Client) AbsPath(ctx context.Context, path string) (string, error) {
+	msg := fsutiltypes.Stat{}
+	err := c.diffcopy(ctx, engine.LocalImportOpts{
+		Path:           path,
+		GetAbsPathOnly: true,
+	}, &msg)
+	if err != nil {
+		return "", fmt.Errorf("failed to stat path: %w", err)
+	}
+	return msg.Path, nil
 }
 
 func (c *Client) StatCallerHostPath(ctx context.Context, path string, returnAbsPath bool) (*fsutiltypes.Stat, error) {

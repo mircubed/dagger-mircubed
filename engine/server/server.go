@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/content/local"
+	localcontentstore "github.com/containerd/containerd/content/local"
 	"github.com/containerd/containerd/diff/apply"
 	"github.com/containerd/containerd/diff/walking"
 	ctdmetadata "github.com/containerd/containerd/metadata"
@@ -21,6 +21,7 @@ import (
 	ctdsnapshot "github.com/containerd/containerd/snapshots"
 	"github.com/containerd/go-runc"
 	"github.com/containerd/platforms"
+	"github.com/dagger/dagger/engine/config"
 	controlapi "github.com/moby/buildkit/api/services/control"
 	apitypes "github.com/moby/buildkit/api/types"
 	bkcache "github.com/moby/buildkit/cache"
@@ -33,7 +34,7 @@ import (
 	registryremotecache "github.com/moby/buildkit/cache/remotecache/registry"
 	s3remotecache "github.com/moby/buildkit/cache/remotecache/s3"
 	bkclient "github.com/moby/buildkit/client"
-	"github.com/moby/buildkit/cmd/buildkitd/config"
+	bkconfig "github.com/moby/buildkit/cmd/buildkitd/config"
 	"github.com/moby/buildkit/executor/oci"
 	"github.com/moby/buildkit/frontend"
 	dockerfile "github.com/moby/buildkit/frontend/dockerfile/builder"
@@ -76,6 +77,7 @@ import (
 	"github.com/dagger/dagger/engine/sources/blob"
 	"github.com/dagger/dagger/engine/sources/gitdns"
 	"github.com/dagger/dagger/engine/sources/httpdns"
+	"github.com/dagger/dagger/engine/sources/local"
 )
 
 const (
@@ -111,14 +113,13 @@ type Server struct {
 	workerCacheMetaDB     *metadata.Store
 	workerCache           bkcache.Manager
 	workerSourceManager   *source.Manager
-	workerDefaultGCPolicy bkclient.PruneInfo
+	workerDefaultGCPolicy *bkclient.PruneInfo
 
 	bkSessionManager *bksession.Manager
 
-	solver        *solver.Solver
-	solverCacheDB *bboltcachestorage.Store
-	SolverCache   daggercache.Manager
-
+	solver               *solver.Solver
+	solverCacheDB        *bboltcachestorage.Store
+	SolverCache          daggercache.Manager
 	containerdMetaBoltDB *bolt.DB
 	containerdMetaDB     *ctdmetadata.DB
 	localContentStore    content.Store
@@ -160,8 +161,9 @@ type Server struct {
 	//
 	// gc related
 	//
-	throttledGC func()
-	gcmu        sync.Mutex
+	throttledGC                  func()
+	throttledReleaseUnreferenced func()
+	gcmu                         sync.Mutex
 
 	//
 	// session+client state
@@ -172,19 +174,21 @@ type Server struct {
 }
 
 type NewServerOpts struct {
-	Config *config.Config
-	Name   string
+	Name           string
+	Config         *config.Config
+	BuildkitConfig *bkconfig.Config
 }
 
 //nolint:gocyclo
 func NewServer(ctx context.Context, opts *NewServerOpts) (*Server, error) {
 	cfg := opts.Config
-	ociCfg := cfg.Workers.OCI
+	bkcfg := opts.BuildkitConfig
+	ociCfg := bkcfg.Workers.OCI
 
 	srv := &Server{
 		engineName: opts.Name,
 
-		rootDir: cfg.Root,
+		rootDir: bkcfg.Root,
 
 		frontends: map[string]frontend.Frontend{},
 
@@ -194,9 +198,9 @@ func NewServer(ctx context.Context, opts *NewServerOpts) (*Server, error) {
 		selinux:         ociCfg.SELinux,
 		entitlements:    entitlements.Set{},
 		dns: &oci.DNSConfig{
-			Nameservers:   cfg.DNS.Nameservers,
-			Options:       cfg.DNS.Options,
-			SearchDomains: cfg.DNS.SearchDomains,
+			Nameservers:   bkcfg.DNS.Nameservers,
+			Options:       bkcfg.DNS.Options,
+			SearchDomains: bkcfg.DNS.SearchDomains,
 		},
 
 		daggerSessions: make(map[string]*daggerSession),
@@ -244,12 +248,23 @@ func NewServer(ctx context.Context, opts *NewServerOpts) (*Server, error) {
 	// setup config derived from engine config
 	//
 
-	for _, entStr := range cfg.Entitlements {
-		ent, err := entitlements.Parse(entStr)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse entitlement %s: %w", entStr, err)
+	if cfg.Security != nil {
+		// prioritize out config first if it's set
+		if cfg.Security.InsecureRootCapabilities == nil || *cfg.Security.InsecureRootCapabilities {
+			srv.entitlements[entitlements.EntitlementSecurityInsecure] = struct{}{}
 		}
-		srv.entitlements[ent] = struct{}{}
+	} else if bkcfg.Entitlements != nil {
+		// fallback to the dagger config
+		for _, entStr := range bkcfg.Entitlements {
+			ent, err := entitlements.Parse(entStr)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse entitlement %s: %w", entStr, err)
+			}
+			srv.entitlements[ent] = struct{}{}
+		}
+	} else {
+		// no config? apply dagger-specific defaults
+		srv.entitlements[entitlements.EntitlementSecurityInsecure] = struct{}{}
 	}
 
 	srv.defaultPlatform = platforms.Normalize(platforms.DefaultSpec())
@@ -264,7 +279,7 @@ func NewServer(ctx context.Context, opts *NewServerOpts) (*Server, error) {
 		srv.enabledPlatforms = []ocispecs.Platform{srv.defaultPlatform}
 	}
 
-	srv.registryHosts = resolver.NewRegistryConfig(cfg.Registries)
+	srv.registryHosts = resolver.NewRegistryConfig(bkcfg.Registries)
 
 	if slog.Default().Enabled(ctx, slog.LevelExtraDebug) {
 		srv.buildkitLogSink = os.Stderr
@@ -284,7 +299,7 @@ func NewServer(ctx context.Context, opts *NewServerOpts) (*Server, error) {
 		return nil, fmt.Errorf("failed to create snapshotter: %w", err)
 	}
 
-	srv.localContentStore, err = local.NewStore(srv.contentStoreRootDir)
+	srv.localContentStore, err = localcontentstore.NewStore(srv.contentStoreRootDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create content store: %w", err)
 	}
@@ -323,12 +338,12 @@ func NewServer(ctx context.Context, opts *NewServerOpts) (*Server, error) {
 
 	var npResolvedMode string
 	srv.networkProviders, npResolvedMode, err = netproviders.Providers(netproviders.Opt{
-		Mode: cfg.Workers.OCI.NetworkConfig.Mode,
+		Mode: bkcfg.Workers.OCI.NetworkConfig.Mode,
 		CNI: cniprovider.Opt{
 			Root:       srv.rootDir,
-			ConfigPath: cfg.Workers.OCI.CNIConfigPath,
-			BinaryDir:  cfg.Workers.OCI.CNIBinaryPath,
-			PoolSize:   cfg.Workers.OCI.CNIPoolSize,
+			ConfigPath: bkcfg.Workers.OCI.CNIConfigPath,
+			BinaryDir:  bkcfg.Workers.OCI.CNIBinaryPath,
+			PoolSize:   bkcfg.Workers.OCI.CNIPoolSize,
 		},
 	})
 	if err != nil {
@@ -367,7 +382,7 @@ func NewServer(ctx context.Context, opts *NewServerOpts) (*Server, error) {
 		ID:        workerID,
 		Labels:    baseLabels,
 		Platforms: srv.enabledPlatforms,
-		GCPolicy:  getGCPolicy(ociCfg.GCConfig, srv.rootDir),
+		GCPolicy:  getGCPolicy(*cfg, ociCfg.GCConfig, srv.rootDir),
 		BuildkitVersion: bkclient.BuildkitVersion{
 			Package:  version.Package,
 			Version:  version.Version,
@@ -400,7 +415,7 @@ func NewServer(ctx context.Context, opts *NewServerOpts) (*Server, error) {
 	}
 	srv.workerCache = srv.baseWorker.CacheMgr
 	srv.workerSourceManager = srv.baseWorker.SourceManager
-	srv.workerDefaultGCPolicy = getDefaultGCPolicy(ociCfg.GCConfig, srv.rootDir)
+	srv.workerDefaultGCPolicy = getDefaultGCPolicy(*cfg, ociCfg.GCConfig, srv.rootDir)
 
 	logrus.Infof("found worker %q, labels=%v, platforms=%v", workerID, baseLabels, FormatPlatforms(srv.enabledPlatforms))
 	archutil.WarnIfUnsupported(srv.enabledPlatforms)
@@ -427,6 +442,14 @@ func NewServer(ctx context.Context, opts *NewServerOpts) (*Server, error) {
 		return nil, err
 	}
 	srv.workerSourceManager.Register(gs)
+
+	ls, err := local.NewSource(local.Opt{
+		CacheAccessor: srv.workerCache,
+	})
+	if err != nil {
+		return nil, err
+	}
+	srv.workerSourceManager.Register(ls)
 
 	bs, err := blob.NewSource(blob.Opt{
 		CacheAccessor: srv.workerCache,
@@ -527,6 +550,8 @@ func NewServer(ctx context.Context, opts *NewServerOpts) (*Server, error) {
 	})
 
 	srv.throttledGC = throttle.After(time.Minute, srv.gc)
+	// use longer interval for releaseUnreferencedCache deleting links quickly is less important
+	srv.throttledReleaseUnreferenced = throttle.After(5*time.Minute, func() { srv.SolverCache.ReleaseUnreferenced(context.Background()) })
 	defer func() {
 		time.AfterFunc(time.Second, srv.throttledGC)
 	}()

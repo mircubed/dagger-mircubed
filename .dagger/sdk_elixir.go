@@ -33,7 +33,7 @@ type ElixirSDK struct {
 
 // Lint the Elixir SDK
 func (t ElixirSDK) Lint(ctx context.Context) error {
-	eg, ctx := errgroup.WithContext(ctx)
+	eg := errgroup.Group{}
 	eg.Go(func() (rerr error) {
 		ctx, span := Tracer().Start(ctx, "lint the elixir source")
 		defer func() {
@@ -48,10 +48,8 @@ func (t ElixirSDK) Lint(ctx context.Context) error {
 			return err
 		}
 
-		_, err = t.elixirBase(elixirVersions[elixirLatestVersion]).
-			With(installer).
-			WithExec([]string{"mix", "lint"}).
-			Sync(ctx)
+		sdkDev, ctr := t.base(installer)
+		_, err = sdkDev.Lint(ctr).Sync(ctx)
 		return err
 	})
 	eg.Go(func() (rerr error) {
@@ -79,38 +77,9 @@ func (t ElixirSDK) Test(ctx context.Context) error {
 		return err
 	}
 
-	eg, ctx := errgroup.WithContext(ctx)
-	for elixirVersion, baseImage := range elixirVersions {
-		ctr := t.elixirBase(baseImage).With(installer)
-
-		ctx, span := Tracer().Start(ctx, "test - elixir/"+elixirVersion)
-		defer span.End()
-
-		eg.Go(func() error {
-			ctx, span := Tracer().Start(ctx, "dagger")
-			defer span.End()
-
-			_, err := ctr.
-				WithExec([]string{"mix", "test"}).
-				Sync(ctx)
-			return err
-		})
-
-		if elixirVersion == elixirLatestVersion {
-			eg.Go(func() error {
-				ctx, span := Tracer().Start(ctx, "dagger_codegen")
-				defer span.End()
-
-				_, err := ctr.
-					WithWorkdir("dagger_codegen").
-					WithExec([]string{"mix", "deps.get"}).
-					WithExec([]string{"mix", "test"}).
-					Sync(ctx)
-				return err
-			})
-		}
-	}
-	return eg.Wait()
+	sdkDev, ctr := t.base(installer)
+	_, err = sdkDev.Test(ctr).Sync(ctx)
+	return err
 }
 
 // Regenerate the Elixir SDK API
@@ -123,21 +92,15 @@ func (t ElixirSDK) Generate(ctx context.Context) (*dagger.Directory, error) {
 	if err != nil {
 		return nil, err
 	}
-	gen := t.elixirBase(elixirVersions[elixirLatestVersion]).
-		With(installer).
-		WithWorkdir("dagger_codegen").
-		WithMountedFile("/schema.json", introspection).
-		WithExec([]string{"mix", "dagger.codegen", "generate", "--introspection", "/schema.json", "--outdir", "gen"}).
-		WithExec([]string{"mix", "format", "gen/*.ex"}).
-		Directory("gen")
 
-	dir := dag.Directory().WithDirectory("sdk/elixir/lib/dagger/gen", gen)
-	return dir, nil
+	sdkDev, _ := t.base(installer)
+	ctr := sdkDev.WithBase(t.Dagger.Source().Directory(elixirSDKPath)).With(installer)
+	return sdkDev.Generate(ctr, introspection), nil
 }
 
 // Test the publishing process
 func (t ElixirSDK) TestPublish(ctx context.Context, tag string) error {
-	return t.Publish(ctx, tag, true, nil, "https://github.com/dagger/dagger.git", nil)
+	return t.Publish(ctx, tag, true, nil)
 }
 
 // Publish the Elixir SDK
@@ -149,19 +112,13 @@ func (t ElixirSDK) Publish(
 	dryRun bool,
 	// +optional
 	hexAPIKey *dagger.Secret,
-
-	// +optional
-	// +default="https://github.com/dagger/dagger.git"
-	gitRepoSource string,
-	// +optional
-	githubToken *dagger.Secret,
 ) error {
 	version := strings.TrimPrefix(tag, "sdk/elixir/")
-	mixFile := "/sdk/elixir/mix.exs"
 
 	ctr := t.elixirBase(elixirVersions[elixirLatestVersion])
 
-	if !dryRun {
+	if semver.IsValid(version) {
+		mixFile := "/sdk/elixir/mix.exs"
 		mixExs, err := t.Dagger.Source().File(mixFile).Contents(ctx)
 		if err != nil {
 			return err
@@ -184,19 +141,6 @@ func (t ElixirSDK) Publish(
 		return err
 	}
 
-	if semver.IsValid(version) {
-		if err := githubRelease(ctx, t.Dagger.Git, githubReleaseOpts{
-			tag:         "sdk/elixir/" + version,
-			target:      tag,
-			notes:       changeNotes(t.Dagger.Src, "sdk/elixir", version),
-			gitRepo:     gitRepoSource,
-			githubToken: githubToken,
-			dryRun:      dryRun,
-		}); err != nil {
-			return err
-		}
-	}
-
 	return nil
 }
 
@@ -213,6 +157,12 @@ func (t ElixirSDK) Bump(ctx context.Context, version string) (*dagger.Directory,
 	newContents := elixirVersionRe.ReplaceAllString(contents, newVersion)
 
 	return dag.Directory().WithNewFile(elixirSDKVersionFilePath, newContents), nil
+}
+
+func (t ElixirSDK) base(installer func(*dagger.Container) *dagger.Container) (*dagger.ElixirSDKDev, *dagger.Container) {
+	sdkDev := dag.ElixirSDKDev()
+	ctr := sdkDev.WithBase(t.Dagger.Source().Directory(elixirSDKPath)).With(installer)
+	return sdkDev, ctr
 }
 
 func (t ElixirSDK) elixirBase(baseImage string) *dagger.Container {

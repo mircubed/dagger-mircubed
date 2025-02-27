@@ -1,72 +1,74 @@
 {
   "name": "dagger-dev",
-  "engineVersion": "v0.13.7",
-  "sdk": "go",
+  "engineVersion": "v0.16.1",
+  "sdk": {
+    "source": "go"
+  },
+  "include": [
+    "engine/distconsts/**/*",
+    "sdk/typescript/runtime/**/*"
+  ],
   "dependencies": [
     {
       "name": "alpine",
-      "source": "modules/alpine",
-      "pin": ""
+      "source": "modules/alpine"
+    },
+    {
+      "name": "dagger-cli",
+      "source": "cmd/dagger"
     },
     {
       "name": "dirdiff",
-      "source": "modules/dirdiff",
-      "pin": ""
+      "source": "modules/dirdiff"
     },
     {
       "name": "docusaurus",
-      "source": "github.com/levlaz/daggerverse/docusaurus@e494cec1aa8f9faab1e0f12b2e5eea4a2321f2de",
-      "pin": "e494cec1aa8f9faab1e0f12b2e5eea4a2321f2de"
+      "source": "github.com/levlaz/daggerverse/docusaurus@main",
+      "pin": "47f5206067011dad0f581d4e7db7afddda32acd0"
     },
     {
-      "name": "gh",
-      "source": "github.com/sagikazarmark/daggerverse/gh",
-      "pin": "68e9daa611183f5334b4059bac6f4aad62da7a37"
+      "name": "dotnet-sdk-dev",
+      "source": "sdk/dotnet/dev"
+    },
+    {
+      "name": "elixir-sdk-dev",
+      "source": "sdk/elixir/dev"
     },
     {
       "name": "go",
-      "source": "modules/go",
-      "pin": ""
+      "source": "modules/go"
     },
     {
       "name": "graphql",
-      "source": "modules/graphql",
-      "pin": ""
+      "source": "modules/graphql"
     },
     {
-      "name": "k3s",
-      "source": "github.com/marcosnils/daggerverse/k3s@f4851a9c308410d58c5199dfd1b65e4f3ccae813",
-      "pin": "f4851a9c308410d58c5199dfd1b65e4f3ccae813"
+      "name": "helm",
+      "source": "helm"
     },
     {
       "name": "php-sdk-dev",
-      "source": "sdk/php/dev",
-      "pin": ""
+      "source": "sdk/php/dev"
     },
     {
       "name": "ps-analyzer",
-      "source": "modules/ps-analyzer",
-      "pin": ""
+      "source": "modules/ps-analyzer"
     },
     {
       "name": "python-sdk-dev",
-      "source": "sdk/python/dev",
-      "pin": ""
+      "source": "sdk/python/dev"
     },
     {
       "name": "shellcheck",
-      "source": "modules/shellcheck",
-      "pin": ""
+      "source": "modules/shellcheck"
     },
     {
       "name": "version",
-      "source": "version",
-      "pin": ""
+      "source": "version"
     },
     {
       "name": "wolfi",
-      "source": "modules/wolfi",
-      "pin": ""
+      "source": "modules/wolfi"
     }
   ],
   "source": ".dagger"

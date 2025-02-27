@@ -15,7 +15,6 @@ if [[ -n "$_EXPERIMENTAL_DAGGER_CLI_BIN" ]]; then
     export PATH=$(dirname "$_EXPERIMENTAL_DAGGER_CLI_BIN"):$PATH
 fi
 
-GITHUB_OUTPUT="${GITHUB_OUTPUT:=github-output.txt}"
 GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:=github-summary.md}"
 export NO_COLOR="${NO_COLOR:=1}" # Disable colors in dagger logs
 
@@ -33,8 +32,13 @@ tmp=$(mktemp -d)
     mkfifo stdout.fifo stderr.fifo
 
     # Set up tee to capture and display stdout and stderr
-    tee stdout.txt < stdout.fifo &
-    tee stderr.txt < stderr.fifo >&2 &
+    if [ -n "$NO_OUTPUT" ]; then
+        tee stdout.txt < stdout.fifo > /dev/null &
+        tee stderr.txt < stderr.fifo > /dev/null &
+    else
+        tee stdout.txt < stdout.fifo &
+        tee stderr.txt < stderr.fifo >&2 &
+    fi
 )
 
 # Run the command, capturing stdout and stderr in the FIFOs
@@ -47,17 +51,6 @@ wait
 
 # Extra trace URL
 TRACE_URL=$(sed -En 's/^Full trace at (.*)/\1/p' < $tmp/stderr.txt)
-
-# Expose the outputs as GitHub Actions step outputs directly from the files
-# Multi-line outputs are handled with the '<<EOF' syntax
-{
-    echo 'stdout<<EOF'
-    cat "$tmp/stdout.txt"
-    echo 'EOF'
-    echo 'stderr<<EOF'
-    cat "$tmp/stderr.txt"
-    echo 'EOF'
-} > "${GITHUB_OUTPUT}"
 
 {
 cat <<'.'
@@ -126,5 +119,8 @@ cat <<'.'
 .
 
 } >"${GITHUB_STEP_SUMMARY}"
+
+echo "stdout_file=$tmp/stdout.txt" >>"$GITHUB_OUTPUT"
+echo "stderr_file=$tmp/stderr.txt" >>"$GITHUB_OUTPUT"
 
 exit $EXIT_CODE

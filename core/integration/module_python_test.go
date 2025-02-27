@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dagger/dagger/testctx"
+	"github.com/dagger/testctx"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 
@@ -19,7 +19,7 @@ import (
 type PythonSuite struct{}
 
 func TestPython(t *testing.T) {
-	testctx.Run(testCtx, t, PythonSuite{}, Middleware()...)
+	testctx.New(t, Middleware()...).RunTests(PythonSuite{})
 }
 
 func (PythonSuite) TestInit(ctx context.Context, t *testctx.T) {
@@ -69,7 +69,7 @@ func (PythonSuite) TestInit(ctx context.Context, t *testctx.T) {
 			With(daggerExec("develop", "--sdk=python", "--source=.")).
 			Sync(ctx)
 
-		require.ErrorContains(t, err, "no python files found")
+		requireErrOut(t, err, "no python files found")
 	})
 
 	t.Run("uses expected field casing", func(ctx context.Context, t *testctx.T) {
@@ -93,28 +93,6 @@ func (PythonSuite) TestInit(ctx context.Context, t *testctx.T) {
 
 		require.NoError(t, err)
 		require.JSONEq(t, `{"helloWorld":{"message":"Hello, Monde!"}}`, out)
-	})
-
-	t.Run("fail if --merge is specified", func(ctx context.Context, t *testctx.T) {
-		c := connect(ctx, t)
-
-		_, err := daggerCliBase(t, c).
-			With(daggerInitPython("--name=hello-world", "--merge")).
-			With(pythonSource(`
-                from dagger import field, function, object_type
-
-                @object_type
-                class HelloWorld:
-                    my_name: str = field(default="World")
-
-                    @function
-                    def message(self) -> str:
-                        return f"Hello, {self.my_name}!"
-            `)).
-			With(daggerQuery(`{helloWorld(myName: "Monde"){message}}`)).
-			Stdout(ctx)
-
-		require.ErrorContains(t, err, "merge is only supported")
 	})
 
 	t.Run("init module in .dagger if files present in current dir", func(ctx context.Context, t *testctx.T) {
@@ -209,6 +187,19 @@ class HelloWorld:
 		out, err := modGen.With(daggerQuery(`{helloWorld{message}}`)).Stdout(ctx)
 		require.NoError(t, err)
 		require.JSONEq(t, `{"helloWorld":{"message":"Hello, World!"}}`, out)
+	})
+
+	t.Run("module name with number", func(ctx context.Context, t *testctx.T) {
+		c := connect(ctx, t)
+
+		out, err := daggerCliBase(t, c).
+			With(daggerExec("init", "--sdk=python", "project2")).
+			WithExec([]string{"test", "-f", "project2/src/project_2/main.py"}).
+			With(daggerCallAt("project2", "container-echo", "--string-arg", "hello", "stdout")).
+			Stdout(ctx)
+
+		require.NoError(t, err)
+		require.Equal(t, "hello\n", out)
 	})
 
 	t.Run("different dagger and python project names", func(ctx context.Context, t *testctx.T) {
@@ -802,8 +793,8 @@ func (PythonSuite) TestUv(ctx context.Context, t *testctx.T) {
 			Stdout(ctx)
 
 		t.Logf("out: %s", out)
-		require.ErrorContains(t, err, "pip is looking at multiple versions of test")
-		require.ErrorContains(t, err, "requires a different Python")
+		requireErrOut(t, err, "pip is looking at multiple versions of test")
+		requireErrOut(t, err, "requires a different Python")
 	})
 
 	t.Run("pinned version", func(ctx context.Context, t *testctx.T) {
@@ -834,7 +825,7 @@ class Test:
 			// newer feature.
 			With(pyprojectExtra(nil, `
                 [tool.dagger]
-                uv-version = "0.4.5"
+                uv-version = "0.5.20"
             `)).
 			With(source).
 			With(daggerInitPython()).
@@ -842,7 +833,7 @@ class Test:
 			Stdout(ctx)
 
 		require.NoError(t, err)
-		require.Equal(t, "0.4.5", out)
+		require.Equal(t, "0.5.20", out)
 	})
 
 	t.Run("index-url", func(ctx context.Context, t *testctx.T) {
@@ -886,49 +877,6 @@ class Test:
 			require.Equal(t, "https://test.pypi.org/simple\nhttps://pypi.org/simple\n", out)
 		})
 
-		t.Run("backwards compat", func(ctx context.Context, t *testctx.T) {
-			c := connect(ctx, t)
-
-			out, err := daggerCliBase(t, c).
-				With(source).
-				With(pyprojectExtra(nil, `
-                    [tool.uv]
-                    index-url = "https://test.pypi.org/simple"
-                    extra-index-url = "https://pypi.org/simple"
-                `)).
-				With(daggerInitPython()).
-				With(daggerCall("urls")).
-				Stdout(ctx)
-
-			require.NoError(t, err)
-			require.Equal(t, "https://test.pypi.org/simple\nhttps://pypi.org/simple\n", out)
-		})
-
-		t.Run("preference", func(ctx context.Context, t *testctx.T) {
-			c := connect(ctx, t)
-
-			out, err := daggerCliBase(t, c).
-				With(source).
-				With(pyprojectExtra(nil, `
-                    [tool.uv]
-                    index-url = "https://test.example.org/simple"
-                    extra-index-url = "https://example.org/simple"
-
-                    [[tool.uv.index]]
-                    url = "https://test.pypi.org/simple"
-                    default = true
-
-                    [[tool.uv.index]]
-                    url = "https://pypi.org/simple"
-                `)).
-				With(daggerInitPython()).
-				With(daggerCall("urls")).
-				Stdout(ctx)
-
-			require.NoError(t, err)
-			require.Equal(t, "https://test.pypi.org/simple\nhttps://pypi.org/simple\n", out)
-		})
-
 		t.Run("without", func(ctx context.Context, t *testctx.T) {
 			c := connect(ctx, t)
 
@@ -955,7 +903,9 @@ class Test:
 				With(daggerInitPython()).
 				Sync(ctx)
 
-			require.ErrorContains(t, err, "Failed to prepare distributions")
+			// hatchling is a build requirement so it will fail to build if the index
+			// is unreachable
+			requireErrOut(t, err, "hatchling")
 		})
 	})
 }
@@ -1401,7 +1351,7 @@ func (PythonSuite) TestDocs(ctx context.Context, t *testctx.T) {
         `)
 
 		_, err := modGen.With(daggerCall("--help")).Sync(ctx)
-		require.ErrorContains(t, err, "InitVar[typing.Annotated[str, Doc('A URL')]]")
+		requireErrOut(t, err, "InitVar[typing.Annotated[str, Doc('A URL')]]")
 	})
 
 	t.Run("alternative constructor", func(ctx context.Context, t *testctx.T) {
@@ -1633,7 +1583,7 @@ func (PythonSuite) TestWithOtherModuleTypes(ctx context.Context, t *testctx.T) {
 				With(daggerFunctions()).
 				Sync(ctx)
 			require.Error(t, err)
-			require.ErrorContains(t, err, fmt.Sprintf(
+			requireErrOut(t, err, fmt.Sprintf(
 				"object %q function %q cannot return external type from dependency module %q",
 				"Test", "fn", "dep",
 			))
@@ -1653,7 +1603,7 @@ func (PythonSuite) TestWithOtherModuleTypes(ctx context.Context, t *testctx.T) {
 				With(daggerFunctions()).
 				Sync(ctx)
 			require.Error(t, err)
-			require.ErrorContains(t, err, fmt.Sprintf(
+			requireErrOut(t, err, fmt.Sprintf(
 				"object %q function %q cannot return external type from dependency module %q",
 				"Test", "fn", "dep",
 			))
@@ -1674,7 +1624,7 @@ func (PythonSuite) TestWithOtherModuleTypes(ctx context.Context, t *testctx.T) {
 				With(daggerFunctions()).
 				Sync(ctx)
 			require.Error(t, err)
-			require.ErrorContains(t, err, fmt.Sprintf(
+			requireErrOut(t, err, fmt.Sprintf(
 				"object %q function %q arg %q cannot reference external type from dependency module %q",
 				"Test", "fn", "obj", "dep",
 			))
@@ -1693,7 +1643,7 @@ func (PythonSuite) TestWithOtherModuleTypes(ctx context.Context, t *testctx.T) {
 				With(daggerFunctions()).
 				Sync(ctx)
 			require.Error(t, err)
-			require.ErrorContains(t, err, fmt.Sprintf(
+			requireErrOut(t, err, fmt.Sprintf(
 				"object %q function %q arg %q cannot reference external type from dependency module %q",
 				"Test", "fn", "obj", "dep",
 			))
@@ -1719,7 +1669,7 @@ func (PythonSuite) TestWithOtherModuleTypes(ctx context.Context, t *testctx.T) {
 				With(daggerFunctions()).
 				Sync(ctx)
 			require.Error(t, err)
-			require.ErrorContains(t, err, fmt.Sprintf(
+			requireErrOut(t, err, fmt.Sprintf(
 				"object %q field %q cannot reference external type from dependency module %q",
 				"Obj", "foo", "dep",
 			))
@@ -1743,7 +1693,7 @@ func (PythonSuite) TestWithOtherModuleTypes(ctx context.Context, t *testctx.T) {
 				With(daggerFunctions()).
 				Sync(ctx)
 			require.Error(t, err)
-			require.ErrorContains(t, err, fmt.Sprintf(
+			requireErrOut(t, err, fmt.Sprintf(
 				"object %q field %q cannot reference external type from dependency module %q",
 				"Obj", "foo", "dep",
 			))

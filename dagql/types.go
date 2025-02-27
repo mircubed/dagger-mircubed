@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/opencontainers/go-digest"
 	"github.com/vektah/gqlparser/v2/ast"
 	"golang.org/x/exp/constraints"
 
@@ -47,7 +48,10 @@ type ObjectType interface {
 	//
 	// Unlike natively added fields, the extended func is limited to the external
 	// Object interface.
-	Extend(spec FieldSpec, fun FieldFunc)
+	// cacheKeyFun is optional, if not set the default dagql ID cache key will be used.
+	Extend(spec FieldSpec, fun FieldFunc, cacheKeyFun FieldCacheKeyFunc)
+	// FieldSpec looks up a field spec by name.
+	FieldSpec(name string, views ...string) (FieldSpec, bool)
 }
 
 type IDType interface {
@@ -59,6 +63,11 @@ type IDType interface {
 // FieldFunc is a function that implements a field on an object while limited
 // to the object's external interface.
 type FieldFunc func(context.Context, Object, map[string]Input) (Typed, error)
+
+// FieldCacheKeyFunc is a function that computes a cache key for a field on an object. The cache key
+// will be used to cache the result of the field call in dagql's cache and serve as the digest of the
+// call's ID.
+type FieldCacheKeyFunc func(context.Context, Object, map[string]Input, digest.Digest) (digest.Digest, error)
 
 type IDable interface {
 	// ID returns the ID of the value.
@@ -72,15 +81,22 @@ type Object interface {
 	IDable
 	// ObjectType returns the type of the object.
 	ObjectType() ObjectType
-	// IDFor returns the ID representing the return value of the given field.
-	IDFor(context.Context, Selector) (*call.ID, error)
-	// Select evaluates the selected field and returns the result.
+
+	// Call evaluates the field selected by the given ID and returns the result.
 	//
 	// The returned value is the raw Typed value returned from the field; it must
 	// be instantiated with a class for further selection.
 	//
 	// Any Nullable values are automatically unwrapped.
-	Select(context.Context, Selector) (Typed, error)
+	Call(context.Context, *Server, *call.ID) (Typed, *call.ID, error)
+
+	// Select evaluates the field selected by the given selector and returns the result.
+	//
+	// The returned value is the raw Typed value returned from the field; it must
+	// be instantiated with a class for further selection.
+	//
+	// Any Nullable values are automatically unwrapped.
+	Select(context.Context, *Server, Selector) (Typed, *call.ID, error)
 }
 
 // ScalarType represents a GraphQL Scalar type.
@@ -118,6 +134,27 @@ type InputDecoder interface {
 	DecodeInput(any) (Input, error)
 }
 
+// Wrapper is an interface for types that wrap another type.
+type Wrapper interface {
+	Unwrap() Typed
+}
+
+// UnwrapAs attempts casting val to T, unwrapping as necessary.
+//
+// NOTE: the order of operations is important here - it's important to first
+// check compatibility with T before unwrapping, since sometimes T also
+// implements Wrapper.
+func UnwrapAs[T any](val any) (T, bool) {
+	t, ok := val.(T)
+	if ok {
+		return t, true
+	}
+	if wrapper, ok := val.(Wrapper); ok {
+		return UnwrapAs[T](wrapper.Unwrap())
+	}
+	return t, false
+}
+
 // Int is a GraphQL Int scalar.
 type Int int64
 
@@ -142,8 +179,6 @@ func (i Int) TypeDefinition(views ...string) *ast.Definition {
 
 func (Int) DecodeInput(val any) (Input, error) {
 	switch x := val.(type) {
-	case nil:
-		return NewInt(0), nil
 	case int:
 		return NewInt(x), nil
 	case int32:
@@ -241,8 +276,6 @@ func (f Float) TypeDefinition(views ...string) *ast.Definition {
 
 func (Float) DecodeInput(val any) (Input, error) {
 	switch x := val.(type) {
-	case nil:
-		return NewFloat(float64(0)), nil
 	case float32:
 		return NewFloat(float64(x)), nil
 	case float64:
@@ -344,8 +377,6 @@ func (b Boolean) TypeDefinition(views ...string) *ast.Definition {
 
 func (Boolean) DecodeInput(val any) (Input, error) {
 	switch x := val.(type) {
-	case nil:
-		return NewBoolean(false), nil
 	case bool:
 		return NewBoolean(x), nil
 	case string: // from default
@@ -431,8 +462,6 @@ func (s String) TypeDefinition(views ...string) *ast.Definition {
 
 func (String) DecodeInput(val any) (Input, error) {
 	switch x := val.(type) {
-	case nil:
-		return NewString(""), nil
 	case string:
 		return NewString(x), nil
 	default:
@@ -766,14 +795,11 @@ func (a ArrayInput[S]) Decoder() InputDecoder {
 var _ InputDecoder = ArrayInput[Input]{}
 
 func (a ArrayInput[I]) DecodeInput(val any) (Input, error) {
-	var zero I
-	decoder := zero.Decoder()
-
-	if val == nil {
-		val = []any{}
-	}
 	switch x := val.(type) {
 	case []any:
+		var zero I
+		decoder := zero.Decoder()
+
 		arr := make(ArrayInput[I], len(x))
 		for i, val := range x {
 			elem, err := decoder.DecodeInput(val)
@@ -996,6 +1022,10 @@ func (e *EnumValueName) DecodeInput(val any) (Input, error) {
 		return &EnumValueName{Enum: e.Enum, Value: x.Value}, nil
 	case string:
 		return &EnumValueName{Enum: e.Enum, Value: x}, nil
+	case bool:
+		return nil, fmt.Errorf("invalid enum value %t", x)
+	case nil:
+		return nil, fmt.Errorf("invalid enum value null")
 	default:
 		return nil, fmt.Errorf("cannot create enum name from %T", x)
 	}

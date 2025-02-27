@@ -3,23 +3,19 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/csv"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strconv"
 	"strings"
 
 	"github.com/containerd/platforms"
-	"github.com/dagger/dagger/engine/client"
+	"github.com/dagger/dagger/engine/client/pathutil"
 	"github.com/moby/buildkit/util/gitutil"
 	"github.com/spf13/pflag"
 
@@ -317,40 +313,37 @@ func (v *directoryValue) Get(ctx context.Context, dag *dagger.Client, modSrc *da
 	// Try parsing as a Git URL
 	gitURL, err := parseGitURL(v.String())
 	if err == nil {
-		// TODO: use modArg.Ignore if not empty
-		return makeGitDirectory(gitURL, dag), nil
+		return dag.Directory().
+			WithDirectory(
+				"/",
+				makeGitDirectory(gitURL, dag),
+				dagger.DirectoryWithDirectoryOpts{
+					Exclude: modArg.Ignore,
+				}), nil
 	}
 
 	// Otherwise it's a local dir path. Allow `file://` scheme or no scheme.
 	path := v.String()
 	path = strings.TrimPrefix(path, "file://")
 
-	// The core module doesn't have a ModuleSource.
-	if modSrc == nil {
-		// TODO: use modArg.Ignore if not empty
-		return dag.Host().Directory(path), nil
-	}
-
-	// Check if there's a :view.
-	// This technically prevents use of paths containing a ":", but that's
-	// generally considered a no-no anyways since it isn't in the
-	// POSIX "portable filename character set":
-	// https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap03.html#tag_03_282
-	path, viewName, _ := strings.Cut(path, ":")
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
 	}
-	path, err = client.ExpandHomeDir(homeDir, path)
+	path, err = pathutil.ExpandHomeDir(homeDir, path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to expand home directory: %w", err)
 	}
-	path = filepath.ToSlash(path) // make windows paths usable in the Linux engine container
+	if !filepath.IsAbs(path) {
+		path, err = pathutil.Abs(path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve absolute path: %w", err)
+		}
+	}
 
-	return modSrc.ResolveDirectoryFromCaller(path, dagger.ModuleSourceResolveDirectoryFromCallerOpts{
-		ViewName: viewName,
-		Ignore:   modArg.Ignore,
-	}).Sync(ctx)
+	return dag.Host().Directory(path, dagger.HostDirectoryOpts{
+		Exclude: modArg.Ignore,
+	}), nil
 }
 
 // makeGitDirectory creates a dagger.Directory object from a parsed gitutil.GitURL
@@ -447,11 +440,11 @@ func (v *fileValue) Get(_ context.Context, dag *dagger.Client, _ *dagger.ModuleS
 		if err != nil {
 			return nil, err
 		}
-		vStr, err = client.ExpandHomeDir(homeDir, vStr)
+		vStr, err = pathutil.ExpandHomeDir(homeDir, vStr)
 		if err != nil {
 			return nil, fmt.Errorf("failed to expand home directory: %w", err)
 		}
-		vStr, err = filepath.Abs(vStr)
+		vStr, err = pathutil.Abs(vStr)
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve absolute path: %w", err)
 		}
@@ -464,96 +457,35 @@ func (v *fileValue) Get(_ context.Context, dag *dagger.Client, _ *dagger.ModuleS
 // secretValue is a pflag.Value that builds a dagger.Secret from a name and a
 // plaintext value.
 type secretValue struct {
-	secretSource string
-	sourceVal    string
+	uri string
 }
-
-const (
-	envSecretSource     = "env"
-	fileSecretSource    = "file"
-	commandSecretSource = "cmd"
-)
 
 func (v *secretValue) Type() string {
 	return Secret
 }
 
 func (v *secretValue) Set(s string) error {
-	secretSource, val, ok := strings.Cut(s, ":")
-	if !ok {
-		// case of e.g. `--token MY_ENV_SECRET`, which is shorthand for `--token env:MY_ENV_SECRET`
-		val = secretSource
-		secretSource = envSecretSource
+	if !strings.Contains(s, ":") {
+		// case of e.g. `--token MY_ENV_SECRET`, which is shorthand for `--token env://MY_ENV_SECRET`
+		s = "env://" + s
 	}
-	v.secretSource = secretSource
-	v.sourceVal = val
+	// legacy secrets in the form of `--token env:MY_ENV_SECRET` instead of `env://MY_ENV_SECRET`
+	secretSource, val, _ := strings.Cut(s, ":")
+	if !strings.HasPrefix(val, "//") {
+		s = secretSource + "://" + val
+	}
+
+	v.uri = s
 
 	return nil
 }
 
 func (v *secretValue) String() string {
-	if v.sourceVal == "" {
-		return ""
-	}
-	return fmt.Sprintf("%s:%s", v.secretSource, v.sourceVal)
+	return v.uri
 }
 
 func (v *secretValue) Get(ctx context.Context, c *dagger.Client, _ *dagger.ModuleSource, _ *modFunctionArg) (any, error) {
-	var plaintext string
-
-	switch v.secretSource {
-	case envSecretSource:
-		envPlaintext, ok := os.LookupEnv(v.sourceVal)
-		if !ok {
-			// Don't show the entire env var name, in case the user accidentally passed the value instead...
-			// This is important because users originally *did* have to pass the value, before we changed to
-			// passing by name instead.
-			key := v.sourceVal
-			if len(key) >= 4 {
-				key = key[:3] + "..."
-			}
-			return nil, fmt.Errorf("secret env var not found: %q", key)
-		}
-		plaintext = envPlaintext
-
-	case fileSecretSource:
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return nil, err
-		}
-		sourceVal, err := client.ExpandHomeDir(homeDir, v.sourceVal)
-		if err != nil {
-			return nil, err
-		}
-		filePlaintext, err := os.ReadFile(sourceVal)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read secret file %q: %w", v.sourceVal, err)
-		}
-		plaintext = string(filePlaintext)
-
-	case commandSecretSource:
-		var stdoutBytes []byte
-		var err error
-		if runtime.GOOS == "windows" {
-			stdoutBytes, err = exec.CommandContext(ctx, "cmd.exe", "/C", v.sourceVal).Output()
-		} else {
-			// #nosec G204
-			stdoutBytes, err = exec.CommandContext(ctx, "sh", "-c", v.sourceVal).Output()
-		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to run secret command %q: %w", v.sourceVal, err)
-		}
-		plaintext = string(stdoutBytes)
-
-	default:
-		return nil, fmt.Errorf("unsupported secret arg source: %q", v.secretSource)
-	}
-
-	// NB: If we allow getting the name from the dagger.Secret instance,
-	// it can be vulnerable to brute force attacks.
-	hash := sha256.Sum256([]byte(plaintext))
-	secretName := hex.EncodeToString(hash[:])
-	return c.SetSecret(secretName, plaintext), nil
+	return c.Secret(v.uri), nil
 }
 
 // serviceValue is a pflag.Value that builds a dagger.Service from a host:port
@@ -750,11 +682,7 @@ func (v *moduleValue) Get(ctx context.Context, dag *dagger.Client, _ *dagger.Mod
 	if v.ref == "" {
 		return nil, fmt.Errorf("module ref cannot be empty")
 	}
-	modConf, err := getModuleConfigurationForSourceRef(ctx, dag, v.ref, true, true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get module configuration: %w", err)
-	}
-	return modConf.Source.AsModule(), nil
+	return dag.ModuleSource(v.ref).AsModule().Sync(ctx)
 }
 
 type moduleSourceValue struct {
@@ -781,11 +709,7 @@ func (v *moduleSourceValue) Get(ctx context.Context, dag *dagger.Client, _ *dagg
 	if v.ref == "" {
 		return nil, fmt.Errorf("module source ref cannot be empty")
 	}
-	modConf, err := getModuleConfigurationForSourceRef(ctx, dag, v.ref, true, true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get module configuration: %w", err)
-	}
-	return modConf.Source, nil
+	return dag.ModuleSource(v.ref).Sync(ctx)
 }
 
 type platformValue struct {
@@ -839,6 +763,11 @@ func (r *modFunctionArg) AddFlag(flags *pflag.FlagSet) error {
 	case dagger.TypeDefKindIntegerKind:
 		val, _ := getDefaultValue[int](r)
 		flags.Int(name, val, usage)
+		return nil
+
+	case dagger.TypeDefKindFloatKind:
+		val, _ := getDefaultValue[float64](r)
+		flags.Float64(name, val, usage)
 		return nil
 
 	case dagger.TypeDefKindBooleanKind:
@@ -928,6 +857,11 @@ func (r *modFunctionArg) AddFlag(flags *pflag.FlagSet) error {
 		case dagger.TypeDefKindIntegerKind:
 			val, _ := getDefaultValue[[]int](r)
 			flags.IntSlice(name, val, usage)
+			return nil
+
+		case dagger.TypeDefKindFloatKind:
+			val, _ := getDefaultValue[[]float64](r)
+			flags.Float64Slice(name, val, usage)
 			return nil
 
 		case dagger.TypeDefKindBooleanKind:
